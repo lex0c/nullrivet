@@ -66,6 +66,9 @@ export interface TurnDependencies {
   // Text sent at the start of the first user message of every request, such as the project
   // instructions of the working directory; empty for none.
   projectContext: () => string;
+  // Called whenever the conversation is in a consistent state worth keeping: after each step's
+  // tool results and after a compaction. It must not throw.
+  checkpoint?: () => Promise<void>;
   instructions: InstructionsLoader | null;
   limits: LoopLimits;
   effort?: ProviderEffort;
@@ -329,6 +332,7 @@ export const runTurn = async (
       });
       if (outcome === null) return 'skipped';
       usage = addUsage(usage, outcome.usage);
+      await deps.checkpoint?.();
       return 'done';
     } catch (error) {
       if (signal.aborted || error instanceof AbortError) return 'aborted';
@@ -521,6 +525,7 @@ export const runTurn = async (
       emit({ type: 'warning', message: `invalid tool call: ${describeErrors(invalidCalls)}` });
       conversation.appendUser(invalidToolCallFeedback(invalidCalls));
     }
+    await deps.checkpoint?.();
     if (signal.aborted) return end('aborted');
     overflowRecovered = false;
   }

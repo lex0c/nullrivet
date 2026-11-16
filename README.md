@@ -11,7 +11,8 @@ nothing of the session remains except the changes the tools made on purpose.
 > long conversations are compacted automatically, and Anthropic, OpenAI, Google (Gemini), xAI
 > (Grok), Ollama and OpenRouter models are supported.
 
-- **Ephemeral.** No database, history, logs, caches or configuration files. See
+- **Ephemeral.** No database, history, logs, caches or configuration files. A conversation is
+  saved only to a file you name with `--session`. See
   [What nullrivet does not store](#what-nullrivet-does-not-store).
 - **Two execution modes.** `auto` runs every tool without confirmation; `readonly` exposes only
   read tools and is enforced by the executor, not just by the prompt.
@@ -121,6 +122,7 @@ reads it until end of file, so programs that start nullrivet without piping anyt
 | `--no-agents` | Do not load `AGENTS.md` files. |
 | `--max-steps <n>` | Maximum number of model requests for the task (default 200). |
 | `--timeout <time>` | Time limit for the task: `90s`, `30m`, `2h`, or seconds without a unit, at most `596h`. When it passes, the task is stopped like an interrupt and ends at a limit (exit code 3). No limit by default. |
+| `--session <file>` | Save the conversation to this file and continue it if the file already holds one. See [Sessions](#sessions). |
 | `--context-window <n>` | Override the model's context window, in tokens. |
 | `--max-output <n>` | Override the model's output token limit. |
 | `-h, --help` | Show help. |
@@ -166,7 +168,8 @@ In an interactive session, see [Keys](#keys).
 ## Interactive session
 
 `nullrivet` with no prompt opens a session in the terminal. The conversation is kept in memory
-between prompts until `/clear` or until you exit. Finished output (your prompts, answers, tool
+between prompts until `/clear` or until you exit; to keep it beyond that, save it to a file (see
+[Sessions](#sessions)). Finished output (your prompts, answers, tool
 results) goes to the terminal's normal scrollback; only the task in progress, the input box and
 the status line are redrawn at the bottom. Answers are rendered as Markdown while they stream.
 
@@ -203,12 +206,13 @@ While a task runs you can type the next prompt, but it can only be sent once the
 | `/effort [low\|medium\|high\|xhigh\|max\|off]` | Show or set the reasoning effort. |
 | `/permission [auto\|readonly]` | Show or change the execution mode; it applies from the next tool call. |
 | `/compact [focus]` | Summarize the older part of the conversation now; the focus guides the summary. |
-| `/clear` | Discard the conversation and clear the screen. |
+| `/clear` | Discard the conversation and clear the screen. A session file stops being saved and keeps the cleared conversation. |
 | `/instructions [reload]` | List the loaded `AGENTS.md` files, or read them again. |
-| `/stats` | Show the token usage of the session. |
+| `/stats` | Show the token usage since nullrivet started. |
+| `/session [file\|off]` | Show the session file, start saving to a new file, or stop saving. See [Sessions](#sessions). |
 | `/exit` | Exit. |
 
-`/model`, `/compact` and `/clear` cannot be used while a task runs. An unknown command is not sent anywhere
+`/model`, `/compact`, `/clear` and `/session` cannot be used while a task runs. An unknown command is not sent anywhere
 and stays in the input; to send text that starts with `/` as a prompt, begin it with a space. How the interface works is described in
 [docs/TUI.md](docs/TUI.md).
 
@@ -322,11 +326,48 @@ nullrivet --json --permission readonly "List the TODOs in src" | jq -c 'select(.
 Configuration errors found before the task starts, such as an unknown model or missing
 credentials, are reported as an `error` event as well. Invalid options are reported on stderr.
 
+## Sessions
+
+By default nothing outlives the process. To continue a conversation later, save it to a file you
+name:
+
+```bash
+nullrivet --session work.json                # interactive; continues work.json if it exists
+nullrivet --session ci.json "Run the tests and list the failures"
+nullrivet --session ci.json "Fix the first failure"   # same conversation, next step
+```
+
+- The file is written after each step of the agent, after each compaction, when a task ends and
+  when you leave the interactive session, so a crash or a killed process loses at most the step
+  in progress. Writes are atomic: the file holds either the previous state or the new one. Model,
+  effort and mode changes made with `/model`, `/effort` and `/permission` are saved too.
+- Continuing a session uses the model it was last run with, unless `--model` or `NULLRIVET_MODEL`
+  chooses another. Effort works the same way. The execution mode is never taken from the file:
+  pass `--permission readonly` again to keep a session read-only, and a warning says so when a
+  read-only session continues in `auto`.
+- `AGENTS.md` files are read again from disk; subagents are not saved.
+- In the interactive session, `/session <file>` starts saving to a new file at any point. If a
+  file was already in use, it keeps the conversation as it was until then, so switching files
+  forks the session. `/session off` stops saving and keeps the file; `/session` shows its state.
+  `/session` never overwrites a file that already holds a session, and `/clear` stops saving
+  rather than erasing the file: it keeps the cleared conversation.
+- If the file is changed by something else while nullrivet runs (another nullrivet, an editor),
+  nullrivet stops saving to it and warns, rather than overwriting that change.
+
+The file holds your prompts and the output of the tools, which can include secrets read from
+files. It is created readable by you only (mode 0600); keep it out of repositories. Its history is
+loaded with the authority of your own messages, so only continue sessions you created: a file that
+is not exactly a nullrivet session file, or whose history breaks the rules the agent keeps
+(alternating roles, every tool call answered), is refused and left untouched. Symbolic links and
+files over 64 MiB are refused too; a session that grows past that size stops being saved, with a
+warning, and its file keeps the last state that can be continued.
+
 ## What nullrivet does not store
 
-nullrivet creates no `.nullrivet` directory, database, history, log, cache or configuration file,
-and it does not record prompts, messages, tool calls or token usage anywhere. Restarting it never
-restores a previous session.
+Without `--session`, nullrivet creates no `.nullrivet` directory, database, history, log, cache or
+configuration file, and it does not record prompts, messages, tool calls or token usage anywhere.
+Restarting it never restores a previous session. With `--session` or `/session`, the conversation
+is written to the file you named, and nowhere else.
 
 This covers nullrivet itself. Commands the agent runs, the shell, the operating system and the
 model provider may keep their own records, and the changes the tools make are, of course, kept.

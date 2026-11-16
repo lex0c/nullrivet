@@ -11,6 +11,7 @@ import { BUILTIN_TOOLS } from '../tools/index.ts';
 import { parseCli, USAGE, UsageError } from './args.ts';
 import { createJsonSink, createPlainSink } from './output.ts';
 import { runRepl } from './repl.ts';
+import { type SessionData, SessionFile, SessionLink } from './session-file.ts';
 
 export const EXIT_CODES: Record<AgentEndReason | 'usage', number> = {
   done: 0,
@@ -98,9 +99,22 @@ export const runCli = async (io: CliIO): Promise<number> => {
     return fail(`--cwd does not exist: ${cwd}`);
   }
 
-  if (config.model === undefined) {
+  // Relative to where nullrivet was started, like any other path given on the command line.
+  let session: { file: SessionFile; data: SessionData | null } | null = null;
+  if (config.session !== undefined) {
+    const opened = await SessionFile.open(resolve(io.cwd, config.session));
+    if (!opened.ok) return fail(opened.error);
+    session = { file: opened.file, data: opened.data };
+  }
+  const resumed = session?.data ?? null;
+
+  // A resumed session keeps its model unless one is chosen; the execution mode always comes from
+  // this invocation, never from the file.
+  const model = config.model ?? resumed?.model;
+  if (model === undefined) {
     return fail('no model selected; pass --model <family>/<model> or set NULLRIVET_MODEL');
   }
+  const effort = config.effort ?? resumed?.effort;
   // Overrides from the command line describe the model chosen there, not models switched to later.
   const resolveWith = (id: string, overrides: ModelOverrides) =>
     resolveModel(id, {
@@ -109,7 +123,7 @@ export const runCli = async (io: CliIO): Promise<number> => {
       signal: io.signal,
       ...(io.fetch === undefined ? {} : { fetch: io.fetch }),
     });
-  const resolved = await resolveWith(config.model, {
+  const resolved = await resolveWith(model, {
     ...(config.contextWindow === undefined ? {} : { contextWindow: config.contextWindow }),
     ...(config.maxOutput === undefined ? {} : { maxOutput: config.maxOutput }),
   }).catch((error: unknown) => {
@@ -125,11 +139,22 @@ export const runCli = async (io: CliIO): Promise<number> => {
     mode: config.mode,
     cwd,
     instructions: config.agentsMd ? new InstructionsLoader() : null,
-    ...(config.effort === undefined ? {} : { effort: config.effort }),
+    ...(effort === undefined ? {} : { effort }),
     ...(config.maxSteps === undefined ? {} : { maxSteps: config.maxSteps }),
     ...(config.timeLimitMs === undefined ? {} : { timeLimitMs: config.timeLimitMs }),
   });
   const warnings = [...resolved.warnings, ...agent.bootWarnings];
+  if (resumed !== null) {
+    agent.conversation.restore(resumed.conversation);
+    if (resumed.mode === 'readonly' && config.mode === 'auto') {
+      warnings.push(
+        'this session was last run in readonly mode and continues in auto mode; pass --permission readonly to keep it read-only',
+      );
+    }
+    if (resumed.cwd !== cwd) {
+      warnings.push(`this session was last run in ${resumed.cwd}; it continues in ${cwd}`);
+    }
+  }
 
   if (interactive && io.terminal !== null) {
     return runRepl({
@@ -138,6 +163,8 @@ export const runCli = async (io: CliIO): Promise<number> => {
       cwd,
       resolveModel: (id) => resolveWith(id, {}),
       warnings,
+      sessionFile: session?.file ?? null,
+      resumedMessages: resumed === null ? null : resumed.conversation.messages.length,
       signal: io.signal,
       stdin: io.terminal.stdin,
       stdout: io.terminal.stdout,
@@ -146,6 +173,9 @@ export const runCli = async (io: CliIO): Promise<number> => {
   }
 
   for (const warning of warnings) sink.notice('warning', warning);
+  if (session !== null) {
+    new SessionLink(agent, cwd, (message) => sink.notice('warning', message)).attach(session.file);
+  }
   const result = await agent.run(prompt, {
     signal: io.signal,
     onEvent: (e) => sink.event(e),

@@ -7,7 +7,8 @@ session lives in memory and is discarded when the process exits.
 ## Principles
 
 - **Ephemeral.** No state is written by nullrivet itself: no database, history, logs, caches or
-  configuration. The only persistent effects are the ones tools produce on purpose.
+  configuration. The only persistent effects are the ones tools produce on purpose, and a session
+  file when the user names one.
 - **Provider-agnostic core.** The agent speaks one canonical message and stream format; adapters
   translate it to each provider's API.
 - **Events, not callbacks into the UI.** The core publishes `AgentEvent`s. The plain output, the
@@ -27,11 +28,13 @@ src/
     run.ts                 resolve the model, create the agent, run one task or the session
     repl.ts                interactive session controller
     slash.ts               slash commands
+    session-file.ts        session files: loading, validation, atomic saves, attaching
     output.ts              plain and NDJSON event sinks for one-shot runs
   agent/
     agent.ts               createAgent(): the public API of the core
     loop.ts                runTurn(): the request / tool execution loop
     conversation.ts        in-memory history and its invariants
+    snapshot.ts            the conversation as data: snapshot format and its validation
     subagent.ts            the delegate tool: subagents on the same loop
     tool-executor.ts       policy check, error containment, output sanitizing
     collect.ts             turns a provider stream into one collected step
@@ -320,6 +323,35 @@ run tests, and only its report comes back.
   totals include subagents while the context gauge reflects the main conversation only. Nothing of
   the subagent is kept after it ends.
 
+## Sessions
+
+The core stays free of session I/O. It offers two things:
+
+- **Snapshots.** `Conversation.snapshot()` returns the history and the compaction state as plain
+  data, and `restore()` puts them back. `parseConversationSnapshot()` checks data read from
+  outside the process against the invariants the conversation keeps in memory: the history starts
+  with the user, roles alternate, tool calls are in assistant messages and results in user
+  messages, every call is answered by the next message (except calls of the last message, which
+  the conversation answers before the next prompt), and a summary state comes with the summary
+  block at the head. Blocks are rebuilt from their known fields. Anything else is refused, never
+  repaired.
+- **A checkpoint.** `Agent.checkpoint`, null by default, is called whenever the conversation is
+  consistent and worth keeping: after each step's tool results, after a compaction, and when a
+  turn ends, also when it was interrupted. The core does not know what it does.
+
+The CLI edge does the rest. `SessionFile` loads a file (refusing symbolic links, files over 64 MiB
+and anything that is not a valid session), and saves the whole state atomically with mode 0600.
+Each save first checks that the file is as this process last left it (inode, size, modification
+time); otherwise it throws instead of overwriting another writer's change. A state larger than
+loading accepts is not written. `SessionLink` attaches a file to the agent through the checkpoint,
+runs saves one at a time, skips a save when the conversation's revision, model, effort and mode
+are unchanged, and detaches the file with one warning when a save fails. Switching to a new file
+attaches it only after its first write succeeds. It backs `--session` and `/session`; the
+interactive session saves once more on the way out, since a turn interrupted then may not reach
+its own checkpoint. `/clear` detaches the file rather than saving an empty conversation over it. The file records the model, effort and mode it was last run with:
+the model and effort are used when the invocation does not choose them; the mode only produces a
+warning, because permissions come from the invocation alone.
+
 ## Events
 
 `AgentEvent` is the public contract of the core (`src/agent/events.ts`). The CLI's `--json` mode
@@ -335,5 +367,6 @@ outlive the call. Every live group is killed when nullrivet exits.
 
 ## Interactive session
 
-The session keeps one agent, and therefore one conversation, alive between prompts. Its
-rendering, input handling and interrupt behavior are described in [TUI.md](TUI.md).
+The session keeps one agent, and therefore one conversation, alive between prompts, and saves it
+to a session file when one is attached (see [Sessions](#sessions)). Its rendering, input handling
+and interrupt behavior are described in [TUI.md](TUI.md).

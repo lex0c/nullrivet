@@ -18,7 +18,8 @@ export const DEFAULT_CAPABILITIES: Readonly<ProviderCapabilities> = {
   supports_sampling: false,
 };
 
-const isProviderFamily = (s: string): s is ProviderFamily => Object.hasOwn(FAMILY_ADAPTERS, s);
+export const isProviderFamily = (s: string): s is ProviderFamily =>
+  Object.hasOwn(FAMILY_ADAPTERS, s);
 
 export interface ModelOverrides {
   contextWindow?: number;

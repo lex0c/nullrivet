@@ -15,6 +15,7 @@ export interface CliConfig {
   agentsMd: boolean;
   maxSteps: number | undefined;
   timeLimitMs: number | undefined;
+  session: string | undefined;
   contextWindow: number | undefined;
   maxOutput: number | undefined;
   prompt: string;
@@ -42,6 +43,7 @@ Options:
       --no-agents             Do not load AGENTS.md project instructions
       --max-steps <n>         Maximum model requests per task
       --timeout <time>        Time limit per task: 90s, 30m, 2h (seconds without a unit)
+      --session <file>        Save the conversation to this file, continuing it if it exists
       --context-window <n>    Override the model context window
       --max-output <n>        Override the model output token limit
   -h, --help                  Show this help
@@ -116,6 +118,7 @@ export const parseCli = (
         'no-agents': { type: 'boolean' },
         'max-steps': { type: 'string' },
         timeout: { type: 'string' },
+        session: { type: 'string' },
         'context-window': { type: 'string' },
         'max-output': { type: 'string' },
         help: { type: 'boolean', short: 'h' },
@@ -146,6 +149,7 @@ export const parseCli = (
     maxSteps:
       positiveInteger(str('max-steps'), '--max-steps') ??
       positiveInteger(env.NULLRIVET_MAX_STEPS, 'NULLRIVET_MAX_STEPS'),
+    session: str('session'),
     timeLimitMs:
       parseDuration(str('timeout'), '--timeout') ??
       parseDuration(env.NULLRIVET_TIMEOUT, 'NULLRIVET_TIMEOUT'),

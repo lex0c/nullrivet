@@ -25,6 +25,7 @@ import {
   enableRawMode,
 } from '../tui/term.ts';
 import { composeLive } from '../tui/view.ts';
+import { type SessionFile, SessionLink } from './session-file.ts';
 import { findCommand, parseSlash, runSlash, type SlashContext, suggestCommands } from './slash.ts';
 
 // A lone ESC byte is ambiguous until no continuation arrives: it is either the Escape key or the
@@ -39,6 +40,9 @@ export interface ReplOptions {
   cwd: string;
   resolveModel: (id: string) => Promise<ResolveResult>;
   warnings: readonly string[];
+  // The session file the conversation is saved to, if any, and how many messages it brought back.
+  sessionFile: SessionFile | null;
+  resumedMessages: number | null;
   // Aborted when the process receives SIGINT or SIGTERM from outside the terminal.
   signal: AbortSignal;
   stdin: NodeJS.ReadStream;
@@ -106,6 +110,14 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
     const notice = (level: 'info' | 'warning' | 'error', text: string): void =>
       dispatch({ type: 'notice', level, text });
 
+    // Warnings about the session file go to the interface while it is open, and to stderr once
+    // the terminal has been restored (the last save happens on the way out).
+    const session = new SessionLink(agent, options.cwd, (message) => {
+      if (closed) process.stderr.write(`nullrivet: warning: ${message}\n`);
+      else notice('warning', message);
+    });
+    if (options.sessionFile !== null) session.attach(options.sessionFile);
+
     const syncStatus = (): void =>
       dispatch({
         type: 'status',
@@ -149,7 +161,9 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
           // Restoring the rest of the terminal matters more than reporting this step.
         }
       }
-      resolveExit(code);
+      // A turn interrupted on the way out may not have reached its own checkpoint before the
+      // process exits, so the conversation as it stands is saved first.
+      void session.save().finally(() => resolveExit(code));
     };
 
     // Errors thrown from key, render or timer callbacks would otherwise end the process with the
@@ -173,6 +187,8 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       },
       exit: () => finish(0),
       stats: () => formatStats(state.status),
+      session,
+      cwd: options.cwd,
       compact: async (instructions) => {
         // Registered as the running turn so Esc and Ctrl+C interrupt it and prompts wait for it.
         const controller = new AbortController();
@@ -386,6 +402,14 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       ),
     );
     for (const warning of options.warnings) notice('warning', warning);
+    if (session.path !== null) {
+      notice(
+        'info',
+        options.resumedMessages === null
+          ? `Saving this session to ${session.path}.`
+          : `Resumed the session in ${session.path} (${options.resumedMessages} messages).`,
+      );
+    }
 
     enableRawMode(stdin);
     enableBracketedPasteOn(write);

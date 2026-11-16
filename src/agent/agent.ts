@@ -61,6 +61,10 @@ export interface Agent {
   effort: ProviderEffort | undefined;
   provider: Provider;
   readonly running: boolean;
+  // Called whenever the conversation is in a consistent state worth keeping: after each step of a
+  // turn, after a compaction and when a turn ends. Set by whoever persists the conversation; it
+  // must not throw. Null, the default, keeps nothing.
+  checkpoint: (() => Promise<void>) | null;
   clear(): void;
   // Compacts the conversation now. Resolves with null when there is nothing to compact.
   compact(options?: CompactOptions): Promise<CompactionOutcome | null>;
@@ -133,6 +137,7 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
     mode: options.mode,
     effort: options.effort,
     provider: options.provider,
+    checkpoint: null,
 
     get running(): boolean {
       return running;
@@ -181,6 +186,7 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
         });
       } finally {
         running = false;
+        await agent.checkpoint?.();
       }
     },
 
@@ -214,6 +220,9 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
             cwd: options.cwd,
             systemPrompt,
             projectContext,
+            checkpoint: async () => {
+              await agent.checkpoint?.();
+            },
             instructions: options.instructions,
             limits,
             ...(agent.effort === undefined ? {} : { effort: agent.effort }),
@@ -225,6 +234,9 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
       } finally {
         clearTimeout(timer);
         running = false;
+        // Also after an interrupted or failed turn: the conversation is consistent, and calls
+        // left unanswered are answered before the next prompt.
+        await agent.checkpoint?.();
       }
     },
   };

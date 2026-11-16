@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { type Agent, createAgent } from '../../src/agent/agent.ts';
+import { SessionLink } from '../../src/cli/session-file.ts';
 import { parseSlash, runSlash, type SlashContext, suggestCommands } from '../../src/cli/slash.ts';
 import type { ResolveResult } from '../../src/providers/resolve.ts';
 import { createMockProvider } from '../helpers/mock-provider.ts';
@@ -13,12 +17,12 @@ interface Harness {
   compacted: number;
 }
 
-const harness = async (resolve?: (id: string) => ResolveResult): Promise<Harness> => {
+const harness = async (resolve?: (id: string) => ResolveResult, cwd = '/tmp'): Promise<Harness> => {
   const agent = await createAgent({
     provider: createMockProvider([]),
     tools: [],
     mode: 'auto',
-    cwd: '/tmp',
+    cwd,
     instructions: null,
   });
   const h: Harness = {
@@ -43,6 +47,8 @@ const harness = async (resolve?: (id: string) => ResolveResult): Promise<Harness
     compact: async () => {
       h.compacted += 1;
     },
+    session: new SessionLink(agent, cwd, (text) => h.notices.push({ level: 'warning', text })),
+    cwd,
   };
   return h;
 };
@@ -136,5 +142,85 @@ describe('runSlash', () => {
     await run(h, '/exit');
     expect(h.notices[0]?.text).toBe('stats text');
     expect(h.exited).toBe(1);
+  });
+});
+
+describe('/session', () => {
+  const sessionDir = (): string => mkdtempSync(join(tmpdir(), 'nullrivet-slash-session-'));
+
+  test('shows that nothing is attached, then saves to a new file relative to the session directory', async () => {
+    const dir = sessionDir();
+    try {
+      const h = await harness(undefined, dir);
+      await run(h, '/session');
+      expect(h.notices.at(-1)?.text).toContain('No session file is attached');
+      h.agent.conversation.appendUser('keep this');
+      await run(h, '/session saved.json');
+      expect(readFileSync(join(dir, 'saved.json'), 'utf8')).toContain('keep this');
+      expect(h.notices.at(-1)?.text).toBe(`Saving this session to ${join(dir, 'saved.json')}.`);
+      await run(h, '/session');
+      expect(h.notices.at(-1)?.text).toContain(`Session file: ${join(dir, 'saved.json')}`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('switching files forks the session, and an existing session is never overwritten', async () => {
+    const dir = sessionDir();
+    try {
+      const h = await harness(undefined, dir);
+      h.agent.conversation.appendUser('first part');
+      await run(h, '/session a.json');
+      await run(h, '/session b.json');
+      expect(h.notices.at(-1)?.text).toContain('a.json keeps the conversation as it was until now');
+      const before = readFileSync(join(dir, 'a.json'), 'utf8');
+      await run(h, '/session a.json');
+      expect(h.notices.at(-1)).toMatchObject({ level: 'error' });
+      expect(h.notices.at(-1)?.text).toContain('already holds a session');
+      expect(readFileSync(join(dir, 'a.json'), 'utf8')).toBe(before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('off stops saving and keeps the file', async () => {
+    const dir = sessionDir();
+    try {
+      const h = await harness(undefined, dir);
+      await run(h, '/session s.json');
+      await run(h, '/session off');
+      expect(h.agent.checkpoint).toBeNull();
+      expect(h.notices.at(-1)?.text).toContain('No longer saving to');
+      expect(existsSync(join(dir, 's.json'))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('/clear keeps the saved conversation in its file and stops saving', async () => {
+    const dir = sessionDir();
+    try {
+      const h = await harness(undefined, dir);
+      h.agent.conversation.appendUser('worth keeping');
+      await run(h, '/session s.json');
+      await run(h, '/clear');
+      expect(h.agent.checkpoint).toBeNull();
+      expect(h.notices.at(-1)?.text).toContain('keeps the previous conversation');
+      expect(readFileSync(join(dir, 's.json'), 'utf8')).toContain('worth keeping');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a change of effort is saved to the session file', async () => {
+    const dir = sessionDir();
+    try {
+      const h = await harness(undefined, dir);
+      await run(h, '/session s.json');
+      await run(h, '/effort high');
+      expect(JSON.parse(readFileSync(join(dir, 's.json'), 'utf8')).effort).toBe('high');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

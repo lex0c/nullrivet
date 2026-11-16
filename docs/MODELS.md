@@ -2,7 +2,8 @@
 
 ## Model ids
 
-A model is selected as `<family>/<model>` with `--model` or `NULLRIVET_MODEL`. The family is the
+A model is selected as `<family>/<model>` with `--model` or `NULLRIVET_MODEL`; a resumed session
+file supplies its last model when neither is given. The family is the
 text before the first `/`; the rest is the model name sent to the provider. OpenRouter names have
 a vendor prefix of their own:
 

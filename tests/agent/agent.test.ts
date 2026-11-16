@@ -6,7 +6,7 @@ import { createAgent } from '../../src/agent/agent.ts';
 import type { AgentEvent } from '../../src/agent/events.ts';
 import { InstructionsLoader } from '../../src/instructions/agents-loader.ts';
 import { FENCE } from '../../src/sanitize/fence.ts';
-import { createMockProvider, textTurn } from '../helpers/mock-provider.ts';
+import { createMockProvider, textTurn, toolTurn } from '../helpers/mock-provider.ts';
 
 // A provider whose stream stays open until the request is cancelled.
 const silentProvider = () => {
@@ -126,5 +126,70 @@ describe('project instructions of the working directory', () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe('checkpoint', () => {
+  test('is called after each step with tool results and when a turn ends', async () => {
+    const provider = createMockProvider([
+      toolTurn([{ id: 't1', name: 'echo', args: {} }]),
+      textTurn('done'),
+    ]);
+    const agent = await createAgent({
+      provider,
+      tools: [
+        {
+          name: 'echo',
+          description: 'echo',
+          inputSchema: { type: 'object' },
+          effect: 'read',
+          execute: async () => ({ content: 'ok', isError: false }),
+        },
+      ],
+      mode: 'auto',
+      cwd: '/tmp',
+      instructions: null,
+    });
+    const seen: number[] = [];
+    agent.checkpoint = async () => {
+      seen.push(agent.conversation.messages().length);
+    };
+    await agent.run('go');
+    // After the tool step (prompt, call, results), then at the end with the final answer.
+    expect(seen).toEqual([3, 4]);
+  });
+
+  test('is called after a manual compaction', async () => {
+    const agent = await createAgent({
+      provider: createMockProvider([]),
+      tools: [],
+      mode: 'auto',
+      cwd: '/tmp',
+      instructions: null,
+    });
+    let calls = 0;
+    agent.checkpoint = async () => {
+      calls++;
+    };
+    await agent.compact();
+    expect(calls).toBe(1);
+  });
+
+  test('is called when a turn is interrupted, with the conversation still consistent', async () => {
+    const agent = await createAgent({
+      provider: silentProvider(),
+      tools: [],
+      mode: 'auto',
+      cwd: '/tmp',
+      instructions: null,
+    });
+    let calls = 0;
+    agent.checkpoint = async () => {
+      calls++;
+    };
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 10);
+    await agent.run('go', { signal: controller.signal });
+    expect(calls).toBe(1);
   });
 });
