@@ -1,8 +1,9 @@
+import { contextBudget } from '../context/budget.ts';
 import { estimatePromptTokens } from '../context/tokens.ts';
 import { errorMessage } from '../errors.ts';
 import type { InstructionsLoader } from '../instructions/agents-loader.ts';
 import { renderInstructionFiles } from '../instructions/agents-loader.ts';
-import { INVALID_TOOL_CALL } from '../providers/errors.ts';
+import { CONTEXT_OVERFLOW, ContextOverflowError, INVALID_TOOL_CALL } from '../providers/errors.ts';
 import type {
   GenerateRequest,
   Provider,
@@ -29,8 +30,14 @@ import {
   CollectStepError,
   collectStep,
 } from './collect.ts';
-import { type Conversation, interruptedResult } from './conversation.ts';
-import type { AgentEndReason, AgentEventListener } from './events.ts';
+import { compactConversation } from './compactor.ts';
+import {
+  agentNote,
+  type Conversation,
+  interruptedResult,
+  type PromptShape,
+} from './conversation.ts';
+import type { AgentEndReason, AgentEventListener, CompactReason } from './events.ts';
 import { generateWithRetry } from './retry.ts';
 import { DISCOVERED_INSTRUCTIONS_HEADER } from './system-prompt.ts';
 import { executeToolCall } from './tool-executor.ts';
@@ -95,6 +102,30 @@ const isTransientFailure = (step: CollectedStep): boolean =>
   step.errors.every((e) => e.retryable) &&
   step.text.length === 0 &&
   step.tool_uses.length === 0;
+
+// A provider rejection because the prompt did not fit, reported inside the stream before any
+// output.
+const isOverflowFailure = (step: CollectedStep): boolean =>
+  step.errors.some((e) => e.code === CONTEXT_OVERFLOW) &&
+  step.text.length === 0 &&
+  step.tool_uses.length === 0;
+
+const CONTEXT_FULL = 'the conversation does not fit the context window, even after compacting it';
+// After an overflow the estimate proved too low, so the compaction keeps a shorter verbatim tail.
+const OVERFLOW_TAIL_FACTOR = 0.5;
+
+export const promptShape = (
+  deps: Pick<TurnDependencies, 'provider' | 'mode' | 'tools' | 'systemPrompt'>,
+): PromptShape => {
+  const system = deps.systemPrompt();
+  const tools = toolsForMode(deps.mode(), [...deps.tools.values()]).map(toToolDefinition);
+  return {
+    key: `${deps.provider.id}\0${system}\0${tools.map((t) => t.name).join(',')}`,
+    system,
+    tools,
+    countReasoning: deps.provider.replaysReasoning === true,
+  };
+};
 
 const describeErrors = (errors: readonly CollectedError[]): string =>
   errors.map((e) => `${e.code}: ${e.message}`).join('; ');
@@ -178,11 +209,13 @@ const executeToolCalls = async (
 };
 
 const invalidToolCallFeedback = (errors: readonly CollectedError[]): string =>
-  [
-    'Some tool calls in your previous response were rejected and not executed:',
-    ...errors.map((e) => `- ${e.message}`),
-    'Issue them again with a valid tool name and a JSON object as arguments.',
-  ].join('\n');
+  agentNote(
+    [
+      'Some tool calls in your previous response were rejected and not executed:',
+      ...errors.map((e) => `- ${e.message}`),
+      'Issue them again with a valid tool name and a JSON object as arguments.',
+    ].join('\n'),
+  );
 
 // Runs one user turn: request, stream, execute tool calls, feed results back, until the model
 // answers without tool calls, the turn is aborted, or a limit is reached.
@@ -200,18 +233,58 @@ export const runTurn = async (prompt: string, deps: TurnDependencies): Promise<T
     return message === undefined ? { reason, usage, steps } : { reason, message, usage, steps };
   };
 
+  // At most one compaction for an overflow per step, so a prompt that cannot fit even after
+  // compacting ends the turn instead of looping.
+  let overflowRecovered = false;
+
+  const compact = async (
+    reason: CompactReason,
+    shape: PromptShape,
+    tailFactor?: number,
+  ): Promise<'done' | 'skipped' | 'aborted'> => {
+    try {
+      const outcome = await compactConversation({
+        provider: deps.provider,
+        conversation,
+        shape,
+        reason,
+        ...(tailFactor === undefined ? {} : { tailFactor }),
+        emit,
+        signal,
+      });
+      if (outcome === null) return 'skipped';
+      usage = addUsage(usage, outcome.usage);
+      return 'done';
+    } catch (error) {
+      if (signal.aborted || error instanceof AbortError) return 'aborted';
+      emit({ type: 'warning', message: `compaction failed: ${errorMessage(error)}` });
+      return 'skipped';
+    }
+  };
+
+  const recoverFromOverflow = async (shape: PromptShape): Promise<'retry' | 'full' | 'aborted'> => {
+    if (overflowRecovered) return 'full';
+    overflowRecovered = true;
+    const result = await compact('overflow', shape, OVERFLOW_TAIL_FACTOR);
+    if (result === 'aborted') return 'aborted';
+    return result === 'done' ? 'retry' : 'full';
+  };
+
   emit({ type: 'agent:start' });
   conversation.appendUser(prompt);
 
   while (steps < limits.maxSteps) {
     if (signal.aborted) return end('aborted');
     steps += 1;
-    const offered = toolsForMode(deps.mode(), [...deps.tools.values()]);
+    const shape = promptShape(deps);
+    if (conversation.estimateTokens(shape) > contextBudget(deps.provider.capabilities).trigger) {
+      if ((await compact('auto', shape)) === 'aborted') return end('aborted');
+    }
     const request: GenerateRequest = {
       model: deps.provider.id,
-      system: deps.systemPrompt(),
+      system: shape.system,
       messages: [...conversation.messages()],
-      tools: offered.map(toToolDefinition),
+      tools: [...shape.tools],
       max_tokens: limits.maxOutputTokens,
       ...(deps.effort === undefined ? {} : { effort: deps.effort }),
     };
@@ -235,6 +308,14 @@ export const runTurn = async (prompt: string, deps: TurnDependencies): Promise<T
         }
         return end('aborted');
       }
+      if (cause instanceof ContextOverflowError) {
+        const recovery = await recoverFromOverflow(shape);
+        if (recovery === 'retry') {
+          steps -= 1;
+          continue;
+        }
+        return recovery === 'aborted' ? end('aborted') : end('budget', CONTEXT_FULL);
+      }
       const message =
         cause instanceof StepStallError
           ? `the provider stopped responding (${cause.message})`
@@ -252,6 +333,15 @@ export const runTurn = async (prompt: string, deps: TurnDependencies): Promise<T
         cacheRead: collected.usage.cache_read,
         cacheWrite: collected.usage.cache_creation,
       });
+    }
+
+    if (isOverflowFailure(collected)) {
+      const recovery = await recoverFromOverflow(shape);
+      if (recovery === 'retry') {
+        steps -= 1;
+        continue;
+      }
+      return recovery === 'aborted' ? end('aborted') : end('budget', CONTEXT_FULL);
     }
 
     if (isTransientFailure(collected)) {
@@ -278,6 +368,27 @@ export const runTurn = async (prompt: string, deps: TurnDependencies): Promise<T
     }
 
     conversation.appendAssistant(buildAssistantContent(collected));
+    if (collected.usageSeen) {
+      const u = collected.usage;
+      conversation.recordUsage(u.input + u.cache_read + u.cache_creation + u.output, shape);
+    }
+
+    // The answer was cut off by the context window: the text shown so far is kept, its tool calls
+    // are not run, and the turn continues on a compacted conversation.
+    if (collected.stop_reason === 'model_context_window_exceeded') {
+      conversation.appendToolResults(conversation.unansweredToolUses().map(interruptedResult));
+      if (overflowRecovered) return end('budget', CONTEXT_FULL);
+      overflowRecovered = true;
+      const result = await compact('overflow', shape, OVERFLOW_TAIL_FACTOR);
+      if (result === 'aborted') return end('aborted');
+      if (result === 'skipped') return end('budget', CONTEXT_FULL);
+      conversation.appendUser(
+        agentNote(
+          'Your previous response was cut off by the context window limit. The conversation was compacted; continue where you left off.',
+        ),
+      );
+      continue;
+    }
 
     // A malformed tool call is a model mistake the model can correct, so it is reported back
     // instead of ending the turn.
@@ -294,9 +405,6 @@ export const runTurn = async (prompt: string, deps: TurnDependencies): Promise<T
       if (collected.stop_reason === 'max_tokens') {
         return end('budget', 'the response reached the output token limit');
       }
-      if (collected.stop_reason === 'model_context_window_exceeded') {
-        return end('budget', 'the context window is full');
-      }
       return end('done');
     }
 
@@ -306,6 +414,7 @@ export const runTurn = async (prompt: string, deps: TurnDependencies): Promise<T
       conversation.appendUser(invalidToolCallFeedback(invalidCalls));
     }
     if (signal.aborted) return end('aborted');
+    overflowRecovered = false;
   }
 
   return end('budget', `stopped after reaching the limit of ${limits.maxSteps} steps`);

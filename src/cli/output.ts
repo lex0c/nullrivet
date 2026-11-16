@@ -62,6 +62,13 @@ export const createPlainSink = (options: PlainSinkOptions): OutputSink => {
         case 'tool:end':
           if (event.isError) diagnostic(red(`  ✗ ${errorSummary(event.content, 200)}`));
           return;
+        case 'context:compact':
+          diagnostic(
+            dim(
+              `› context compacted (${event.strategy}): ${event.before} → ${event.after} estimated tokens`,
+            ),
+          );
+          return;
         case 'warning':
           diagnostic(yellow(`warning: ${event.message}`));
           return;

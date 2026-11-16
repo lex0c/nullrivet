@@ -15,6 +15,8 @@ export interface SlashContext {
   exit: () => void;
   // Usage summary of the current process, rendered by the caller.
   stats: () => string;
+  // Compacts the conversation, showing progress; the caller makes it interruptible.
+  compact: (instructions: string | undefined) => Promise<void>;
 }
 
 export interface SlashCommand {
@@ -134,6 +136,15 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
       }
       ctx.agent.mode = args;
       ctx.notice('info', `Execution mode set to ${args}; it applies from the next tool call.`);
+    },
+  },
+  {
+    name: 'compact',
+    description: 'Summarize the conversation now to free context',
+    usage: '[focus]',
+    idleOnly: true,
+    async run(args, ctx) {
+      await ctx.compact(args.length > 0 ? args : undefined);
     },
   },
   {

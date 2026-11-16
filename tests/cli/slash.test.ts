@@ -10,6 +10,7 @@ interface Harness {
   notices: { level: string; text: string }[];
   cleared: number;
   exited: number;
+  compacted: number;
 }
 
 const harness = async (resolve?: (id: string) => ResolveResult): Promise<Harness> => {
@@ -20,7 +21,14 @@ const harness = async (resolve?: (id: string) => ResolveResult): Promise<Harness
     cwd: '/tmp',
     instructions: null,
   });
-  const h: Harness = { agent, notices: [], cleared: 0, exited: 0, ctx: undefined as never };
+  const h: Harness = {
+    agent,
+    notices: [],
+    cleared: 0,
+    exited: 0,
+    compacted: 0,
+    ctx: undefined as never,
+  };
   h.ctx = {
     agent,
     resolveModel: async (id) => resolve?.(id) ?? { ok: false, error: `unknown ${id}` },
@@ -32,6 +40,9 @@ const harness = async (resolve?: (id: string) => ResolveResult): Promise<Harness
       h.exited += 1;
     },
     stats: () => 'stats text',
+    compact: async () => {
+      h.compacted += 1;
+    },
   };
   return h;
 };
@@ -111,6 +122,12 @@ describe('runSlash', () => {
     const h = await harness();
     await run(h, '/frobnicate');
     expect(h.notices[0]?.text).toContain('Unknown command /frobnicate');
+  });
+
+  test('compact delegates to the caller', async () => {
+    const h = await harness();
+    await run(h, '/compact focus on the parser');
+    expect(h.compacted).toBe(1);
   });
 
   test('exit and stats delegate to the caller', async () => {

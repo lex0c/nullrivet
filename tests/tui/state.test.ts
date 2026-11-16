@@ -134,4 +134,47 @@ describe('reduce', () => {
       run([{ type: 'input', input: { value: 'x', cursor: 1 } }], armed).state.exitArmedAt,
     ).toBeNull();
   });
+  test('compaction shows progress, then a notice with the new context size', () => {
+    const started = run([ev({ type: 'context:compact:start', reason: 'manual' }, 100)]);
+    expect(started.state.compacting).toEqual({ reason: 'manual', since: 100 });
+    const done = run(
+      [
+        ev({
+          type: 'usage',
+          input: 9_000,
+          output: 300,
+          cacheRead: 0,
+          cacheWrite: 0,
+          compaction: true,
+        }),
+        ev({
+          type: 'context:compact',
+          reason: 'manual',
+          strategy: 'llm',
+          before: 90_000,
+          after: 20_000,
+        }),
+      ],
+      started.state,
+    );
+    expect(done.state.compacting).toBeNull();
+    expect(done.state.status.contextTokens).toBe(20_000);
+    expect(done.state.status.totals.input).toBe(9_000);
+    expect(done.permanent).toEqual([
+      { kind: 'notice', level: 'info', text: 'Context compacted: 90k → 20k tokens (estimated).' },
+    ]);
+  });
+
+  test('a compaction without a summary is reported as a warning', () => {
+    const { permanent } = run([
+      ev({
+        type: 'context:compact',
+        reason: 'auto',
+        strategy: 'fallback',
+        before: 5_000,
+        after: 1_000,
+      }),
+    ]);
+    expect(permanent[0]).toMatchObject({ kind: 'notice', level: 'warning' });
+  });
 });

@@ -35,6 +35,8 @@ export type AgentEvent =
       cacheRead: number;
       cacheWrite: number;
       reportedCostUsd?: number;
+      // Set for the requests that summarize the conversation, which do not reflect its size.
+      compaction?: true;
     }
   | { type: 'warning'; message: string }
   | { type: 'error'; message: string };

@@ -6,6 +6,7 @@ import { Conversation } from '../../src/agent/conversation.ts';
 import type { AgentEvent } from '../../src/agent/events.ts';
 import { runTurn, type TurnDependencies } from '../../src/agent/loop.ts';
 import { InstructionsLoader } from '../../src/instructions/agents-loader.ts';
+import { ContextOverflowError } from '../../src/providers/errors.ts';
 import type { ProviderMessage, StreamEvent } from '../../src/providers/types.ts';
 import type { ExecutionMode } from '../../src/tools/policy.ts';
 import type { Tool, ToolEffect, ToolResult } from '../../src/tools/types.ts';
@@ -372,6 +373,93 @@ describe('runTurn', () => {
     const result = await runTurn('write a lot', h.deps);
     expect(result.reason).toBe('budget');
     expect(result.message).toContain('output token limit');
+  });
+
+  describe('context limits', () => {
+    const SUMMARY = 'GOAL:\ncontinue\nNEXT:\nreply\nERRORS:\n(none)';
+
+    // Answers summary requests with a summary and every other request with the next scripted
+    // response, so tests do not depend on how many summary requests a compaction makes.
+    const responder = (normal: (() => StreamEvent[])[]): ScriptedTurn[] => {
+      let next = 0;
+      const turn = (req: { system?: string }): StreamEvent[] => {
+        if (req.system?.includes('GOAL:') === true) return textTurn(SUMMARY);
+        const respond = normal[next] ?? (() => textTurn('done'));
+        next += 1;
+        return respond();
+      };
+      return Array.from({ length: 30 }, () => turn);
+    };
+
+    const prefill = (h: Harness, exchanges: number): void => {
+      for (let i = 0; i < exchanges; i++) {
+        h.deps.conversation.appendUser(`earlier request ${i}`);
+        h.deps.conversation.appendAssistant([{ type: 'text', text: `${i} ${'a'.repeat(4_000)}` }]);
+      }
+      h.deps.provider.capabilities.context_window = 16_000;
+      h.deps.provider.capabilities.output_max_tokens = 4_096;
+    };
+
+    const overflow = (): StreamEvent[] => {
+      throw new ContextOverflowError('prompt is too long');
+    };
+
+    test('a conversation above the trigger is compacted before the request', async () => {
+      const h = harness(responder([() => textTurn('ok')]));
+      prefill(h, 10);
+      const result = await runTurn('next task', h.deps);
+      expect(result.reason).toBe('done');
+      expect(h.events.some((e) => e.type === 'context:compact' && e.reason === 'auto')).toBe(true);
+      const last = h.provider.calls.at(-1)?.req;
+      expect(last?.system).toBe('system for auto');
+      const head = last?.messages[0]?.content;
+      expect(Array.isArray(head) && head[0]?.type === 'text' ? head[0].text : '').toContain(
+        '[compacted_history]',
+      );
+    });
+
+    test('a rejected request is compacted and retried once', async () => {
+      const h = harness(responder([overflow, () => textTurn('ok')]));
+      prefill(h, 4);
+      const result = await runTurn('next task', h.deps);
+      expect(result.reason).toBe('done');
+      expect(h.events.some((e) => e.type === 'context:compact' && e.reason === 'overflow')).toBe(
+        true,
+      );
+    });
+
+    test('a second overflow in the same step ends the turn instead of looping', async () => {
+      const h = harness(responder([overflow, overflow, () => textTurn('never')]));
+      prefill(h, 4);
+      const result = await runTurn('next task', h.deps);
+      expect(result.reason).toBe('budget');
+      expect(result.message).toContain('does not fit');
+    });
+
+    test('an overflow reported inside the stream is recovered the same way', async () => {
+      const inStream = (): StreamEvent[] => [
+        { kind: 'start', message_id: 'm' },
+        { kind: 'error', code: 'context_overflow', message: 'too long', retryable: false },
+      ];
+      const h = harness(responder([inStream, () => textTurn('ok')]));
+      prefill(h, 4);
+      expect((await runTurn('next task', h.deps)).reason).toBe('done');
+    });
+
+    test('an answer cut off by the window keeps its text and continues after compacting', async () => {
+      const cut = (): StreamEvent[] => [
+        { kind: 'start', message_id: 'm' },
+        { kind: 'text_delta', text: 'partial answer' },
+        { kind: 'stop', reason: 'model_context_window_exceeded' },
+      ];
+      const h = harness(responder([cut, () => textTurn('rest of the answer')]));
+      prefill(h, 4);
+      const result = await runTurn('next task', h.deps);
+      expect(result.reason).toBe('done');
+      const sent = JSON.stringify(h.provider.calls.at(-1)?.req.messages);
+      expect(sent).toContain('partial answer');
+      expect(sent).toContain('cut off by the context window');
+    });
   });
 
   describe('project instructions', () => {

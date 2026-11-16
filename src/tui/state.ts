@@ -1,4 +1,4 @@
-import type { AgentEndReason, AgentEvent } from '../agent/events.ts';
+import type { AgentEndReason, AgentEvent, CompactReason } from '../agent/events.ts';
 import type { ExecutionMode } from '../tools/policy.ts';
 import type { InputState } from './input-editor.ts';
 import { splitSettledMarkdown } from './markdown-stream.ts';
@@ -59,6 +59,7 @@ export interface TuiState {
   turn: TurnState | null;
   // When Ctrl+C was pressed on an empty, idle prompt; a second press before it expires exits.
   exitArmedAt: number | null;
+  compacting: { reason: CompactReason; since: number } | null;
 }
 
 // Items written once to the scrollback, above the live region.
@@ -96,7 +97,8 @@ export type Action =
   | { type: 'notice'; level: NoticeLevel; text: string }
   | { type: 'interrupting' }
   | { type: 'exit-arm'; now: number }
-  | { type: 'exit-disarm' };
+  | { type: 'exit-disarm' }
+  | { type: 'compact-cancelled' };
 
 export interface Reduction {
   state: TuiState;
@@ -119,7 +121,11 @@ export const createInitialState = (
   status: { ...status, contextTokens: null, totals: emptyTotals() },
   turn: null,
   exitArmedAt: null,
+  compacting: null,
 });
+
+const formatTokenCount = (n: number): string =>
+  n < 1_000 ? String(n) : `${(n / 1_000).toFixed(n < 10_000 ? 1 : 0)}k`;
 
 const assistantItem = (markdown: string): PermanentItem[] =>
   markdown.trim().length === 0 ? [] : [{ kind: 'assistant', markdown: markdown.trimEnd() }];
@@ -212,7 +218,11 @@ const reduceAgentEvent = (state: TuiState, event: AgentEvent, now: number): Redu
           ...state,
           status: {
             ...state.status,
-            contextTokens: event.input + event.cacheRead + event.cacheWrite + event.output,
+            // A summary request says nothing about the size of the conversation itself.
+            contextTokens:
+              event.compaction === true
+                ? state.status.contextTokens
+                : event.input + event.cacheRead + event.cacheWrite + event.output,
             totals: {
               input: totals.input + event.input,
               output: totals.output + event.output,
@@ -230,8 +240,29 @@ const reduceAgentEvent = (state: TuiState, event: AgentEvent, now: number): Redu
     case 'error':
       return { state, permanent: [{ kind: 'notice', level: 'error', text: event.message }] };
     case 'context:compact:start':
-    case 'context:compact':
-      return { state, permanent: [] };
+      return {
+        state: { ...state, compacting: { reason: event.reason, since: now } },
+        permanent: [],
+      };
+    case 'context:compact': {
+      const sizes = `${formatTokenCount(event.before)} → ${formatTokenCount(event.after)} tokens (estimated)`;
+      return {
+        state: {
+          ...state,
+          compacting: null,
+          status: { ...state.status, contextTokens: event.after },
+        },
+        permanent: [
+          event.strategy === 'llm'
+            ? { kind: 'notice', level: 'info', text: `Context compacted: ${sizes}.` }
+            : {
+                kind: 'notice',
+                level: 'warning',
+                text: `Context compacted without a summary, which could not be produced: ${sizes}. Your requests and the files touched were kept.`,
+              },
+        ],
+      };
+    }
     case 'agent:end': {
       if (turn === null) return { state, permanent: [] };
       return {
@@ -275,5 +306,7 @@ export const reduce = (state: TuiState, action: Action): Reduction => {
       return { state: { ...state, exitArmedAt: action.now }, permanent: [] };
     case 'exit-disarm':
       return { state: { ...state, exitArmedAt: null }, permanent: [] };
+    case 'compact-cancelled':
+      return { state: { ...state, compacting: null }, permanent: [] };
   }
 };

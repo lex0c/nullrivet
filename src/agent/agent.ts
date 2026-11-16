@@ -4,9 +4,10 @@ import type { InstructionFile, InstructionsLoader } from '../instructions/agents
 import type { Provider, ProviderEffort } from '../providers/types.ts';
 import type { ExecutionMode } from '../tools/policy.ts';
 import type { Tool } from '../tools/types.ts';
+import { type CompactionOutcome, compactConversation } from './compactor.ts';
 import { Conversation } from './conversation.ts';
 import type { AgentEventListener } from './events.ts';
-import { type LoopLimits, runTurn, type TurnResult } from './loop.ts';
+import { type LoopLimits, promptShape, runTurn, type TurnResult } from './loop.ts';
 import { buildSystemPrompt, localDate } from './system-prompt.ts';
 
 export const DEFAULT_MAX_STEPS = 200;
@@ -29,6 +30,11 @@ export interface RunOptions {
   onEvent?: AgentEventListener;
 }
 
+export interface CompactOptions extends RunOptions {
+  // What the summary should focus on.
+  instructions?: string;
+}
+
 export interface Agent {
   run(prompt: string, options?: RunOptions): Promise<TurnResult>;
   readonly conversation: Conversation;
@@ -38,6 +44,8 @@ export interface Agent {
   provider: Provider;
   readonly running: boolean;
   clear(): void;
+  // Compacts the conversation now. Resolves with null when there is nothing to compact.
+  compact(options?: CompactOptions): Promise<CompactionOutcome | null>;
   // AGENTS.md files currently known: the ones in the system prompt plus the ones attached to
   // tool results of the current conversation.
   instructions(): readonly InstructionFile[];
@@ -81,6 +89,16 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
   const isGitRepo = await isInsideGitRepo(options.cwd);
   let running = false;
 
+  const systemPrompt = (): string =>
+    buildSystemPrompt({
+      cwd: options.cwd,
+      mode: agent.mode,
+      platform: process.platform,
+      date: localDate(),
+      isGitRepo,
+      instructions: bootInstructions,
+    });
+
   const agent: Agent = {
     conversation,
     bootWarnings,
@@ -111,6 +129,31 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
       options.instructions?.retainOnly(new Set(bootInstructions.map((file) => file.path)));
     },
 
+    async compact(compactOptions: CompactOptions = {}): Promise<CompactionOutcome | null> {
+      if (running) throw new Error('the conversation cannot be compacted while a turn is running');
+      running = true;
+      try {
+        return await compactConversation({
+          provider: agent.provider,
+          conversation,
+          shape: promptShape({
+            provider: agent.provider,
+            mode: () => agent.mode,
+            tools,
+            systemPrompt,
+          }),
+          reason: 'manual',
+          ...(compactOptions.instructions === undefined
+            ? {}
+            : { instructions: compactOptions.instructions }),
+          emit: compactOptions.onEvent ?? (() => undefined),
+          signal: compactOptions.signal ?? new AbortController().signal,
+        });
+      } finally {
+        running = false;
+      }
+    },
+
     async run(prompt: string, runOptions: RunOptions = {}): Promise<TurnResult> {
       if (running) throw new Error('the agent is already running a turn');
       running = true;
@@ -126,15 +169,7 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
           tools,
           mode: () => agent.mode,
           cwd: options.cwd,
-          systemPrompt: () =>
-            buildSystemPrompt({
-              cwd: options.cwd,
-              mode: agent.mode,
-              platform: process.platform,
-              date: localDate(),
-              isGitRepo,
-              instructions: bootInstructions,
-            }),
+          systemPrompt,
           instructions: options.instructions,
           limits,
           ...(agent.effort === undefined ? {} : { effort: agent.effort }),

@@ -51,7 +51,11 @@ const renderPending = (text: string, caps: Capabilities): string[] => {
   return lines;
 };
 
-const phaseChip = (turn: TurnState, caps: Capabilities, now: number): string => {
+const compactingChip = (since: number, caps: Capabilities, now: number): string =>
+  `${paint(caps, 'accent', spinner(caps, now))} ${renderShimmer('Compacting context…', caps, now, 'secondary')} ${paint(caps, 'dim', `(${formatChipDuration(now - since)})`)}`;
+
+const phaseChip = (state: TuiState, turn: TurnState, caps: Capabilities, now: number): string => {
+  if (state.compacting !== null) return compactingChip(state.compacting.since, caps, now);
   const elapsed = formatChipDuration(now - turn.startedAt);
   let label: string;
   if (turn.interrupting) label = 'Interrupting…';
@@ -66,7 +70,7 @@ const phaseChip = (turn: TurnState, caps: Capabilities, now: number): string => 
   return `${paint(caps, 'accent', spinner(caps, now))} ${renderShimmer(label, caps, now, 'secondary')} ${paint(caps, 'dim', `(${details.join(' · ')})`)}`;
 };
 
-const turnRows = (turn: TurnState, caps: Capabilities, now: number): string[] => {
+const turnRows = (state: TuiState, turn: TurnState, caps: Capabilities, now: number): string[] => {
   const rows: string[] = [];
   if (turn.pendingText.trim().length > 0) {
     rows.push('', ...renderPending(turn.pendingText, caps));
@@ -79,7 +83,7 @@ const turnRows = (turn: TurnState, caps: Capabilities, now: number): string[] =>
       `${paint(caps, 'accent', spinner(caps, now))} ${toolVerb(tool.name, 'running')} ${subject}${elapsed}`,
     );
   }
-  rows.push('', padFrame(phaseChip(turn, caps, now)));
+  rows.push('', padFrame(phaseChip(state, turn, caps, now)));
   return rows;
 };
 
@@ -135,7 +139,12 @@ const footerRow = (state: TuiState, caps: Capabilities): string => {
 // The live region: the turn in progress, the input box and the status rows. It is redrawn on
 // every change, while finished content is written to the scrollback by the caller.
 export const composeLive = (state: TuiState, caps: Capabilities, now: number): ScreenFrame => {
-  const rows: string[] = state.turn === null ? [] : turnRows(state.turn, caps, now);
+  const rows: string[] =
+    state.turn !== null
+      ? turnRows(state, state.turn, caps, now)
+      : state.compacting !== null
+        ? ['', padFrame(compactingChip(state.compacting.since, caps, now))]
+        : [];
   rows.push('', rule(caps));
   const inputTop = rows.length;
   rows.push(

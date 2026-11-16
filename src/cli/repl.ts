@@ -172,6 +172,27 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       },
       exit: () => finish(0),
       stats: () => formatStats(state.status),
+      compact: async (instructions) => {
+        // Registered as the running turn so Esc and Ctrl+C interrupt it and prompts wait for it.
+        const controller = new AbortController();
+        turn = controller;
+        try {
+          const outcome = await agent.compact({
+            ...(instructions === undefined ? {} : { instructions }),
+            signal: controller.signal,
+            onEvent: (event) => dispatch({ type: 'agent', event, now: Date.now() }),
+          });
+          if (outcome === null) notice('info', 'There is nothing to compact yet.');
+        } catch (error) {
+          dispatch({ type: 'compact-cancelled' });
+          if (controller.signal.aborted)
+            notice('warning', 'Compaction interrupted; the conversation is unchanged.');
+          else notice('error', errorMessage(error));
+        } finally {
+          if (turn === controller) turn = null;
+          scheduler.request();
+        }
+      },
     };
 
     const startTurn = (text: string): void => {

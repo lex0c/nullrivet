@@ -1,0 +1,188 @@
+import { contextBudget } from '../context/budget.ts';
+import {
+  assembleHistory,
+  bodyOf,
+  chooseCut,
+  emptySummary,
+  isUsableSummary,
+  reduceTail,
+  SUMMARY_SECTIONS,
+  transcriptChunks,
+  updateDeterministic,
+} from '../context/compaction.ts';
+import { estimatePromptTokens } from '../context/tokens.ts';
+import { errorMessage } from '../errors.ts';
+import type { GenerateRequest, Provider, UsageInfo } from '../providers/types.ts';
+import { addUsage, emptyUsage } from '../providers/usage.ts';
+import { AbortError, abortableIterable } from './abortable.ts';
+import { collectStep } from './collect.ts';
+import type { Conversation, PromptShape, SummaryState } from './conversation.ts';
+import type { AgentEventListener, CompactReason, CompactStrategy } from './events.ts';
+import { generateWithRetry } from './retry.ts';
+
+const SUMMARY_MAX_TOKENS = 2_048;
+// Room assumed for the summary when sizing the kept tail before the summary exists.
+const SUMMARY_ESTIMATE_TOKENS = 2_048;
+// Chars per token used to size transcript chunks; conservative so a chunk always fits.
+const CHARS_PER_TOKEN = 3;
+
+const SUMMARIZER_SYSTEM = `You maintain the working summary of a session between a user and an autonomous coding agent. You receive the previous summary, if any, and a transcript of what happened after it. Produce the updated summary.
+
+Write exactly these sections, in this order, each starting with its name on its own line:
+${SUMMARY_SECTIONS.map((s) => `${s}:`).join('\n')}
+
+- GOAL: what the user currently wants.
+- CONSTRAINTS: requirements and preferences the user stated.
+- NEXT: the next steps.
+- PROGRESS: what is done, in progress and blocked.
+- ERRORS: failures and whether they were resolved.
+- DECISIONS: choices made and why.
+- ANCHORS: file:line references, symbols, commands and facts that were verified.
+- REJECTED: approaches that were tried or discarded, and why.
+
+Write "(none)" under a section with nothing to report. Keep exact file paths, symbols, commands and error messages. Drop items that are resolved and no longer matter. Be concise. Output only the summary: do not continue the conversation, answer the transcript or call tools.`;
+
+export interface CompactionOptions {
+  provider: Provider;
+  conversation: Conversation;
+  shape: PromptShape;
+  reason: CompactReason;
+  // Focus requested by the user with /compact.
+  instructions?: string;
+  // Fraction of the usual verbatim tail to keep; smaller after an overflow.
+  tailFactor?: number;
+  emit: AgentEventListener;
+  signal: AbortSignal;
+}
+
+export interface CompactionOutcome {
+  strategy: CompactStrategy;
+  before: number;
+  after: number;
+  usage: UsageInfo;
+}
+
+const summaryRequest = (
+  provider: Provider,
+  previous: string,
+  transcript: string,
+  instructions: string | undefined,
+): GenerateRequest => {
+  const parts = [
+    previous.length > 0 ? `<previous_summary>\n${previous}\n</previous_summary>` : '',
+    instructions !== undefined && instructions.length > 0
+      ? `<focus>\n${instructions}\n</focus>`
+      : '',
+    `<transcript>\n${transcript}\n</transcript>`,
+  ].filter((p) => p.length > 0);
+  return {
+    model: provider.id,
+    system: SUMMARIZER_SYSTEM,
+    messages: [{ role: 'user', content: parts.join('\n\n') }],
+    max_tokens: Math.min(SUMMARY_MAX_TOKENS, provider.capabilities.output_max_tokens),
+    ...(provider.capabilities.supports_sampling === false ? {} : { temperature: 0 }),
+  };
+};
+
+// Summarizes the transcript chunks in sequence, each update building on the previous summary.
+// Returns null when the model does not produce a usable summary.
+const summarize = async (
+  options: CompactionOptions,
+  previous: string,
+  chunks: readonly string[],
+): Promise<{ text: string | null; usage: UsageInfo }> => {
+  let summary = previous;
+  let usage = emptyUsage();
+  for (const chunk of chunks) {
+    const request = summaryRequest(options.provider, summary, chunk, options.instructions);
+    const step = await collectStep(
+      abortableIterable(
+        generateWithRetry(options.provider, request, options.signal),
+        options.signal,
+      ),
+    );
+    if (step.usageSeen) {
+      usage = addUsage(usage, step.usage);
+      options.emit({
+        type: 'usage',
+        input: step.usage.input,
+        output: step.usage.output,
+        cacheRead: step.usage.cache_read,
+        cacheWrite: step.usage.cache_creation,
+        compaction: true,
+      });
+    }
+    if (step.errors.length > 0 || !isUsableSummary(step.text)) return { text: null, usage };
+    summary = step.text.trim();
+  }
+  return { text: summary, usage };
+};
+
+// Replaces the older part of the conversation with a cumulative summary and keeps the recent part
+// verbatim. The history is only replaced at the end, so an abort leaves it untouched. Returns
+// null when there is nothing to compact.
+export const compactConversation = async (
+  options: CompactionOptions,
+): Promise<CompactionOutcome | null> => {
+  const { conversation, provider, shape } = options;
+  const budget = contextBudget(provider.capabilities);
+  const before = conversation.estimateTokens(shape);
+  const previous: SummaryState = conversation.summary() ?? emptySummary();
+  const body = bodyOf(conversation.messages(), conversation.summary() !== null);
+  const prefix = estimatePromptTokens([], { system: shape.system, tools: shape.tools });
+  const tailBudget = Math.max(
+    0,
+    Math.min(
+      Math.floor(budget.keepRecent * (options.tailFactor ?? 1)),
+      budget.target - prefix - SUMMARY_ESTIMATE_TOKENS,
+    ),
+  );
+  const cut = chooseCut(body, tailBudget, shape.countReasoning);
+  if (cut === null) return null;
+  const span = body.slice(0, cut);
+  const tail = body.slice(cut);
+
+  options.emit({ type: 'context:compact:start', reason: options.reason });
+  const maxChunkChars = Math.max(
+    4_000,
+    (budget.window - budget.reserve - SUMMARY_MAX_TOKENS * 2) * CHARS_PER_TOKEN,
+  );
+  let summary: { text: string | null; usage: UsageInfo };
+  try {
+    summary = await summarize(options, previous.llmSummary, transcriptChunks(span, maxChunkChars));
+  } catch (error) {
+    if (options.signal.aborted || error instanceof AbortError) throw error;
+    options.emit({
+      type: 'warning',
+      message: `the conversation summary failed: ${errorMessage(error)}`,
+    });
+    summary = { text: null, usage: emptyUsage() };
+  }
+
+  const strategy: CompactStrategy = summary.text === null ? 'fallback' : 'llm';
+  // Without a summary the span is dropped; what the code derives from it (the user's requests,
+  // the files read and modified) is still kept.
+  const llmSummary =
+    summary.text ??
+    [
+      previous.llmSummary,
+      `Note: ${span.length} earlier messages could not be summarized and were removed.`,
+    ]
+      .filter((p) => p.length > 0)
+      .join('\n\n');
+  const state: SummaryState = { ...updateDeterministic(previous, span), llmSummary };
+
+  let history = assembleHistory(state, tail);
+  const estimate = (messages: typeof history): number =>
+    estimatePromptTokens(messages, {
+      system: shape.system,
+      tools: shape.tools,
+      countReasoning: shape.countReasoning,
+    });
+  if (estimate(history) > budget.target) history = assembleHistory(state, reduceTail(tail));
+  conversation.replaceAfterCompaction(history, state);
+
+  const after = conversation.estimateTokens(shape);
+  options.emit({ type: 'context:compact', reason: options.reason, strategy, before, after });
+  return { strategy, before, after, usage: summary.usage };
+};
