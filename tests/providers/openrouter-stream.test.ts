@@ -180,7 +180,7 @@ describe('normalizeOpenRouterStream', () => {
       { choices: [{ delta: {}, finish_reason: 'error' }] },
     ]);
     const err = ev.find((e) => e.kind === 'error');
-    expect(err).toMatchObject({ kind: 'error', code: 'openrouter.stream_error', retryable: false });
+    expect(err).toMatchObject({ kind: 'error', code: 'openrouter.stream_error', retryable: true });
     // No clean stop after an error.
     expect(ev.some((e) => e.kind === 'stop')).toBe(false);
   });

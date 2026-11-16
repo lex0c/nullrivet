@@ -218,11 +218,13 @@ export async function* normalizeOpenRouterStream(
 
       if (typeof choice.finish_reason === 'string') {
         if (choice.finish_reason === 'error') {
+          // OpenRouter reports an upstream failure during generation this way, without details.
+          // It is usually transient, so the step may be retried when nothing was produced yet.
           yield {
             kind: 'error',
             code: 'openrouter.stream_error',
             message: 'OpenRouter stream ended with finish_reason=error',
-            retryable: false,
+            retryable: true,
           };
           yield* emitUsage();
           return;

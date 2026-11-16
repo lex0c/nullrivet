@@ -49,14 +49,23 @@ const discover = (model: string, fetchImpl: FetchLike, over: Partial<DiscoveryOp
   discoverOpenRouterModel(model, { baseUrl: BASE, fetch: fetchImpl, cache: new Map(), ...over });
 
 describe('discoverOpenRouterModel', () => {
-  test('maps context_length, max_completion_tokens and sampling support', async () => {
+  test('uses the smaller of the listed and the served context window', async () => {
     const m = jsonFetch(listing(toolModel()));
+    const result = await discover('vendor/model', m.fetch);
+    expect(result).toEqual({
+      ok: true,
+      capabilities: { context_window: 128_000, output_max_tokens: 16_000 },
+    });
+    expect(m.urls).toEqual([`${BASE}/models`]);
+  });
+
+  test('falls back to the listed context window when the served one is absent', async () => {
+    const m = jsonFetch(listing(toolModel({ top_provider: { max_completion_tokens: 16_000 } })));
     const result = await discover('vendor/model', m.fetch);
     expect(result).toEqual({
       ok: true,
       capabilities: { context_window: 200_000, output_max_tokens: 16_000 },
     });
-    expect(m.urls).toEqual([`${BASE}/models`]);
   });
 
   test('a trailing slash on the base URL is not doubled', async () => {
@@ -77,7 +86,7 @@ describe('discoverOpenRouterModel', () => {
     expect(result).toEqual({
       ok: true,
       capabilities: {
-        context_window: 200_000,
+        context_window: 128_000,
         output_max_tokens: 16_000,
         supports_reasoning: true,
       },

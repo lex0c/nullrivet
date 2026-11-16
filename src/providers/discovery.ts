@@ -50,8 +50,13 @@ const parseModelList = (payload: unknown): Map<string, ListedModel> | undefined 
     if (models.has(item.id)) continue;
     const topProvider = isRecord(item.top_provider) ? item.top_provider : undefined;
     const params = item.supported_parameters;
+    const listed = positiveInt(item.context_length);
+    const served = positiveInt(topProvider?.context_length);
     models.set(item.id, {
-      contextLength: positiveInt(item.context_length),
+      // The default-routed provider may serve a smaller window than the headline maximum, and
+      // requests are sent without OpenRouter's automatic truncation, so the smaller one is used.
+      contextLength:
+        listed !== undefined && served !== undefined ? Math.min(listed, served) : listed,
       maxCompletionTokens: positiveInt(topProvider?.max_completion_tokens),
       supportedParameters: Array.isArray(params)
         ? params.filter((p): p is string => typeof p === 'string')
