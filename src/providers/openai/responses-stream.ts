@@ -1,5 +1,6 @@
 import { INVALID_TOOL_CALL } from '../errors.ts';
 import type { StopReason, StreamEvent, UsageInfo } from '../types.ts';
+import { parseToolArguments } from '../types.ts';
 import { openAIStreamErrorEvent, type RawOpenAIError } from './stream.ts';
 
 // Normalizer for the Responses API stream:
@@ -60,15 +61,6 @@ const toUsage = (u: RawResponsesUsage): UsageInfo => {
     cache_read: cached,
     cache_creation: 0,
   };
-};
-
-const parseArgs = (text: string): Record<string, unknown> => {
-  if (text.length === 0) return {};
-  const obj = JSON.parse(text) as unknown;
-  if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) {
-    throw new Error('tool args must decode to a JSON object');
-  }
-  return obj as Record<string, unknown>;
 };
 
 export async function* normalizeResponsesStream(
@@ -151,7 +143,7 @@ export async function* normalizeResponsesStream(
             fromItem.length > 0 ? fromItem : item.id ? (argsByItem.get(item.id) ?? '') : '';
           let parsed: Record<string, unknown>;
           try {
-            parsed = parseArgs(args);
+            parsed = parseToolArguments(args);
           } catch (e) {
             yield {
               kind: 'error',

@@ -17,6 +17,8 @@ interface ListedModel {
   contextLength: number | undefined;
   maxCompletionTokens: number | undefined;
   features: readonly string[] | undefined;
+  // Set by sources that report capabilities directly (Anthropic).
+  capabilities?: ProviderCapabilities;
 }
 
 // Parsed models per source. Kept in memory only, for the lifetime of the process.
@@ -298,8 +300,6 @@ export const discoverOllamaModel = async (
   return toOllamaCapabilities(model, entry);
 };
 
-const anthropicCache = new Map<string, ProviderCapabilities>();
-
 const isTrue = (value: unknown, ...path: string[]): boolean => {
   let current = value;
   for (const key of path) {
@@ -318,8 +318,10 @@ export const discoverAnthropicModel = async (
 ): Promise<DiscoveryResult> => {
   if (options.signal?.aborted === true) throw new AbortError();
   const baseUrl = options.baseUrl.replace(/\/+$/, '');
-  const cacheKey = `${baseUrl}\0${model}`;
-  const cached = anthropicCache.get(cacheKey);
+  const url = `${baseUrl}/v1/models/${encodeURIComponent(model)}`;
+  const cache = options.cache ?? processCache;
+  const cachedModels = cache.get(baseUrl);
+  const cached = cachedModels?.get(model)?.capabilities;
   if (cached !== undefined) return { ok: true, capabilities: cached };
   if (options.apiKey === undefined) {
     return {
@@ -328,7 +330,6 @@ export const discoverAnthropicModel = async (
       error: 'the Anthropic model endpoint requires an API key',
     };
   }
-  const url = `${baseUrl}/v1/models/${encodeURIComponent(model)}`;
   const fetched = await fetchJson(
     {
       method: 'GET',
@@ -373,6 +374,12 @@ export const discoverAnthropicModel = async (
   }
   if (isTrue(features, 'effort', 'supported')) capabilities.supports_reasoning_effort = true;
   if (isTrue(features, 'effort', 'xhigh', 'supported')) capabilities.supports_effort_xhigh = true;
-  anthropicCache.set(cacheKey, capabilities);
+  const entry: ListedModel = {
+    contextLength: window,
+    maxCompletionTokens: capabilities.output_max_tokens,
+    features: undefined,
+    capabilities,
+  };
+  cache.set(baseUrl, new Map([...(cachedModels ?? []), [model, entry]]));
   return { ok: true, capabilities };
 };

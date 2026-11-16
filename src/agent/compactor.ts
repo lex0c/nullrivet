@@ -14,13 +14,17 @@ import { estimatePromptTokens } from '../context/tokens.ts';
 import { errorMessage } from '../errors.ts';
 import type { GenerateRequest, Provider, UsageInfo } from '../providers/types.ts';
 import { addUsage, emptyUsage } from '../providers/usage.ts';
-import { AbortError, abortableIterable } from './abortable.ts';
-import { collectStep } from './collect.ts';
+import { AbortError, abortableIterable, stallWatchdog } from './abortable.ts';
+import { type CollectedStep, collectStep } from './collect.ts';
 import type { Conversation, PromptShape, SummaryState } from './conversation.ts';
 import type { AgentEventListener, CompactReason, CompactStrategy } from './events.ts';
 import { generateWithRetry } from './retry.ts';
 
-const SUMMARY_MAX_TOKENS = 2_048;
+// The summary itself is short, but reasoning models count their thinking against the same
+// limit; a tight limit would leave no room for the summary and drop the span.
+const SUMMARY_MAX_TOKENS = 8_192;
+const SUMMARY_TEXT_TOKENS = 2_048;
+const DEFAULT_STALL_MS = 120_000;
 // Room assumed for the summary when sizing the kept tail before the summary exists.
 const SUMMARY_ESTIMATE_TOKENS = 2_048;
 // Chars per token used to size transcript chunks; conservative so a chunk always fits.
@@ -51,6 +55,8 @@ export interface CompactionOptions {
   instructions?: string;
   // Fraction of the usual verbatim tail to keep; smaller after an overflow.
   tailFactor?: number;
+  // A summary stream silent for this long is treated as failed.
+  stallMs?: number;
   emit: AgentEventListener;
   signal: AbortSignal;
 }
@@ -81,6 +87,8 @@ const summaryRequest = (
     messages: [{ role: 'user', content: parts.join('\n\n') }],
     max_tokens: Math.min(SUMMARY_MAX_TOKENS, provider.capabilities.output_max_tokens),
     ...(provider.capabilities.supports_sampling === false ? {} : { temperature: 0 }),
+    // Summarizing needs little reasoning; the lowest effort leaves the output for the summary.
+    ...(provider.capabilities.supports_reasoning_effort === true ? { effort: 'low' as const } : {}),
   };
 };
 
@@ -95,12 +103,25 @@ const summarize = async (
   let usage = emptyUsage();
   for (const chunk of chunks) {
     const request = summaryRequest(options.provider, summary, chunk, options.instructions);
-    const step = await collectStep(
-      abortableIterable(
-        generateWithRetry(options.provider, request, options.signal),
-        options.signal,
-      ),
-    );
+    // A step-scoped controller lets a stall cancel the HTTP request, not only stop waiting.
+    const stepController = new AbortController();
+    const forwardAbort = (): void => stepController.abort();
+    options.signal.addEventListener('abort', forwardAbort, { once: true });
+    let step: CollectedStep;
+    try {
+      step = await collectStep(
+        abortableIterable(
+          stallWatchdog(
+            generateWithRetry(options.provider, request, stepController.signal),
+            options.stallMs ?? DEFAULT_STALL_MS,
+          ),
+          options.signal,
+        ),
+      );
+    } finally {
+      options.signal.removeEventListener('abort', forwardAbort);
+      stepController.abort();
+    }
     if (step.usageSeen) {
       usage = addUsage(usage, step.usage);
       options.emit({
@@ -143,9 +164,12 @@ export const compactConversation = async (
   const tail = body.slice(cut);
 
   options.emit({ type: 'context:compact:start', reason: options.reason });
+  // The summary request holds the previous summary, the instructions and one transcript chunk,
+  // and keeps room for its own output; the main conversation's reserve does not apply to it.
+  const summaryOutput = Math.min(SUMMARY_MAX_TOKENS, provider.capabilities.output_max_tokens);
   const maxChunkChars = Math.max(
     4_000,
-    (budget.window - budget.reserve - SUMMARY_MAX_TOKENS * 2) * CHARS_PER_TOKEN,
+    (budget.window - summaryOutput - SUMMARY_TEXT_TOKENS * 2) * CHARS_PER_TOKEN,
   );
   let summary: { text: string | null; usage: UsageInfo };
   try {
@@ -180,6 +204,11 @@ export const compactConversation = async (
       countReasoning: shape.countReasoning,
     });
   if (estimate(history) > budget.target) history = assembleHistory(state, reduceTail(tail));
+  // Last resort: the latest results alone keep the conversation above the trigger, which would
+  // make every following request compact again or overflow.
+  if (estimate(history) > budget.trigger) {
+    history = assembleHistory(state, reduceTail(tail, { keepLatest: false }));
+  }
   conversation.replaceAfterCompaction(history, state);
 
   const after = conversation.estimateTokens(shape);

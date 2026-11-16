@@ -1,5 +1,4 @@
-import { contextBudget } from '../context/budget.ts';
-import { estimatePromptTokens } from '../context/tokens.ts';
+import { type ContextBudget, contextBudget } from '../context/budget.ts';
 import { errorMessage } from '../errors.ts';
 import type { InstructionsLoader } from '../instructions/agents-loader.ts';
 import { renderInstructionFiles } from '../instructions/agents-loader.ts';
@@ -110,6 +109,9 @@ const isOverflowFailure = (step: CollectedStep): boolean =>
   step.text.length === 0 &&
   step.tool_uses.length === 0;
 
+// Growth, as a share of the window, after which an ineffective compaction is tried again.
+const REGROWTH_RATIO = 0.1;
+
 const CONTEXT_FULL = 'the conversation does not fit the context window, even after compacting it';
 // After an overflow the estimate proved too low, so the compaction keeps a shorter verbatim tail.
 const OVERFLOW_TAIL_FACTOR = 0.5;
@@ -130,15 +132,9 @@ export const promptShape = (
 const describeErrors = (errors: readonly CollectedError[]): string =>
   errors.map((e) => `${e.code}: ${e.message}`).join('; ');
 
-// The output limit shrinks as the conversation grows, so prompt plus answer always fit the window.
-const outputBudget = (request: GenerateRequest, provider: Provider, limit: number): number => {
-  const prompt = estimatePromptTokens(request.messages, {
-    ...(request.system === undefined ? {} : { system: request.system }),
-    ...(request.tools === undefined ? {} : { tools: request.tools }),
-    countReasoning: provider.replaysReasoning === true,
-  });
-  return Math.min(limit, provider.capabilities.context_window - prompt - CONTEXT_SAFETY_TOKENS);
-};
+// The output limit shrinks with the conversation, so prompt and answer always fit the window.
+const outputBudget = (promptTokens: number, provider: Provider, limit: number): number =>
+  Math.min(limit, provider.capabilities.context_window - promptTokens - CONTEXT_SAFETY_TOKENS);
 
 // A step-scoped controller lets a stall cancel the HTTP request, not only stop waiting for it;
 // it also follows the turn signal so a user abort cancels the request too.
@@ -249,6 +245,7 @@ export const runTurn = async (prompt: string, deps: TurnDependencies): Promise<T
         shape,
         reason,
         ...(tailFactor === undefined ? {} : { tailFactor }),
+        stallMs: limits.stallMs,
         emit,
         signal,
       });
@@ -260,6 +257,25 @@ export const runTurn = async (prompt: string, deps: TurnDependencies): Promise<T
       emit({ type: 'warning', message: `compaction failed: ${errorMessage(error)}` });
       return 'skipped';
     }
+  };
+
+  // When a compaction cannot bring the conversation below the trigger (the latest exchange alone
+  // is too large), compacting again on every step would only repeat the summary request and
+  // invalidate the prompt cache. Auto-compaction then waits until the conversation has grown.
+  let ineffectiveAt: number | null = null;
+
+  const shouldCompact = (estimate: number, budget: ContextBudget): boolean =>
+    estimate > budget.trigger &&
+    (ineffectiveAt === null || estimate > ineffectiveAt + budget.window * REGROWTH_RATIO);
+
+  const compactAuto = async (
+    shape: PromptShape,
+    budget: ContextBudget,
+  ): Promise<'done' | 'skipped' | 'aborted'> => {
+    const result = await compact('auto', shape);
+    const after = conversation.estimateTokens(shape);
+    ineffectiveAt = after > budget.trigger ? after : null;
+    return result;
   };
 
   const recoverFromOverflow = async (shape: PromptShape): Promise<'retry' | 'full' | 'aborted'> => {
@@ -277,21 +293,32 @@ export const runTurn = async (prompt: string, deps: TurnDependencies): Promise<T
     if (signal.aborted) return end('aborted');
     steps += 1;
     const shape = promptShape(deps);
-    if (conversation.estimateTokens(shape) > contextBudget(deps.provider.capabilities).trigger) {
+    const budget = contextBudget(deps.provider.capabilities);
+    let estimate = conversation.estimateTokens(shape);
+    if (shouldCompact(estimate, budget)) {
+      if ((await compactAuto(shape, budget)) === 'aborted') return end('aborted');
+      estimate = conversation.estimateTokens(shape);
+    }
+    const minOutput = Math.min(MIN_OUTPUT_TOKENS, limits.maxOutputTokens);
+    let maxTokens = outputBudget(estimate, deps.provider, limits.maxOutputTokens);
+    if (maxTokens < minOutput) {
+      // The answer has no room left: compact once before giving up.
       if ((await compact('auto', shape)) === 'aborted') return end('aborted');
+      maxTokens = outputBudget(
+        conversation.estimateTokens(shape),
+        deps.provider,
+        limits.maxOutputTokens,
+      );
+      if (maxTokens < minOutput) return end('budget', CONTEXT_FULL);
     }
     const request: GenerateRequest = {
       model: deps.provider.id,
       system: shape.system,
       messages: [...conversation.messages()],
       tools: [...shape.tools],
-      max_tokens: limits.maxOutputTokens,
+      max_tokens: maxTokens,
       ...(deps.effort === undefined ? {} : { effort: deps.effort }),
     };
-    request.max_tokens = outputBudget(request, deps.provider, limits.maxOutputTokens);
-    if (request.max_tokens < Math.min(MIN_OUTPUT_TOKENS, limits.maxOutputTokens)) {
-      return end('budget', 'the conversation no longer fits the context window');
-    }
 
     let collected: CollectedStep;
     try {
@@ -367,11 +394,11 @@ export const runTurn = async (prompt: string, deps: TurnDependencies): Promise<T
       streamRetries = 0;
     }
 
-    conversation.appendAssistant(buildAssistantContent(collected));
     if (collected.usageSeen) {
       const u = collected.usage;
-      conversation.recordUsage(u.input + u.cache_read + u.cache_creation + u.output, shape);
+      conversation.recordPromptUsage(u.input + u.cache_read + u.cache_creation, shape);
     }
+    conversation.appendAssistant(buildAssistantContent(collected));
 
     // The answer was cut off by the context window: the text shown so far is kept, its tool calls
     // are not run, and the turn continues on a compacted conversation.

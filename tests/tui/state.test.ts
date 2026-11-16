@@ -177,4 +177,12 @@ describe('reduce', () => {
     ]);
     expect(permanent[0]).toMatchObject({ kind: 'notice', level: 'warning' });
   });
+  test('the end of a turn clears a compaction that was interrupted', () => {
+    const { state } = run([
+      ev({ type: 'agent:start' }),
+      ev({ type: 'context:compact:start', reason: 'auto' }, 10),
+      ev({ type: 'agent:end', reason: 'aborted' }, 20),
+    ]);
+    expect(state.compacting).toBeNull();
+  });
 });

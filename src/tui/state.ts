@@ -265,8 +265,9 @@ const reduceAgentEvent = (state: TuiState, event: AgentEvent, now: number): Redu
     }
     case 'agent:end': {
       if (turn === null) return { state, permanent: [] };
+      // A compaction aborted with the turn emits no end event of its own.
       return {
-        state: { ...state, turn: null },
+        state: { ...state, turn: null, compacting: null },
         permanent: [
           ...assistantItem(turn.pendingText),
           {

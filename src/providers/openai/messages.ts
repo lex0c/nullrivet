@@ -1,8 +1,4 @@
-import { flattenSystemSegments, type GenerateRequest } from '../types.ts';
-
-// The OpenAI message shapes carry one string per message. Separate text blocks (two prompts merged
-// after an interrupted turn, or text split around tool calls) must not run together.
-export const TEXT_BLOCK_SEPARATOR = '\n\n';
+import { flattenSystemSegments, type GenerateRequest, TEXT_BLOCK_SEPARATOR } from '../types.ts';
 
 // Tool results have no error flag in the OpenAI shapes, so a failure is marked in the content.
 export const toolResultText = (content: string, isError: boolean | undefined): string =>

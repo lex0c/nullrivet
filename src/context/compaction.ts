@@ -1,9 +1,5 @@
 import { AGENT_NOTE_OPEN, type SummaryState } from '../agent/conversation.ts';
-import type {
-  ProviderContentBlock,
-  ProviderMessage,
-  ProviderTextBlock,
-} from '../providers/types.ts';
+import { contentBlocks, type ProviderMessage, type ProviderTextBlock } from '../providers/types.ts';
 import { estimateMessagesTokens } from './tokens.ts';
 
 export const SUMMARY_OPEN = '[compacted_history]';
@@ -38,9 +34,6 @@ export const emptySummary = (): SummaryState => ({
   filesModified: [],
 });
 
-const toBlocks = (content: string | ProviderContentBlock[]): ProviderContentBlock[] =>
-  typeof content === 'string' ? [{ type: 'text', text: content }] : content;
-
 // Keeps the start and the end of long text, which usually carry the command and its outcome.
 // The result, marker included, never exceeds `max` characters.
 export const clipMiddle = (text: string, max: number): string => {
@@ -54,7 +47,7 @@ export const clipMiddle = (text: string, max: number): string => {
 };
 
 const isPrompt = (message: ProviderMessage): boolean =>
-  message.role === 'user' && toBlocks(message.content).every((b) => b.type === 'text');
+  message.role === 'user' && contentBlocks(message.content).every((b) => b.type === 'text');
 
 // Messages where the kept tail may start: never a message holding tool results, which would
 // lose the tool calls they answer.
@@ -68,7 +61,7 @@ export const bodyOf = (
 ): ProviderMessage[] => {
   const [head, ...rest] = history;
   if (!compacted || head === undefined) return [...history];
-  const blocks = toBlocks(head.content).slice(1);
+  const blocks = contentBlocks(head.content).slice(1);
   return blocks.length > 0 ? [{ role: 'user', content: blocks }, ...rest] : rest;
 };
 
@@ -104,7 +97,7 @@ export const chooseCut = (
 };
 
 const textBlocks = (message: ProviderMessage): string[] =>
-  toBlocks(message.content)
+  contentBlocks(message.content)
     .filter((b): b is ProviderTextBlock => b.type === 'text')
     .map((b) => b.text);
 
@@ -112,7 +105,7 @@ const toolPaths = (span: readonly ProviderMessage[], names: readonly string[]): 
   const paths: string[] = [];
   for (const message of span) {
     if (message.role !== 'assistant') continue;
-    for (const block of toBlocks(message.content)) {
+    for (const block of contentBlocks(message.content)) {
       if (block.type !== 'tool_use' || !names.includes(block.name)) continue;
       const path = block.input.path;
       if (typeof path === 'string' && path.length > 0) paths.push(path);
@@ -177,7 +170,7 @@ const argsForTranscript = (input: Record<string, unknown>): string => {
 // Labels make the transcript read as material to summarize rather than a conversation to continue.
 export const serializeMessage = (message: ProviderMessage): string => {
   const lines: string[] = [];
-  for (const block of toBlocks(message.content)) {
+  for (const block of contentBlocks(message.content)) {
     if (block.type === 'text') {
       const label =
         message.role === 'assistant'
@@ -217,8 +210,9 @@ export const transcriptChunks = (span: readonly ProviderMessage[], maxChars: num
 
 // A summary without the expected sections is treated as a failure (a refusal, an answer to the
 // transcript instead of a summary).
+// Headings may carry Markdown decoration (`**GOAL:**`, `## GOAL`, `- GOAL`).
 export const isUsableSummary = (text: string): boolean =>
-  SUMMARY_SECTIONS.filter((section) => new RegExp(`^\\s*#*\\s*${section}\\b`, 'm').test(text))
+  SUMMARY_SECTIONS.filter((section) => new RegExp(`^[\\s>#*_-]*${section}\\b`, 'm').test(text))
     .length >= 3;
 
 const list = (items: readonly string[]): string =>
@@ -254,21 +248,30 @@ export const assembleHistory = (
   const head: ProviderTextBlock = { type: 'text', text: renderSummary(state) };
   const [first, ...rest] = tail;
   if (first !== undefined && first.role === 'user') {
-    return [{ role: 'user', content: [head, ...toBlocks(first.content)] }, ...rest];
+    return [{ role: 'user', content: [head, ...contentBlocks(first.content)] }, ...rest];
   }
   return [{ role: 'user', content: [head] }, ...tail];
 };
 
 // Shortens tool results in the kept tail when the compacted conversation is still above its
-// target. Errors and the latest results stay intact because they drive the next step.
-export const reduceTail = (tail: readonly ProviderMessage[]): ProviderMessage[] => {
+// target. Errors and the latest results stay intact because they drive the next step, unless
+// `keepLatest` is off: the last resort when the latest exchange alone is too large.
+export const reduceTail = (
+  tail: readonly ProviderMessage[],
+  options: { keepLatest?: boolean } = {},
+): ProviderMessage[] => {
+  const keepLatest = options.keepLatest ?? true;
   let lastResults = -1;
   tail.forEach((m, i) => {
-    if (m.role === 'user' && toBlocks(m.content).some((b) => b.type === 'tool_result'))
+    if (m.role === 'user' && contentBlocks(m.content).some((b) => b.type === 'tool_result'))
       lastResults = i;
   });
   return tail.map((message, i) => {
-    if (i === lastResults || message.role !== 'user' || typeof message.content === 'string') {
+    if (
+      (keepLatest && i === lastResults) ||
+      message.role !== 'user' ||
+      typeof message.content === 'string'
+    ) {
       return message;
     }
     return {

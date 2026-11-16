@@ -5,7 +5,8 @@ import type {
   ProviderMessage,
   ProviderToolDef,
 } from '../types.ts';
-import { systemText, TEXT_BLOCK_SEPARATOR, toolResultText } from './messages.ts';
+import { TEXT_BLOCK_SEPARATOR } from '../types.ts';
+import { systemText, toolResultText } from './messages.ts';
 import { MESSAGE_PHASE_KEY } from './responses-stream.ts';
 
 // Request shape of the Responses API, used for reasoning models. Requests are stateless

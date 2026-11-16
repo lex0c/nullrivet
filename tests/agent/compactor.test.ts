@@ -142,20 +142,79 @@ describe('compactConversation', () => {
     const { provider } = await run(filled(), summaries());
     const req = provider.calls[0]?.req;
     expect(req?.tools).toBeUndefined();
-    expect(req?.max_tokens).toBeLessThanOrEqual(2_048);
+    expect(req?.max_tokens).toBe(4_000);
     expect(req?.system).toContain('GOAL:');
   });
 });
 
+describe('summary request on reasoning models', () => {
+  test('asks for the lowest effort and leaves room beyond the summary text', async () => {
+    const provider = createMockProvider(
+      Array.from({ length: 10 }, () => textTurn(SUMMARY)),
+      {
+        context_window: 200_000,
+        output_max_tokens: 32_768,
+        supports_reasoning_effort: true,
+        supports_sampling: false,
+      },
+    );
+    await compactConversation({
+      provider,
+      conversation: filled(),
+      shape,
+      reason: 'manual',
+      emit: () => undefined,
+      signal: new AbortController().signal,
+    });
+    const req = provider.calls[0]?.req;
+    expect(req?.effort).toBe('low');
+    expect(req?.max_tokens).toBe(8_192);
+    expect(req?.temperature).toBeUndefined();
+  });
+
+  test('a summary stream that goes silent falls back instead of hanging', async () => {
+    const provider = createMockProvider([], { context_window: 16_000, output_max_tokens: 4_000 });
+    let cancelled = false;
+    provider.generate = async function* (_req, signal) {
+      yield { kind: 'start', message_id: 'm' };
+      await new Promise<void>((resolve) =>
+        signal?.addEventListener('abort', () => {
+          cancelled = true;
+          resolve();
+        }),
+      );
+    };
+    const conversation = filled();
+    const outcome = await compactConversation({
+      provider,
+      conversation,
+      shape,
+      reason: 'auto',
+      stallMs: 30,
+      emit: () => undefined,
+      signal: new AbortController().signal,
+    });
+    expect(outcome?.strategy).toBe('fallback');
+    expect(cancelled).toBe(true);
+  });
+});
+
 describe('Conversation measurement', () => {
-  test('starts from the reported usage and estimates only what came after it', () => {
+  test('starts from the reported prompt size and estimates only what came after it', () => {
     const c = new Conversation();
     c.appendUser('x'.repeat(40_000));
-    c.appendAssistant([{ type: 'text', text: 'ok' }]);
-    c.recordUsage(1_000, shape);
-    expect(c.estimateTokens(shape)).toBe(1_000);
-    c.appendUser('y'.repeat(400));
-    expect(c.estimateTokens(shape)).toBe(1_100);
+    c.recordPromptUsage(9_000, shape);
+    expect(c.estimateTokens(shape)).toBe(9_000);
+    c.appendAssistant([{ type: 'text', text: 'y'.repeat(400) }]);
+    expect(c.estimateTokens(shape)).toBe(9_100);
     expect(c.estimateTokens({ ...shape, key: 'other' })).toBeGreaterThan(10_000);
+  });
+
+  test('a report far below the estimate is treated as incomplete', () => {
+    const c = new Conversation();
+    c.appendUser('x'.repeat(40_000));
+    // A server that reports only the tokens it did not reuse from its cache.
+    c.recordPromptUsage(600, shape);
+    expect(c.estimateTokens(shape)).toBeGreaterThan(10_000);
   });
 });

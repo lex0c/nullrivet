@@ -1,5 +1,6 @@
 import { CONTEXT_OVERFLOW, INVALID_TOOL_CALL, isContextOverflowMessage } from '../errors.ts';
 import type { StopReason, StreamEvent, UsageInfo } from '../types.ts';
+import { parseToolArguments } from '../types.ts';
 
 // `input_tokens` excludes cache hits; cache reads and writes are reported separately. Any field
 // may be missing on compatible endpoints.
@@ -189,23 +190,17 @@ export async function* normalizeAnthropicStream(
           const tool = toolUses.get(event.index);
           if (tool === undefined) break;
           toolUses.delete(event.index);
-          let parsed: Record<string, unknown> = {};
-          if (tool.partialArgs.length > 0) {
-            try {
-              const obj = JSON.parse(tool.partialArgs) as unknown;
-              if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) {
-                throw new Error('tool args must decode to a JSON object');
-              }
-              parsed = obj as Record<string, unknown>;
-            } catch (e) {
-              yield {
-                kind: 'error',
-                code: INVALID_TOOL_CALL,
-                message: `failed to parse tool_use args for ${tool.id}: ${(e as Error).message}`,
-                retryable: false,
-              };
-              break;
-            }
+          let parsed: Record<string, unknown>;
+          try {
+            parsed = parseToolArguments(tool.partialArgs);
+          } catch (e) {
+            yield {
+              kind: 'error',
+              code: INVALID_TOOL_CALL,
+              message: `failed to parse tool_use args for ${tool.id}: ${(e as Error).message}`,
+              retryable: false,
+            };
+            break;
           }
           yield { kind: 'tool_use_stop', id: tool.id, final_args: parsed };
           break;

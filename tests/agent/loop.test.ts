@@ -418,6 +418,21 @@ describe('runTurn', () => {
       );
     });
 
+    test('a compaction that cannot get below the trigger is not repeated every step', async () => {
+      const h = harness(
+        responder([
+          () => toolTurn([{ id: 't1', name: 'read_file', args: {} }]),
+          () => toolTurn([{ id: 't2', name: 'read_file', args: {} }]),
+          () => textTurn('done'),
+        ]),
+      );
+      prefill(h, 4);
+      // A prompt that alone exceeds the trigger stays verbatim in the kept tail.
+      await runTurn(`huge ${'z'.repeat(36_000)}`, h.deps);
+      const compactions = h.events.filter((e) => e.type === 'context:compact');
+      expect(compactions).toHaveLength(1);
+    });
+
     test('a rejected request is compacted and retried once', async () => {
       const h = harness(responder([overflow, () => textTurn('ok')]));
       prefill(h, 4);

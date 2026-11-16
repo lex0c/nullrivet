@@ -150,3 +150,21 @@ export interface Provider {
   replaysReasoning?: boolean;
   generate(req: GenerateRequest, signal?: AbortSignal): AsyncIterable<StreamEvent>;
 }
+
+export const contentBlocks = (content: string | ProviderContentBlock[]): ProviderContentBlock[] =>
+  typeof content === 'string' ? [{ type: 'text', text: content }] : content;
+
+// Joins text blocks for APIs that take one string per message, so separate blocks (two prompts
+// merged after an interrupted turn, or text split around tool calls) do not run together.
+export const TEXT_BLOCK_SEPARATOR = '\n\n';
+
+// Tool arguments streamed by a provider, which must form a JSON object. Throws with a message the
+// stream normalizers report as an invalid tool call.
+export const parseToolArguments = (text: string): Record<string, unknown> => {
+  if (text.length === 0) return {};
+  const value = JSON.parse(text) as unknown;
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('tool arguments must be a JSON object');
+  }
+  return value as Record<string, unknown>;
+};

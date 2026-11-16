@@ -3,11 +3,8 @@ import {
   flattenSystemSegments,
   type GenerateRequest,
   type ProviderCapabilities,
+  TEXT_BLOCK_SEPARATOR,
 } from '../types.ts';
-
-// The OpenAI message shape carries one string per message. Separate text blocks (two prompts merged
-// after an interrupted turn, or text split around tool calls) must not run together.
-const TEXT_BLOCK_SEPARATOR = '\n\n';
 
 // OpenRouter messages are OpenAI-shaped plus a reasoning slot (`reasoning_details` or
 // `reasoning`) that carries the model's reasoning across tool turns. The plain OpenAI mapping

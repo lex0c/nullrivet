@@ -6,8 +6,13 @@ import type {
   ProviderToolResultBlock,
   ProviderToolUseBlock,
 } from '../providers/types.ts';
+import { contentBlocks } from '../providers/types.ts';
 
 export const INTERRUPTED_RESULT = '[interrupted: the tool call did not complete]';
+
+// The character estimate overestimates by 10-25% for English and underestimates dense text; a
+// reported prompt below half of it is treated as incomplete.
+const MIN_TRUSTED_USAGE_RATIO = 0.5;
 
 // Text the agent adds to a user message on its own (feedback about rejected tool calls, notes
 // after a compaction). The tag tells it apart from what the user typed.
@@ -48,9 +53,6 @@ interface MeasurementAnchor {
   key: string;
 }
 
-const toBlocks = (content: string | ProviderContentBlock[]): ProviderContentBlock[] =>
-  typeof content === 'string' ? [{ type: 'text', text: content }] : content;
-
 // Conversation history held only in memory. Every append keeps the invariants the provider APIs
 // require: roles alternate, every tool_use is answered by a tool_result in the next message, and
 // no message is empty.
@@ -87,7 +89,7 @@ export class Conversation {
       // user message last; the new prompt joins it to keep roles alternating.
       this.history[this.history.length - 1] = {
         role: 'user',
-        content: [...toBlocks(last.content), { type: 'text', text }],
+        content: [...contentBlocks(last.content), { type: 'text', text }],
       };
       return;
     }
@@ -115,10 +117,24 @@ export class Conversation {
     return last.content.filter((b): b is ProviderToolUseBlock => b.type === 'tool_use');
   }
 
-  // Records the size the provider reported for the last request (prompt plus answer). Later
-  // estimates start from it and only approximate what was appended since.
-  recordUsage(tokens: number, shape: PromptShape): void {
-    this.anchor = { tokens, messages: this.history.length, key: shape.key };
+  // Records the prompt size the provider reported for the request just made, before its answer
+  // is appended. Later estimates start from it and only approximate what was appended since; the
+  // answer itself is estimated from its text, so output the provider never receives back (such as
+  // reasoning that is not replayed) does not inflate the measurement.
+  //
+  // A report far below the character estimate is not a measurement of the whole prompt: some
+  // servers count only the tokens they did not reuse from their cache. It is ignored, and the
+  // estimate stays in use.
+  recordPromptUsage(promptTokens: number, shape: PromptShape): void {
+    const estimated = estimatePromptTokens(this.history, {
+      system: shape.system,
+      tools: shape.tools,
+      countReasoning: shape.countReasoning,
+    });
+    this.anchor =
+      promptTokens >= estimated * MIN_TRUSTED_USAGE_RATIO
+        ? { tokens: promptTokens, messages: this.history.length, key: shape.key }
+        : null;
   }
 
   // Estimated prompt size of the next request with this shape.

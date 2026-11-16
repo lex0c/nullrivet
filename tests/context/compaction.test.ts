@@ -124,6 +124,7 @@ describe('summary', () => {
   test('a usable summary has the expected sections', () => {
     expect(isUsableSummary('GOAL:\nfix\nNEXT:\ntests\nERRORS:\n(none)')).toBe(true);
     expect(isUsableSummary('Sure, here is what happened.')).toBe(false);
+    expect(isUsableSummary('**GOAL:** fix\n## NEXT\ntests\n- **ERRORS:** none')).toBe(true);
   });
 
   test('the head lists requests verbatim and the history keeps alternating', () => {
@@ -160,5 +161,14 @@ describe('summary', () => {
     expect(content(reduced[1]).length).toBeLessThan(2_200);
     expect(content(reduced[3]).length).toBe(10_000);
     expect(content(reduced[5]).length).toBe(10_000);
+  });
+});
+
+describe('reduceTail as a last resort', () => {
+  test('also shortens the latest results when asked to', () => {
+    const tail = [call('a', 'bash', {}), result('a', 'q'.repeat(10_000))];
+    const reduced = reduceTail(tail, { keepLatest: false });
+    const block = Array.isArray(reduced[1]?.content) ? reduced[1].content[0] : undefined;
+    expect(block?.type === 'tool_result' ? block.content.length : 0).toBeLessThan(2_200);
   });
 });

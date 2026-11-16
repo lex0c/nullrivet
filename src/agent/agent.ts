@@ -1,5 +1,6 @@
 import { stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { contextBudget } from '../context/budget.ts';
 import type { InstructionFile, InstructionsLoader } from '../instructions/agents-loader.ts';
 import type { Provider, ProviderEffort } from '../providers/types.ts';
 import type { ExecutionMode } from '../tools/policy.ts';
@@ -53,14 +54,6 @@ export interface Agent {
   // results are forgotten, so they are attached again when their paths are touched.
   reloadInstructions(): Promise<{ files: readonly InstructionFile[]; warnings: readonly string[] }>;
 }
-
-// Keeps a quarter of the window free for the answer at most, so a model whose output limit is
-// close to its window still leaves room for the prompt.
-export const outputTokenLimit = (provider: Provider): number =>
-  Math.min(
-    provider.capabilities.output_max_tokens,
-    Math.floor(provider.capabilities.context_window / 4),
-  );
 
 const isInsideGitRepo = async (cwd: string): Promise<boolean> => {
   let current = cwd;
@@ -160,7 +153,7 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
       try {
         const limits: LoopLimits = {
           maxSteps: options.maxSteps ?? DEFAULT_MAX_STEPS,
-          maxOutputTokens: outputTokenLimit(agent.provider),
+          maxOutputTokens: contextBudget(agent.provider.capabilities).maxOutput,
           stallMs: options.stallMs ?? DEFAULT_STALL_MS,
         };
         return await runTurn(prompt, {

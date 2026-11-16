@@ -4,15 +4,13 @@ import {
   type ProviderCapabilities,
   type ProviderEffort,
   type ProviderToolDef,
+  TEXT_BLOCK_SEPARATOR,
 } from '../types.ts';
 import type { OllamaChatRequest, OllamaMessage, OllamaToolCall } from './http.ts';
 
 // Ceiling for `num_ctx` on a local server. The server sizes its KV cache to `num_ctx`, so the full
 // capacity of a 128K or 256K model would exhaust the memory of typical hardware.
 export const DEFAULT_OLLAMA_NUM_CTX = 32_768;
-
-// Ollama messages carry one string per message. Separate text blocks must not run together.
-const TEXT_BLOCK_SEPARATOR = '\n\n';
 
 // The system prompt comes from the request. Each tool result becomes its own `role: 'tool'`
 // message that names the function it answers, because Ollama has no tool call ids; the name is
