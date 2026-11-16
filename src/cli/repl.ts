@@ -25,6 +25,7 @@ import {
   enableRawMode,
 } from '../tui/term.ts';
 import { composeLive } from '../tui/view.ts';
+import type { SessionLink } from './session-file.ts';
 import { findCommand, parseSlash, runSlash, type SlashContext, suggestCommands } from './slash.ts';
 
 // A lone ESC byte is ambiguous until no continuation arrives: it is either the Escape key or the
@@ -39,6 +40,9 @@ export interface ReplOptions {
   cwd: string;
   resolveModel: (id: string) => Promise<ResolveResult>;
   warnings: readonly string[];
+  // The session file the conversation is saved to, if any, and how many messages it brought back.
+  session: SessionLink;
+  resumedMessages: number | null;
   // Aborted when the process receives SIGINT or SIGTERM from outside the terminal.
   signal: AbortSignal;
   stdin: NodeJS.ReadStream;
@@ -173,6 +177,8 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       },
       exit: () => finish(0),
       stats: () => formatStats(state.status),
+      session: options.session,
+      cwd: options.cwd,
       compact: async (instructions) => {
         // Registered as the running turn so Esc and Ctrl+C interrupt it and prompts wait for it.
         const controller = new AbortController();
@@ -386,6 +392,15 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       ),
     );
     for (const warning of options.warnings) notice('warning', warning);
+    options.session.warn = (message) => notice('warning', message);
+    if (options.session.path !== null) {
+      notice(
+        'info',
+        options.resumedMessages === null
+          ? `Saving this session to ${options.session.path}.`
+          : `Resumed the session in ${options.session.path} (${options.resumedMessages} messages).`,
+      );
+    }
 
     enableRawMode(stdin);
     enableBracketedPasteOn(write);

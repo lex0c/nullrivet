@@ -2,8 +2,10 @@ import type { Agent } from '../agent/agent.ts';
 import { errorMessage } from '../errors.ts';
 import type { ResolveResult } from '../providers/resolve.ts';
 import type { ProviderEffort } from '../providers/types.ts';
+import { resolvePath } from '../tools/paths.ts';
 import { isExecutionMode } from '../tools/policy.ts';
 import { EFFORT_LEVELS } from './args.ts';
+import { SessionFile, type SessionLink } from './session-file.ts';
 
 export type NoticeLevel = 'info' | 'warning' | 'error';
 
@@ -17,6 +19,9 @@ export interface SlashContext {
   stats: () => string;
   // Compacts the conversation, showing progress; the caller makes it interruptible.
   compact: (instructions: string | undefined) => Promise<void>;
+  session: SessionLink;
+  // Base for relative paths, as for the tools.
+  cwd: string;
 }
 
 export interface SlashCommand {
@@ -151,10 +156,57 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     name: 'clear',
     description: 'Discard the conversation and clear the screen',
     idleOnly: true,
-    run(_args, ctx) {
+    async run(_args, ctx) {
       ctx.agent.clear();
       ctx.clearScreen();
+      await ctx.agent.checkpoint?.();
       ctx.notice('info', 'Conversation cleared.');
+    },
+  },
+  {
+    name: 'session',
+    description: 'Show the session file, save to a new one, or stop saving',
+    usage: '[file|off]',
+    idleOnly: true,
+    async run(args, ctx) {
+      if (args.length === 0) {
+        ctx.notice('info', ctx.session.status());
+        return;
+      }
+      if (args === 'off') {
+        const path = ctx.session.path;
+        ctx.session.detach();
+        ctx.notice(
+          'info',
+          path === null
+            ? 'No session file is attached.'
+            : `No longer saving to ${path}; the file keeps the conversation as it was.`,
+        );
+        return;
+      }
+      const opened = await SessionFile.open(resolvePath(args, ctx.cwd));
+      if (!opened.ok) {
+        ctx.notice('error', opened.error);
+        return;
+      }
+      // Attaching never overwrites another conversation; continuing one is done at startup.
+      if (opened.data !== null) {
+        ctx.notice(
+          'error',
+          `${opened.file.path} already holds a session. Choose a new file, or start nullrivet with --session ${opened.file.path} to continue it.`,
+        );
+        return;
+      }
+      const previous = ctx.session.path;
+      ctx.session.attach(opened.file);
+      await ctx.session.save();
+      if (ctx.session.path === null) return;
+      ctx.notice(
+        'info',
+        previous === null
+          ? `Saving this session to ${opened.file.path}.`
+          : `Saving this session to ${opened.file.path}; ${previous} keeps the conversation as it was until now.`,
+      );
     },
   },
   {

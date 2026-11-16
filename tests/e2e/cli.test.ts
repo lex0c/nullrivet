@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   openSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -205,6 +206,87 @@ describe('context', () => {
     expect((await cli.finished).code).toBe(0);
     const user = server.requests[0]?.messages.find((m) => m.role === 'user')?.content ?? '';
     expect(user).toMatch(/^review this\n\n<input fence="[0-9a-f]{12}">\nthe diff\n<\/input fence=/);
+  }, 30_000);
+});
+
+describe('sessions', () => {
+  test('two runs with the same session file form one conversation', async () => {
+    const cwd = tempDir();
+    server.handle(() => ({ text: 'noted' }));
+    const first = startCli(['--session', 'run.json', 'remember the number 7'], {
+      env: cliEnv(server),
+      cwd,
+    });
+    expect((await first.finished).code).toBe(0);
+    // No model is given the second time: the session's is used.
+    const env = cliEnv(server);
+    delete env.NULLRIVET_MODEL;
+    const second = startCli(['--session', 'run.json', 'which number?'], { env, cwd });
+    expect((await second.finished).code).toBe(0);
+    const users = (server.requests.at(-1)?.messages ?? [])
+      .filter((m) => m.role === 'user')
+      .map((m) => m.content);
+    expect(users.some((c) => c.includes('remember the number 7'))).toBe(true);
+    expect(users.at(-1)).toContain('which number?');
+  }, 30_000);
+
+  test('a run killed mid-task resumes from the last completed step', async () => {
+    const cwd = tempDir();
+    const sleep = uniqueSleep();
+    server.handle((request) =>
+      toolMessages(request).length === 0
+        ? { toolCalls: [{ name: 'bash', args: { command: 'echo first-step-done' } }] }
+        : { toolCalls: [{ name: 'bash', args: { command: sleep } }] },
+    );
+    const killed = startCli(['--session', 's.json', 'two steps'], { env: cliEnv(server), cwd });
+    await killed.waitFor((e) => e.type === 'tool:start' && e.step === 2);
+    killed.child.kill('SIGKILL');
+    await killed.finished;
+    Bun.spawnSync(['pkill', '-f', sleep]);
+
+    server.handle(() => ({ text: 'continuing' }));
+    const resumed = startCli(['--session', 's.json', 'go on'], { env: cliEnv(server), cwd });
+    expect((await resumed.finished).code).toBe(0);
+    // Only the first step was saved: the second was cut off before its results.
+    const results = toolMessages(server.requests.at(-1)).map((m) => m.content);
+    expect(results).toHaveLength(1);
+    expect(results[0]).toStartWith('first-step-done');
+  }, 30_000);
+
+  test('the permission mode is never taken from the session', async () => {
+    const cwd = tempDir();
+    server.handle(() => ({ text: 'ok' }));
+    const first = startCli(['--permission', 'readonly', '--session', 's.json', 'look'], {
+      env: cliEnv(server),
+      cwd,
+    });
+    expect((await first.finished).code).toBe(0);
+    const second = startCli(['--session', 's.json', 'now change things'], {
+      env: cliEnv(server),
+      cwd,
+    });
+    expect((await second.finished).code).toBe(0);
+    expect(second.events).toContainEqual(
+      expect.objectContaining({
+        type: 'warning',
+        message: expect.stringContaining('last run in readonly mode'),
+      }),
+    );
+    const offered = (server.requests.at(-1)?.tools ?? []).map((t) => t.function.name);
+    expect(offered).toContain('bash');
+  }, 30_000);
+
+  test('a file that is not a session is refused and left as it was', async () => {
+    const cwd = tempDir();
+    writeFileSync(join(cwd, 'notes.json'), '{"keep":"me"}');
+    const cli = startCli(['--session', 'notes.json', 'hello'], { env: cliEnv(server), cwd });
+    const { code } = await cli.finished;
+    expect(code).toBe(2);
+    expect(cli.events.at(-1)).toMatchObject({
+      type: 'error',
+      message: expect.stringContaining('not a nullrivet session file'),
+    });
+    expect(readFileSync(join(cwd, 'notes.json'), 'utf8')).toBe('{"keep":"me"}');
   }, 30_000);
 });
 
