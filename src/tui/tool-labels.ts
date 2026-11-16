@@ -8,6 +8,7 @@ const VERBS: Record<string, { running: string; done: string }> = {
   git: { running: 'Inspecting', done: 'Inspected' },
   glob: { running: 'Finding', done: 'Found' },
   grep: { running: 'Searching', done: 'Searched' },
+  delegate: { running: 'Delegating', done: 'Delegated' },
 };
 
 export const toolVerb = (name: string, phase: 'running' | 'done'): string =>
@@ -40,6 +41,8 @@ export const toolSubject = (name: string, args: Record<string, unknown>, max = 1
       ];
       return oneLine(parts.filter((p) => p !== undefined && p !== '').join(' '), max);
     }
+    case 'delegate':
+      return oneLine(str('title') ?? '', max);
     case 'glob':
     case 'grep': {
       const path = str('path');

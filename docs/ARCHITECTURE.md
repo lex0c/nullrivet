@@ -32,6 +32,7 @@ src/
     agent.ts               createAgent(): the public API of the core
     loop.ts                runTurn(): the request / tool execution loop
     conversation.ts        in-memory history and its invariants
+    subagent.ts            the delegate tool: subagents on the same loop
     tool-executor.ts       policy check, error containment, output sanitizing
     collect.ts             turns a provider stream into one collected step
     retry.ts               retries before the first streamed event
@@ -210,6 +211,10 @@ model was not offered, or a mode change during a turn, cannot cause a side effec
 The executor never lets a tool failure escape: unknown tools, invalid arguments and exceptions all
 become error results the model can read. Terminal escape sequences are removed from tool output.
 
+Tool calls run in the order the model wrote them. A tool marked `concurrent` (`delegate`) is the
+exception: adjacent calls to it run at the same time, and the tool bounds how many make progress
+at once. Results keep the order of the calls.
+
 See [TOOLS.md](TOOLS.md) for each tool.
 
 ## Project instructions
@@ -273,6 +278,37 @@ is never placed where it would carry the authority of the rules or of the user.
   before every tool call, commands run without the agent's API keys, and the `git` tool and the
   file listing cannot run programs configured by a repository.
 
+## Subagents
+
+A subagent is a second run of the same loop (`runTurn`) inside the same process, started by the
+`delegate` tool. It exists to keep the main conversation small: it can read dozens of files and
+run tests, and only its report comes back.
+
+- **Spawn, not fork.** The subagent gets a new `Conversation` with nothing from the parent: its
+  first message is the delegate call's objective and context. It has its own `InstructionsLoader`
+  (a fork of the parent's settings with nothing loaded), so the `AGENTS.md` files of its starting
+  directory reach it even when the parent already has them.
+- **Same model and tools.** It uses the parent's current model and effort, and the parent's tools
+  without `delegate`, so delegation is one level deep. Its system prompt adds a section that names
+  the delegating agent as its user and asks for a report: result, evidence, open issues.
+- **Mode.** The subagent's mode is a function of the parent's, read before each of its requests
+  and tool calls: `auto` only when it asked for `auto` and the session is in `auto`.
+- **Concurrency.** `delegate` is a concurrent tool: adjacent calls run at the same time. Two
+  semaphores bound them: three `readonly` subagents at once, one `auto` subagent at a time. The
+  parent waits for all of them, so it never writes while an `auto` subagent does.
+- **Cancellation.** The subagent runs on the signal of the parent's tool call, which is the turn's
+  signal: an interrupt or the time limit stops it, and its commands' process groups are
+  terminated like the parent's.
+- **Result.** A status line built by the runtime from what it observed (status, steps, tool
+  errors, tokens, files changed through `edit_file` and `write_file`), then the subagent's last
+  answer, reduced to 16 KiB. It enters the parent's conversation as one tool result, which is data
+  like any other.
+- **Events.** The subagent's own events are not forwarded: text from two agents would mix. The
+  tool emits `subagent:start`, `subagent:progress` (step and current tool) and `subagent:end` with
+  the delegate call's id, and forwards the subagent's `usage` events tagged with that id, so token
+  totals include subagents while the context gauge reflects the main conversation only. Nothing of
+  the subagent is kept after it ends.
+
 ## Events
 
 `AgentEvent` is the public contract of the core (`src/agent/events.ts`). The CLI's `--json` mode
@@ -294,4 +330,3 @@ rendering, input handling and interrupt behavior are described in [TUI.md](TUI.m
 ## Not implemented yet
 
 - Google and xAI providers.
-- Subagents.

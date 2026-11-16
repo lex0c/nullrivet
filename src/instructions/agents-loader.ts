@@ -104,6 +104,17 @@ export class InstructionsLoader {
     return result;
   }
 
+  // A loader with the same settings and nothing loaded, for an agent with a conversation of its
+  // own: files this loader already attached would otherwise never reach that conversation.
+  fork(): InstructionsLoader {
+    return new InstructionsLoader({
+      maxFileBytes: this.maxFileBytes,
+      maxTotalBytes: this.maxTotalBytes,
+      maxDepth: this.maxDepth,
+      home: this.home,
+    });
+  }
+
   // Forgets everything so the next discovery reads the files again.
   reset(): void {
     this.loaded.clear();

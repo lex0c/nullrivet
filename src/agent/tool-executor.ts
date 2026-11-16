@@ -56,7 +56,11 @@ export const executeToolCall = async (
     }
   }
   try {
-    const result = await tool.execute(call.input, { cwd: context.cwd, signal: context.signal });
+    const result = await tool.execute(call.input, {
+      cwd: context.cwd,
+      signal: context.signal,
+      callId: call.id,
+    });
     return { ...result, content: stripAnsi(result.content) };
   } catch (error) {
     if (error instanceof InvalidArgumentError) {

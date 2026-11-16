@@ -1,6 +1,6 @@
 # Tools
 
-nullrivet exposes seven tools to the model. Each declares an effect, which decides whether it is
+nullrivet exposes eight tools to the model. Each declares an effect, which decides whether it is
 available in `readonly` mode.
 
 | Tool | Effect | `auto` | `readonly` |
@@ -9,6 +9,7 @@ available in `readonly` mode.
 | `glob` | read | yes | yes |
 | `grep` | read | yes | yes |
 | `git` | read | yes | yes |
+| `delegate` | read | yes | yes |
 | `edit_file` | write | yes | no |
 | `write_file` | write | yes | no |
 | `bash` | exec | yes | no |
@@ -216,3 +217,31 @@ the tool never does.
 Output is reduced to 32 KiB, keeping the first 300 and last 50 lines. Each call times out after
 30 s. A failing git command (for example, a directory outside a repository) comes back as a
 `git.failed` error with git's message.
+
+## delegate
+
+Hands a self-contained task to a subagent and returns its report.
+
+| Parameter | Description |
+|---|---|
+| `title` | Short label shown to the user (cut at 80 characters). |
+| `objective` | The task, complete on its own: the subagent cannot see the conversation. |
+| `context` | Facts the subagent needs: paths, decisions, constraints. |
+| `mode` | `readonly` (default) or `auto`. |
+| `cwd` | Starting directory of the subagent (default: the starting directory). |
+
+- **Mode.** The subagent runs in the more restrictive of the requested mode and the session's
+  current mode, read again before each of its requests and tool calls. That is why the tool's
+  effect is `read` and it is offered in `readonly`: there, the subagent cannot change anything
+  either.
+- **Concurrency.** Adjacent `delegate` calls in one response run at the same time: up to three
+  `readonly` subagents at once, and `auto` subagents one after another. Results keep the order of
+  the calls.
+- **Limits.** 40 steps per subagent. The report is reduced to 16 KiB (about 4,096 tokens),
+  keeping its start and end. There is no time limit of its own: the session's `--timeout`, the
+  stall watchdog and interrupts apply.
+- **Result.** A status line written by the runtime (`completed`, `failed`, `cancelled` or
+  `budget`, steps, tool errors, tokens, and files changed through `edit_file` and `write_file`),
+  followed by the subagent's final reply. A failed or cancelled subagent is an error result.
+- **Depth.** A subagent cannot delegate.
+

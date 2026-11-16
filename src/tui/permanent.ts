@@ -10,7 +10,7 @@ import { visualWidth } from './render/width.ts';
 import { wrapInputLine } from './render/wrap.ts';
 import type { PermanentItem } from './state.ts';
 import { type Capabilities, paint, reverse } from './term.ts';
-import { errorSummary, subjectWidth, toolSubject, toolVerb } from './tool-labels.ts';
+import { errorSummary, oneLine, subjectWidth, toolSubject, toolVerb } from './tool-labels.ts';
 
 const TOOL_DONE_GLYPH = '●';
 
@@ -49,7 +49,18 @@ const toolLines = (
     typeof exitCode === 'number' && exitCode !== 0 ? paint(caps, 'warn', `  exit ${exitCode}`) : '';
   const metric = paint(caps, 'secondary', `  [${formatChipDuration(item.durationMs)}]`);
   const lines = ['', `${paint(caps, item.isError ? 'error' : 'dim', head)}${exit}${metric}`];
-  if (item.isError) {
+  const summary = item.meta?.summary;
+  if (typeof summary === 'string') {
+    lines.push(
+      padFrame(
+        paint(
+          caps,
+          item.isError ? 'error' : 'dim',
+          `${subContentConnector(caps)}${oneLine(summary, frameWidth(caps) - 3)}`,
+        ),
+      ),
+    );
+  } else if (item.isError) {
     lines.push(
       padFrame(
         paint(

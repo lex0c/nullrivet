@@ -186,3 +186,39 @@ describe('reduce', () => {
     expect(state.compacting).toBeNull();
   });
 });
+
+describe('subagents', () => {
+  test('progress shows on the delegate card, and their usage does not move the context gauge', () => {
+    const { state } = run([
+      ev({ type: 'agent:start' }),
+      ev({ type: 'tool:start', id: 'd1', name: 'delegate', args: { title: 'scan' } }, 5),
+      ev({ type: 'subagent:start', id: 'd1', title: 'scan', mode: 'readonly' }, 6),
+      ev(
+        {
+          type: 'subagent:progress',
+          id: 'd1',
+          step: 2,
+          tool: { name: 'grep', args: { pattern: 'TODO' } },
+        },
+        7,
+      ),
+      ev(
+        {
+          type: 'usage',
+          input: 900,
+          output: 100,
+          cacheRead: 0,
+          cacheWrite: 0,
+          subagent: 'd1',
+        },
+        8,
+      ),
+    ]);
+    expect(state.turn?.tools[0]?.subagent).toEqual({
+      step: 2,
+      tool: { name: 'grep', args: { pattern: 'TODO' } },
+    });
+    expect(state.status.contextTokens).toBeNull();
+    expect(state.status.totals.input).toBe(900);
+  });
+});

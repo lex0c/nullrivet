@@ -2,6 +2,7 @@ import { stripAnsi } from '../sanitize/ansi.ts';
 import { shortenCwd } from './render/cwd.ts';
 import { formatChipDuration } from './render/duration.ts';
 import { padFrame } from './render/frame.ts';
+import { subContentConnector } from './render/glyphs.ts';
 import { inputCursor, renderInput } from './render/input.ts';
 import { renderMarkdown } from './render/markdown.ts';
 import { renderShimmer } from './render/shimmer.ts';
@@ -82,6 +83,15 @@ const turnRows = (state: TuiState, turn: TurnState, caps: Capabilities, now: num
       '',
       `${paint(caps, 'accent', spinner(caps, now))} ${toolVerb(tool.name, 'running')} ${subject}${elapsed}`,
     );
+    if (tool.subagent !== undefined) {
+      const inner = tool.subagent.tool;
+      const doing = `${toolVerb(inner.name, 'running')} ${toolSubject(inner.name, inner.args, subjectWidth(caps))}`;
+      rows.push(
+        padFrame(
+          paint(caps, 'dim', `${subContentConnector(caps)}step ${tool.subagent.step} · ${doing}`),
+        ),
+      );
+    }
   }
   rows.push('', padFrame(phaseChip(state, turn, caps, now)));
   return rows;

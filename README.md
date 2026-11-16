@@ -211,8 +211,8 @@ Details: [docs/MODELS.md](docs/MODELS.md).
 
 | Mode | Tools offered to the model | Enforcement |
 |---|---|---|
-| `auto` (default) | `read_file`, `glob`, `grep`, `git`, `edit_file`, `write_file`, `bash` | None beyond operating system permissions. |
-| `readonly` | `read_file`, `glob`, `grep`, `git` | The other tools are neither offered nor executed, even if the model calls them. |
+| `auto` (default) | `read_file`, `glob`, `grep`, `git`, `edit_file`, `write_file`, `bash`, `delegate` | None beyond operating system permissions. |
+| `readonly` | `read_file`, `glob`, `grep`, `git`, `delegate` | The other tools are neither offered nor executed, even if the model calls them. Subagents run in `readonly` too. |
 
 `auto` is **not a sandbox**. Commands run with your privileges and take effect immediately, and
 content the agent reads (files, command output, `AGENTS.md`) can contain prompt injection. Run
@@ -233,9 +233,21 @@ files.
 | `edit_file` | write | Apply exact, all-or-nothing text replacements to a file. |
 | `write_file` | write | Create or replace a file atomically. |
 | `bash` | exec | Run a shell command non-interactively, with a timeout and output limits. |
+| `delegate` | read | Hand a self-contained task to a subagent and receive only its report. |
 
 Building, testing and git operations that change state go through `bash`. Details,
 limits and safety measures: [docs/TOOLS.md](docs/TOOLS.md).
+
+### Subagents
+
+With `delegate`, the agent hands a self-contained task (an investigation that would read many
+files, for example) to a subagent. The subagent starts with an empty conversation, works with the
+same model and tools, and returns only its report, so the main conversation grows by the report
+and not by the work behind it. Several delegations in one response run at the same time, up to
+three `readonly` ones at once. A subagent's mode never exceeds the session's: in `readonly`, or
+after switching to it with `/permission`, subagents cannot change anything. Interrupting the task
+stops its subagents and their commands. How it works:
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#subagents).
 
 ## Project instructions
 
@@ -270,7 +282,12 @@ nullrivet --json --permission readonly "List the TODOs in src" | jq -c 'select(.
 | `thinking:delta` | `text` |
 | `tool:start` | `id`, `name`, `args` |
 | `tool:end` | `id`, `name`, `content`, `isError`, `meta` |
-| `usage` | `input`, `output`, `cacheRead`, `cacheWrite` (tokens of one model request) |
+| `usage` | `input`, `output`, `cacheRead`, `cacheWrite` (tokens of one model request); `compaction: true` for a summary request; `subagent` (the delegate call id) for a subagent's request |
+| `context:compact:start` | `reason` (`auto`, `manual`, `overflow`) |
+| `context:compact` | `reason`, `strategy` (`llm`, `fallback`), `before`, `after` (estimated tokens) |
+| `subagent:start` | `id` (the delegate call id), `title`, `mode` |
+| `subagent:progress` | `id`, `step`, `tool` (`name`, `args`) |
+| `subagent:end` | `id`, `status` (`completed`, `failed`, `cancelled`, `budget`), `steps` |
 | `warning` | `message` |
 | `error` | `message` |
 | `agent:end` | `reason` (`done`, `aborted`, `error`, `budget`), `message` |

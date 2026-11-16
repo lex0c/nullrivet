@@ -226,11 +226,8 @@ const executeToolCalls = async (
     if (pending.length === 0) return null;
     return `The AGENTS.md files that govern this path are attached to an earlier tool result of this response: ${pending.join(', ')}`;
   };
-  for (const call of calls) {
-    if (signal.aborted) {
-      results.push(interruptedResult({ type: 'tool_use', ...call }));
-      continue;
-    }
+  const runCall = async (call: CollectedToolUse): Promise<ProviderToolResultBlock> => {
+    if (signal.aborted) return interruptedResult({ type: 'tool_use', ...call });
     emit({ type: 'tool:start', id: call.id, name: call.name, args: call.input });
     const result = await executeToolCall(call, {
       tools: deps.tools,
@@ -250,13 +247,23 @@ const executeToolCalls = async (
       isError: result.isError,
       ...(result.meta === undefined ? {} : { meta: result.meta }),
     });
-    results.push({
+    return {
       type: 'tool_result',
       tool_use_id: call.id,
       name: call.name,
       content,
       ...(result.isError ? { is_error: true } : {}),
-    });
+    };
+  };
+  const concurrent = (call: CollectedToolUse | undefined): boolean =>
+    call !== undefined && deps.tools.get(call.name)?.concurrent === true;
+  // Calls run in order, except that a run of adjacent concurrent calls runs at the same time.
+  // Results keep the order of the calls either way.
+  for (let i = 0; i < calls.length; ) {
+    let end = i + 1;
+    if (concurrent(calls[i])) while (concurrent(calls[end])) end++;
+    results.push(...(await Promise.all(calls.slice(i, end).map(runCall))));
+    i = end;
   }
   return results;
 };

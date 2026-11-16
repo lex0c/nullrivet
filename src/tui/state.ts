@@ -31,6 +31,8 @@ export interface ActiveTool {
   name: string;
   args: Record<string, unknown>;
   startedAt: number;
+  // For a delegate call, what its subagent is doing.
+  subagent?: { step: number; tool: { name: string; args: Record<string, unknown> } };
 }
 
 export interface TurnState {
@@ -218,9 +220,10 @@ const reduceAgentEvent = (state: TuiState, event: AgentEvent, now: number): Redu
           ...state,
           status: {
             ...state.status,
-            // A summary request says nothing about the size of the conversation itself.
+            // A summary request or a subagent's request says nothing about the size of this
+            // conversation.
             contextTokens:
-              event.compaction === true
+              event.compaction === true || event.subagent !== undefined
                 ? state.status.contextTokens
                 : event.input + event.cacheRead + event.cacheWrite + event.output,
             totals: {
@@ -235,6 +238,24 @@ const reduceAgentEvent = (state: TuiState, event: AgentEvent, now: number): Redu
         permanent: [],
       };
     }
+    case 'subagent:progress': {
+      if (turn === null) return { state, permanent: [] };
+      const progress = { step: event.step, tool: event.tool };
+      return {
+        state: {
+          ...state,
+          turn: {
+            ...turn,
+            tools: turn.tools.map((t) => (t.id === event.id ? { ...t, subagent: progress } : t)),
+          },
+        },
+        permanent: [],
+      };
+    }
+    // The delegate call's own tool card shows when a subagent starts and ends.
+    case 'subagent:start':
+    case 'subagent:end':
+      return { state, permanent: [] };
     case 'warning':
       return { state, permanent: [{ kind: 'notice', level: 'warning', text: event.message }] };
     case 'error':

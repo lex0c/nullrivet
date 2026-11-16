@@ -15,6 +15,7 @@ import {
   TimeLimitReached,
   type TurnResult,
 } from './loop.ts';
+import { createDelegateTool } from './subagent.ts';
 import { buildSystemPrompt, localDate, renderProjectContext } from './system-prompt.ts';
 
 export const DEFAULT_MAX_STEPS = 200;
@@ -31,6 +32,8 @@ export interface AgentOptions {
   instructions: InstructionsLoader | null;
   effort?: ProviderEffort;
   maxSteps?: number;
+  // Offers the delegate tool, which starts subagents; on unless set to false.
+  delegation?: boolean;
   // Wall-clock limit of each task; when it passes, the task is stopped like an interrupt and ends
   // at a limit.
   timeLimitMs?: number;
@@ -69,7 +72,7 @@ export interface Agent {
   reloadInstructions(): Promise<{ files: readonly InstructionFile[]; warnings: readonly string[] }>;
 }
 
-const isInsideGitRepo = async (cwd: string): Promise<boolean> => {
+export const isInsideGitRepo = async (cwd: string): Promise<boolean> => {
   let current = cwd;
   while (true) {
     try {
@@ -85,7 +88,25 @@ const isInsideGitRepo = async (cwd: string): Promise<boolean> => {
 
 export const createAgent = async (options: AgentOptions): Promise<Agent> => {
   const conversation = new Conversation();
-  const tools = new Map(options.tools.map((tool) => [tool.name, tool]));
+  // Listener of the turn in progress, read by subagents started during it.
+  let currentEmit: AgentEventListener = () => undefined;
+  const delegate =
+    options.delegation === false
+      ? []
+      : [
+          createDelegateTool({
+            provider: () => agent.provider,
+            effort: () => agent.effort,
+            parentMode: () => agent.mode,
+            emit: () => currentEmit,
+            cwd: options.cwd,
+            tools: options.tools,
+            instructions: options.instructions,
+            stallMs: options.stallMs ?? DEFAULT_STALL_MS,
+            isGitRepo: isInsideGitRepo,
+          }),
+        ];
+  const tools = new Map([...options.tools, ...delegate].map((tool) => [tool.name, tool]));
   const bootWarnings: string[] = [];
   let bootInstructions: InstructionFile[] = [];
   if (options.instructions !== null) {
@@ -179,6 +200,7 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
           ? undefined
           : setTimeout(() => deadline.abort(new TimeLimitReached(timeLimitMs ?? 0)), timeLimitMs);
       const signal = deadline === null ? external : AbortSignal.any([external, deadline.signal]);
+      currentEmit = runOptions.onEvent ?? (() => undefined);
       try {
         const limits: LoopLimits = {
           maxSteps: options.maxSteps ?? DEFAULT_MAX_STEPS,
