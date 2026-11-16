@@ -9,7 +9,7 @@
     "nullrivet": "src/main.ts"
   },
   "scripts": {
-    "start": "bun run src/main.ts",
+    "start": "bun --no-env-file --env-file=.env src/main.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
