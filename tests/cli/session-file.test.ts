@@ -89,7 +89,7 @@ describe('SessionFile', () => {
     const invalid = withHistory(['ok', 3]);
     expect(invalid.ok ? 'ok' : invalid.error).toContain('history must be an array of strings');
     const long = withHistory(Array.from({ length: 600 }, (_, i) => `p${i}`));
-    expect(long.ok && long.data.history.length).toBe(500);
+    expect(long.ok && long.data.history.length).toBe(100);
     expect(long.ok && long.data.history.at(-1)).toBe('p599');
   });
 

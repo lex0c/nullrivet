@@ -1,7 +1,7 @@
 // Texts submitted in the interactive session, oldest first, recalled with the arrow keys. It
 // lives in memory and, when a session file is attached, in that file; nothing else keeps it.
 
-export const PROMPT_HISTORY_LIMIT = 500;
+export const PROMPT_HISTORY_LIMIT = 100;
 
 export class PromptHistory {
   private readonly items: string[];

@@ -77,7 +77,7 @@ does not settle it. Any remaining text is settled when a tool call starts or the
   protocol form (CSI u) is recognized as well. Terminals that report neither send `Shift+Enter`
   as `Enter`; `Alt+Enter` and `\` followed by `Enter` insert a newline everywhere.
 - While a task runs, the next prompt can be typed, but it is sent only once the task ends.
-- Submitted prompts and commands form a history (`src/cli/prompt-history.ts`), at most 500
+- Submitted prompts and commands form a history (`src/cli/prompt-history.ts`), at most 100
   entries, without blank entries or a repeat of the latest one. `↑` on the first line of the input
   recalls the newest entry and keeps the text being typed as a draft; while browsing, `↑` and `↓`
   walk the history wherever the cursor is, even when a recalled command opens the command list,
