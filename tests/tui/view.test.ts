@@ -41,7 +41,7 @@ const footer = (state: TuiState, cols: number): string => {
 describe('composeLive', () => {
   test('the footer shows mode, model, context and tokens when there is room', () => {
     const row = footer(base(), 140);
-    expect(row).toContain('auto · /help for commands');
+    expect(row).toContain('auto mode on (shift+tab to change)');
     expect(row).toContain('openrouter/vendor/a-rather-long-model-name:free');
     expect(row).toContain('ctx 12%');
     expect(row).toContain('↑12k ↓800');
@@ -57,6 +57,25 @@ describe('composeLive', () => {
     const medium = footer(base(), 90);
     expect(medium).toContain('openrouter/vendor');
     expect(medium).not.toContain('↑12k');
+  });
+
+  test('the footer names the mode and, while a task runs, how to interrupt it', () => {
+    const readonly = { ...base(), status: { ...base().status, mode: 'readonly' as const } };
+    expect(footer(readonly, 140)).toContain('readonly mode on (shift+tab to change)');
+    const running: TuiState = {
+      ...readonly,
+      turn: {
+        startedAt: 0,
+        pendingText: '',
+        thinkingSince: null,
+        outputChars: 0,
+        interrupting: false,
+        tools: [],
+      },
+    };
+    const row = footer(running, 40);
+    expect(row).toContain('readonly mode on · esc to interrupt');
+    expect(row).not.toContain('shift+tab');
   });
 
   test('popover rows carry the frame margin', () => {

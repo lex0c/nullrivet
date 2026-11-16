@@ -74,8 +74,8 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
           'Commands:',
           ...rows,
           '',
-          'Keys: Enter sends, Shift+Enter or \\+Enter inserts a newline, Esc interrupts the task,',
-          'Ctrl+C twice exits.',
+          'Keys: Enter sends, Shift+Enter or \\+Enter inserts a newline, Shift+Tab switches between',
+          'auto and readonly, Esc interrupts the task, Ctrl+C twice exits.',
         ].join('\n'),
       );
     },

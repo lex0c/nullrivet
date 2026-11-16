@@ -69,6 +69,9 @@ const isCtrlC = (key: KeyEvent): boolean => key.kind === 'char' && key.ctrl && k
 const isNamedKey = (key: KeyEvent, name: string): boolean =>
   key.kind === 'key' && key.name === name;
 
+const isShiftTab = (key: KeyEvent): boolean =>
+  key.kind === 'key' && key.name === 'tab' && key.shift && !key.ctrl && !key.alt;
+
 // Interactive session: the agent keeps its conversation between prompts until /clear or exit.
 // Resolves with the process exit code.
 export const runRepl = (options: ReplOptions): Promise<number> =>
@@ -352,6 +355,15 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
         return;
       }
       if (handlePopoverKey(key)) return;
+      if (isShiftTab(key)) {
+        // Also while a task runs: the executor reads the mode before every tool call, so the
+        // switch applies from the next one, as with /permission.
+        agent.mode = agent.mode === 'auto' ? 'readonly' : 'auto';
+        dispatch({ type: 'exit-disarm' });
+        syncStatus();
+        void agent.checkpoint?.();
+        return;
+      }
       if (isNamedKey(key, 'escape') && turn !== null) {
         interrupt();
         return;

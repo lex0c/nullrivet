@@ -159,6 +159,7 @@ the tokens spent. The older part of a long conversation is summarized automatica
 |---|---|
 | `Enter` | Send the prompt (or run the selected command). |
 | `Shift+Enter`, `Alt+Enter`, `\` then `Enter` | Insert a newline (`Shift+Enter` only in terminals that report it). |
+| `Shift+Tab` | Switch between `auto` and `readonly`, also while a task runs; it applies from the next tool call. |
 | `Esc` or `Ctrl+C` while a task runs | Interrupt the task; running commands are terminated. A second `Ctrl+C` exits if the task does not stop. |
 | `Ctrl+C` on a non-empty prompt | Clear the prompt. |
 | `Ctrl+C` twice on an empty prompt | Exit (code 130). |
@@ -172,7 +173,7 @@ the tokens spent. The older part of a long conversation is summarized automatica
 | `/help` | List the commands and keys. |
 | `/model [family/model]` | Show the model, or switch to another one for the next prompts. |
 | `/effort [low\|medium\|high\|xhigh\|max\|off]` | Show or set the reasoning effort. |
-| `/permission [auto\|readonly]` | Show or change the execution mode; it applies from the next tool call. |
+| `/permission [auto\|readonly]` | Show or change the execution mode, like `Shift+Tab`; it applies from the next tool call. |
 | `/compact [focus]` | Summarize the older part of the conversation now; the focus guides the summary. |
 | `/clear` | Discard the conversation and clear the screen. A session file stops being saved and keeps the cleared conversation. |
 | `/instructions [reload]` | List the loaded `AGENTS.md` files, or read them again. |

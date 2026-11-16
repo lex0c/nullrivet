@@ -108,10 +108,14 @@ const footerRow = (state: TuiState, caps: Capabilities): string => {
   } else {
     const mode =
       state.status.mode === 'auto'
-        ? paint(caps, 'warn', 'auto')
-        : paint(caps, 'accent', 'readonly');
-    const hint = state.turn !== null ? 'esc to interrupt' : '/help for commands';
-    left = `${mode}${sep}${paint(caps, 'dim', hint)}`;
+        ? paint(caps, 'warn', 'auto mode on')
+        : paint(caps, 'accent', 'readonly mode on');
+    // While a task runs, the interrupt hint takes the place of the mode hint so it stays visible
+    // in narrow terminals.
+    left =
+      state.turn !== null
+        ? `${mode}${sep}${paint(caps, 'dim', 'esc to interrupt')}`
+        : `${mode}${paint(caps, 'dim', ' (shift+tab to change)')}`;
   }
   // Right-side parts in order of importance; the least important are dropped first when the
   // row is too narrow, and the model name is shortened last.

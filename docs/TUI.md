@@ -14,7 +14,7 @@ redrawn: the task in progress, the input box and the status lines.
 ─────────────────────────────────────────      │
 > next prompt                                  │ live region: redrawn
 ─────────────────────────────────────────      │
-  auto · esc to interrupt     model · ctx 3%   │
+  auto mode on · esc to interrupt  model       │
   ~/projects/app                               ┘
 ```
 
@@ -77,6 +77,11 @@ does not settle it. Any remaining text is settled when a tool call starts or the
   protocol form (CSI u) is recognized as well. Terminals that report neither send `Shift+Enter`
   as `Enter`; `Alt+Enter` and `\` followed by `Enter` insert a newline everywhere.
 - While a task runs, the next prompt can be typed, but it is sent only once the task ends.
+- `Shift+Tab` switches the execution mode between `auto` and `readonly`, also while a task runs:
+  the executor reads the mode before every tool call, so the switch applies from the next one. The
+  status line shows the mode, with the `Shift+Tab` hint when no task runs and the interrupt hint
+  while one does, so the latter stays visible in narrow terminals. With the command list open,
+  `Shift+Tab` completes the selected command, like `Tab`.
 - The editor (`src/tui/input-editor.ts`) is a pure function from the input state and a key to the
   next input state, plus signals for submit, interrupt and end of file.
 
