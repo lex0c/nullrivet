@@ -168,7 +168,8 @@ In an interactive session, see [Keys](#keys).
 ## Interactive session
 
 `nullrivet` with no prompt opens a session in the terminal. The conversation is kept in memory
-between prompts until `/clear` or until you exit. Finished output (your prompts, answers, tool
+between prompts until `/clear` or until you exit; to keep it beyond that, save it to a file (see
+[Sessions](#sessions)). Finished output (your prompts, answers, tool
 results) goes to the terminal's normal scrollback; only the task in progress, the input box and
 the status line are redrawn at the bottom. Answers are rendered as Markdown while they stream.
 
@@ -205,13 +206,13 @@ While a task runs you can type the next prompt, but it can only be sent once the
 | `/effort [low\|medium\|high\|xhigh\|max\|off]` | Show or set the reasoning effort. |
 | `/permission [auto\|readonly]` | Show or change the execution mode; it applies from the next tool call. |
 | `/compact [focus]` | Summarize the older part of the conversation now; the focus guides the summary. |
-| `/clear` | Discard the conversation and clear the screen. |
+| `/clear` | Discard the conversation and clear the screen. A session file stops being saved and keeps the cleared conversation. |
 | `/instructions [reload]` | List the loaded `AGENTS.md` files, or read them again. |
-| `/stats` | Show the token usage of the session. |
+| `/stats` | Show the token usage since nullrivet started. |
 | `/session [file\|off]` | Show the session file, start saving to a new file, or stop saving. See [Sessions](#sessions). |
 | `/exit` | Exit. |
 
-`/model`, `/compact` and `/clear` cannot be used while a task runs. An unknown command is not sent anywhere
+`/model`, `/compact`, `/clear` and `/session` cannot be used while a task runs. An unknown command is not sent anywhere
 and stays in the input; to send text that starts with `/` as a prompt, begin it with a space. How the interface works is described in
 [docs/TUI.md](docs/TUI.md).
 

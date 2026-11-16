@@ -253,7 +253,7 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
   },
   {
     name: 'stats',
-    description: 'Show the token usage of this session',
+    description: 'Show the token usage since nullrivet started',
     run(_args, ctx) {
       ctx.notice('info', ctx.stats());
     },

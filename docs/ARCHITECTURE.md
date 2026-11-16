@@ -348,7 +348,7 @@ runs saves one at a time, skips a save when the conversation's revision, model, 
 are unchanged, and detaches the file with one warning when a save fails. Switching to a new file
 attaches it only after its first write succeeds. It backs `--session` and `/session`; the
 interactive session saves once more on the way out, since a turn interrupted then may not reach
-its own checkpoint. The file records the model, effort and mode it was last run with:
+its own checkpoint. `/clear` detaches the file rather than saving an empty conversation over it. The file records the model, effort and mode it was last run with:
 the model and effort are used when the invocation does not choose them; the mode only produces a
 warning, because permissions come from the invocation alone.
 
@@ -367,5 +367,6 @@ outlive the call. Every live group is killed when nullrivet exits.
 
 ## Interactive session
 
-The session keeps one agent, and therefore one conversation, alive between prompts. Its
-rendering, input handling and interrupt behavior are described in [TUI.md](TUI.md).
+The session keeps one agent, and therefore one conversation, alive between prompts, and saves it
+to a session file when one is attached (see [Sessions](#sessions)). Its rendering, input handling
+and interrupt behavior are described in [TUI.md](TUI.md).
