@@ -24,3 +24,9 @@ jobs:
       - run: bun run typecheck
       - run: bun run lint
       - run: bun test
+      # The end-to-end tests again, against the compiled executable, which resolves its embedded
+      # modules differently from the sources.
+      - run: bun run build
+      - run: bun test tests/e2e
+        env:
+          NULLRIVET_EXECUTABLE: dist/nullrivet

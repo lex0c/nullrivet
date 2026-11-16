@@ -338,6 +338,12 @@ bun run build        # standalone executable in dist/
 bun run start --model <id> "<prompt>"
 ```
 
+The end-to-end tests in `tests/e2e` run the CLI as a separate process against a local stand-in for
+the Ollama API: output delivery, interrupts and the time limit (no command left running),
+`readonly` refusals, compaction, piped input, a hostile `.env`/`bunfig.toml`, and the interactive
+session in a terminal. `NULLRIVET_EXECUTABLE=dist/nullrivet bun test tests/e2e` runs them against
+a compiled executable, as CI does.
+
 The architecture is described in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Documentation
