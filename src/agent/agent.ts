@@ -36,7 +36,14 @@ export interface Agent {
   mode: ExecutionMode;
   effort: ProviderEffort | undefined;
   provider: Provider;
+  readonly running: boolean;
   clear(): void;
+  // AGENTS.md files currently known: the ones in the system prompt plus the ones attached to
+  // tool results of the current conversation.
+  instructions(): readonly InstructionFile[];
+  // Reads the AGENTS.md files of the starting directory again. Files attached to earlier tool
+  // results are forgotten, so they are attached again when their paths are touched.
+  reloadInstructions(): Promise<{ files: readonly InstructionFile[]; warnings: readonly string[] }>;
 }
 
 // Keeps a quarter of the window free for the answer at most, so a model whose output limit is
@@ -80,6 +87,23 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
     mode: options.mode,
     effort: options.effort,
     provider: options.provider,
+
+    get running(): boolean {
+      return running;
+    },
+
+    instructions(): readonly InstructionFile[] {
+      return options.instructions?.list() ?? [];
+    },
+
+    async reloadInstructions() {
+      if (options.instructions === null) return { files: [], warnings: [] };
+      if (running) throw new Error('instructions cannot be reloaded while a turn is running');
+      options.instructions.reset();
+      const discovered = await options.instructions.discover([options.cwd]);
+      bootInstructions = discovered.files;
+      return discovered;
+    },
 
     clear(): void {
       conversation.clear();

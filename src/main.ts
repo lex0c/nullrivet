@@ -53,6 +53,10 @@ const code = await runCli({
   stderr: (text) => process.stderr.write(text),
   color: process.stderr.isTTY === true && process.env.NO_COLOR === undefined,
   signal: controller.signal,
+  terminal:
+    process.stdin.isTTY === true && process.stdout.isTTY === true
+      ? { stdin: process.stdin, stdout: process.stdout }
+      : null,
 });
 
 // Open sockets kept alive by the HTTP client would otherwise delay the exit.

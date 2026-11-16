@@ -6,10 +6,11 @@ import type { AgentEndReason } from '../agent/events.ts';
 import { headTailSummary } from '../context/output-reduction.ts';
 import { InstructionsLoader } from '../instructions/agents-loader.ts';
 import type { FetchLike } from '../providers/discovery.ts';
-import { resolveModel } from '../providers/resolve.ts';
+import { type ModelOverrides, resolveModel } from '../providers/resolve.ts';
 import { BUILTIN_TOOLS } from '../tools/index.ts';
 import { parseCli, USAGE, UsageError } from './args.ts';
 import { createJsonSink, createPlainSink } from './output.ts';
+import { runRepl } from './repl.ts';
 
 export const EXIT_CODES: Record<AgentEndReason | 'usage', number> = {
   done: 0,
@@ -32,6 +33,8 @@ export interface CliIO {
   stderr: (text: string) => void;
   color: boolean;
   signal: AbortSignal;
+  // Present when both stdin and stdout are terminals, which enables the interactive mode.
+  terminal: { stdin: NodeJS.ReadStream; stdout: NodeJS.WriteStream } | null;
   fetch?: FetchLike;
 }
 
@@ -76,10 +79,9 @@ export const runCli = async (io: CliIO): Promise<number> => {
   const prompt =
     io.readStdin === null ? config.prompt : composePrompt(config.prompt, await io.readStdin());
   if (io.signal.aborted) return fail('aborted while reading stdin', EXIT_CODES.aborted);
-  if (prompt.length === 0) {
-    return fail(
-      'no prompt given; pass the task as an argument or on stdin (interactive mode is not available yet)',
-    );
+  const interactive = prompt.length === 0 && io.terminal !== null && !config.json;
+  if (prompt.length === 0 && !interactive) {
+    return fail('no prompt given; pass the task as an argument or on stdin');
   }
 
   const cwd = resolve(io.cwd, config.cwd);
@@ -92,21 +94,23 @@ export const runCli = async (io: CliIO): Promise<number> => {
   if (config.model === undefined) {
     return fail('no model selected; pass --model <family>/<model> or set NULLRIVET_MODEL');
   }
-  const resolved = await resolveModel(config.model, {
-    env: io.env,
-    overrides: {
-      ...(config.contextWindow === undefined ? {} : { contextWindow: config.contextWindow }),
-      ...(config.maxOutput === undefined ? {} : { maxOutput: config.maxOutput }),
-    },
-    signal: io.signal,
-    ...(io.fetch === undefined ? {} : { fetch: io.fetch }),
+  // Overrides from the command line describe the model chosen there, not models switched to later.
+  const resolveWith = (id: string, overrides: ModelOverrides) =>
+    resolveModel(id, {
+      env: io.env,
+      overrides,
+      signal: io.signal,
+      ...(io.fetch === undefined ? {} : { fetch: io.fetch }),
+    });
+  const resolved = await resolveWith(config.model, {
+    ...(config.contextWindow === undefined ? {} : { contextWindow: config.contextWindow }),
+    ...(config.maxOutput === undefined ? {} : { maxOutput: config.maxOutput }),
   }).catch((error: unknown) => {
     if (io.signal.aborted) return null;
     throw error;
   });
   if (resolved === null) return fail('aborted', EXIT_CODES.aborted);
   if (!resolved.ok) return fail(resolved.error);
-  for (const warning of resolved.warnings) sink.notice('warning', warning);
 
   const agent = await createAgent({
     provider: resolved.provider,
@@ -117,8 +121,23 @@ export const runCli = async (io: CliIO): Promise<number> => {
     ...(config.effort === undefined ? {} : { effort: config.effort }),
     ...(config.maxSteps === undefined ? {} : { maxSteps: config.maxSteps }),
   });
-  for (const warning of agent.bootWarnings) sink.notice('warning', warning);
+  const warnings = [...resolved.warnings, ...agent.bootWarnings];
 
+  if (interactive && io.terminal !== null) {
+    return runRepl({
+      agent,
+      version: packageJson.version,
+      cwd,
+      resolveModel: (id) => resolveWith(id, {}),
+      warnings,
+      signal: io.signal,
+      stdin: io.terminal.stdin,
+      stdout: io.terminal.stdout,
+      env: io.env,
+    });
+  }
+
+  for (const warning of warnings) sink.notice('warning', warning);
   const result = await agent.run(prompt, { signal: io.signal, onEvent: (e) => sink.event(e) });
   sink.finish();
   return EXIT_CODES[result.reason];
