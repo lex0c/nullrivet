@@ -22,3 +22,16 @@ export class ProviderRequestError extends Error {
 // name, arguments that are not a JSON object). The agent reports it back to the model instead of
 // ending the turn.
 export const INVALID_TOOL_CALL = 'tool_call.invalid';
+
+// Stream error code for a request the provider rejected because the prompt does not fit the
+// context window. The agent recovers by compacting the conversation and retrying once.
+export const CONTEXT_OVERFLOW = 'context_overflow';
+
+// Thrown by adapters when the provider rejects a request before streaming because the prompt
+// does not fit the context window, so the agent can compact and retry instead of failing.
+export class ContextOverflowError extends Error {
+  constructor(message: string, options: { cause?: unknown } = {}) {
+    super(message, options.cause === undefined ? undefined : { cause: options.cause });
+    this.name = 'ContextOverflowError';
+  }
+}
