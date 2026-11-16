@@ -23,6 +23,6 @@
     "resolveJsonModule": true,
     "noEmit": true
   },
-  "include": ["src/**/*", "tests/**/*"],
+  "include": ["src/**/*", "tests/**/*", "evals/**/*"],
   "exclude": ["node_modules", "dist"]
 }

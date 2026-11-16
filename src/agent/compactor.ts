@@ -51,13 +51,13 @@ ${SUMMARY_SECTIONS.map((s) => `${s}:`).join('\n')}
 - GOAL: what the user currently wants.
 - CONSTRAINTS: requirements and preferences the user stated.
 - NEXT: the next steps.
-- PROGRESS: what is done, in progress and blocked.
+- PROGRESS: what is done, in progress and blocked, with the working state the remaining steps depend on: running totals, counts, intermediate results and the values they were computed from, written out in full.
 - ERRORS: failures and whether they were resolved.
 - DECISIONS: choices made and why.
 - ANCHORS: file:line references, symbols, commands and facts that were verified.
 - REJECTED: approaches that were tried or discarded, and why.
 
-Write "(none)" under a section with nothing to report. Keep exact file paths, symbols, commands and error messages. Drop items that are resolved and no longer matter. Be concise. Output only the summary: do not continue the conversation, answer the transcript or call tools.`;
+Write "(none)" under a section with nothing to report. Keep exact file paths, symbols, commands and error messages. The transcript is all that remains of this part of the session: data the task still needs (numbers, values or identifiers read from files and command output) must be in the summary, or it is lost. Drop items that are resolved and no longer matter. Be concise. Output only the summary: do not continue the conversation, answer the transcript or call tools.`;
 
 export interface CompactionOptions {
   provider: Provider;

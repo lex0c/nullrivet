@@ -344,6 +344,10 @@ the Ollama API: output delivery, interrupts and the time limit (no command left 
 session in a terminal. `NULLRIVET_EXECUTABLE=dist/nullrivet bun test tests/e2e` runs them against
 a compiled executable, as CI does.
 
+Evaluations against real models (code tasks, a readonly investigation, a local security lab, a
+long-horizon task that forces compaction, and subagents) are in `evals/`:
+`bun --env-file=.env evals/run.ts --model <id>`. See [docs/EVALS.md](docs/EVALS.md).
+
 The architecture is described in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Documentation
@@ -353,6 +357,7 @@ The architecture is described in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 - [docs/TOOLS.md](docs/TOOLS.md): each tool's parameters, limits and safety measures.
 - [docs/MODELS.md](docs/MODELS.md): model resolution, the catalog, discovery and provider settings.
 - [docs/TUI.md](docs/TUI.md): the interactive interface: rendering, streaming Markdown, keys.
+- [docs/EVALS.md](docs/EVALS.md): evaluations against real models.
 
 ## License
 
