@@ -59,5 +59,15 @@ const code = await runCli({
       : null,
 });
 
+// Bun drops output still queued for a pipe when the process exits, so everything beyond the pipe
+// buffer would be lost when the reader is slower than the agent. Ending the streams waits until
+// the reader has taken all of it; a reader that closed early ends the wait with an error.
+const endStream = (stream: NodeJS.WriteStream): Promise<void> =>
+  new Promise((resolve) => {
+    stream.once('error', () => resolve());
+    stream.end(() => resolve());
+  });
+await Promise.all([endStream(process.stdout), endStream(process.stderr)]);
+
 // Open sockets kept alive by the HTTP client would otherwise delay the exit.
 process.exit(code);
