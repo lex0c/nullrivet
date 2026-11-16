@@ -61,6 +61,10 @@ export type ProviderMessageRole = 'user' | 'assistant';
 export interface ProviderTextBlock {
   type: 'text';
   text: string;
+  // The request prefix up to this block is stable across requests (such as project context at the
+  // start of the conversation). Adapters with explicit prompt caching may place a cache marker
+  // here; the others ignore it.
+  cacheBreakpoint?: boolean;
 }
 
 export interface ProviderToolUseBlock {

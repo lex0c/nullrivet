@@ -16,7 +16,8 @@ export interface ORToolCall {
   function: { name: string; arguments: string };
 }
 
-// Structured content is used only to place prompt-cache markers on the system prompt.
+// Structured content is used only to place prompt-cache markers: on the system prompt, and on a
+// user text block whose prefix is flagged as stable.
 export interface ORTextBlock {
   type: 'text';
   text: string;
@@ -86,6 +87,8 @@ export const toOpenRouterMessages = (
     }
 
     const textParts: string[] = [];
+    // Index in textParts of the last block flagged as a cache breakpoint, if any.
+    let cachedPart = -1;
     const toolCalls: ORToolCall[] = [];
     const toolResults: ORMessage[] = [];
     let reasoningData: unknown;
@@ -93,6 +96,7 @@ export const toOpenRouterMessages = (
     for (const block of msg.content) {
       switch (block.type) {
         case 'text':
+          if (block.cacheBreakpoint === true) cachedPart = textParts.length;
           textParts.push(block.text);
           break;
         case 'tool_use':
@@ -145,6 +149,17 @@ export const toOpenRouterMessages = (
         }
         out.push(m);
       }
+    } else if (textParts.length > 0 && explicitCache && cachedPart >= 0) {
+      // The wire concatenates content parts with no separator, so the joiner is kept in the text
+      // and the bytes match the flat form.
+      const last = textParts.length - 1;
+      const blocks: ORTextBlock[] = textParts.map((part, i) => {
+        const text = i < last ? `${part}${TEXT_BLOCK_SEPARATOR}` : part;
+        return i === cachedPart
+          ? { type: 'text', text, cache_control: { type: 'ephemeral' } }
+          : { type: 'text', text };
+      });
+      out.push({ role: 'user', content: blocks });
     } else if (textParts.length > 0) {
       out.push({ role: 'user', content: textParts.join(TEXT_BLOCK_SEPARATOR) });
     }

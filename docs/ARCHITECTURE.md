@@ -167,13 +167,14 @@ When the estimate exceeds the trigger before a request (or on `/compact`):
 1. **Cut.** The recent part of the conversation, up to the kept-tail budget, stays verbatim. It
    starts at a prompt when possible, or at an assistant message, never at tool results, which
    would lose the calls they answer. The latest exchange always stays.
-2. **Summary.** The older part is encoded as a JSON transcript, one entry per user message,
-   assistant message, tool call or tool result (long tool results and large arguments shortened),
-   and sent to the current model with the previous summary, asking for an
+2. **Summary.** The older part is encoded as a JSON transcript, one entry per block: user text,
+   piped input, assistant text, tool call, tool result or runtime note (long text and large
+   arguments shortened). It is sent to the current model with the previous summary, asking for an
    updated one with fixed sections: goal, constraints, next steps, progress, errors, decisions,
    anchors (file:line, symbols, commands) and rejected approaches. Each compaction updates the
    previous summary instead of replacing it, so nothing earlier is lost on the second one. A large
-   transcript is summarized in chunks, in sequence.
+   transcript is summarized in chunks, in sequence; a chunk ends between entries, so a tool call
+   and its result can fall in consecutive requests.
 3. **Deterministic sections.** The user's requests (verbatim, shortened when very long) and the
    files read and modified are derived by code and accumulated across compactions; a poor or
    failed summary cannot lose or invent them. Files are tracked from the `read_file`, `edit_file`
@@ -249,7 +250,7 @@ is never placed where it would carry the authority of the rules or of the user.
 |---|---|---|
 | System prompt | nullrivet's rules, the execution mode, the environment | Rules |
 | User turn | The user's prompts | The user's requests |
-| User turn, fenced | `AGENTS.md` of the starting directory, text piped on stdin with a prompt | Data |
+| User turn, fenced block | `AGENTS.md` of the starting directory; text piped on stdin with a prompt, in its own block after the prompt | Data |
 | User turn, first block after a compaction | Notes written by the agent, then the user's requests quoted verbatim | Notes; only the quoted requests are the user's |
 | User turn, `<agent-note>` | Feedback from the runtime, such as a rejected tool call | Runtime |
 | Tool results | File contents, command output, search results, `AGENTS.md` found later | Data |
@@ -263,9 +264,10 @@ is never placed where it would carry the authority of the rules or of the user.
   text cannot know the value, so it cannot end the block early. The value is fixed for the
   process, so prompts stay identical across requests for prompt caching.
 - **Summaries.** The summarizer receives the transcript as JSON, so a file or command output
-  cannot pose as a user message or end the transcript. Its instructions take the goal and the
-  constraints from user entries only, and record instructions found in tool results only as
-  attributed observations.
+  cannot pose as a user message or end the transcript. Piped input gets its own role. The goal and
+  the constraints come from user entries only; instructions found in piped input or tool results
+  are recorded only as attributed observations. The verbatim list of the user's requests leaves
+  piped input out.
 - **Enforcement is in code.** The rules make injection less likely to succeed; they do not stop
   it. What a successful injection can do is bounded by the code: the execution mode is checked
   before every tool call, commands run without the agent's API keys, and the `git` tool and the

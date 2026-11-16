@@ -1,4 +1,4 @@
-import { AGENT_NOTE_OPEN, type SummaryState } from '../agent/conversation.ts';
+import { AGENT_NOTE_OPEN, isPipedInput, type SummaryState } from '../agent/conversation.ts';
 import { contentBlocks, type ProviderMessage, type ProviderTextBlock } from '../providers/types.ts';
 import { estimateMessagesTokens } from './tokens.ts';
 
@@ -24,6 +24,10 @@ const MAX_LISTED_FILES = 100;
 const TRANSCRIPT_RESULT_CHARS = 2_000;
 const TRANSCRIPT_ERROR_CHARS = 4_000;
 const TRANSCRIPT_ARG_CHARS = 400;
+const TRANSCRIPT_ARGS_TOTAL_CHARS = 2_000;
+// Shortest text an oversized entry is cut to, and room for the omission marker clipMiddle adds.
+const MIN_CLIPPED_CHARS = 64;
+const CLIP_MARKER_CHARS = 64;
 const TAIL_RESULT_CHARS = 2_000;
 
 export const emptySummary = (): SummaryState => ({
@@ -124,11 +128,12 @@ const mergeRecent = (previous: readonly string[], added: readonly string[]): str
 };
 
 // Requests typed by the user stay verbatim because they are short and are the strongest signal
-// of intent. Notes the agent added on its own are not requests.
+// of intent. Notes the agent added on its own and text piped in as material are not requests.
 export const userRequestsIn = (span: readonly ProviderMessage[]): string[] =>
   span
     .filter((m) => m.role === 'user')
     .flatMap(textBlocks)
+    .filter((t) => !isPipedInput(t))
     .map((t) => t.trim())
     .filter((t) => t.length > 0 && !t.startsWith(AGENT_NOTE_OPEN))
     .map((t) => clipMiddle(t, REQUEST_MAX_CHARS));
@@ -159,11 +164,13 @@ export const updateDeterministic = (
 // One entry of the transcript sent to the summarizer. Entries are encoded as JSON one by one, so
 // text inside a file or a command output cannot pose as another entry or end the transcript.
 export type TranscriptEntry =
-  | { role: 'user' | 'assistant' | 'runtime_note'; text: string }
-  | { role: 'tool_call'; tool: string; arguments: Record<string, unknown> }
+  | { role: 'user' | 'piped_input' | 'assistant' | 'runtime_note'; text: string }
+  | { role: 'tool_call'; tool: string; arguments: string }
   | { role: 'tool_result'; tool?: string; error?: true; content: string };
 
-const shownArguments = (input: Record<string, unknown>): Record<string, unknown> => {
+// The arguments as JSON text, with long string values replaced by their length and the whole
+// bounded, since nested values (a list of edits) can be large too.
+const shownArguments = (input: Record<string, unknown>): string => {
   const shown: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(input)) {
     shown[key] =
@@ -171,7 +178,7 @@ const shownArguments = (input: Record<string, unknown>): Record<string, unknown>
         ? `[${value.length} characters]`
         : value;
   }
-  return shown;
+  return clipMiddle(JSON.stringify(shown), TRANSCRIPT_ARGS_TOTAL_CHARS);
 };
 
 export const transcriptEntries = (message: ProviderMessage): TranscriptEntry[] => {
@@ -183,7 +190,9 @@ export const transcriptEntries = (message: ProviderMessage): TranscriptEntry[] =
           ? 'assistant'
           : block.text.startsWith(AGENT_NOTE_OPEN)
             ? 'runtime_note'
-            : 'user';
+            : isPipedInput(block.text)
+              ? 'piped_input'
+              : 'user';
       entries.push({ role, text: block.text });
     } else if (block.type === 'tool_use') {
       entries.push({ role: 'tool_call', tool: block.name, arguments: shownArguments(block.input) });
@@ -200,19 +209,27 @@ export const transcriptEntries = (message: ProviderMessage): TranscriptEntry[] =
   return entries;
 };
 
+const clippableLength = (entry: TranscriptEntry): number =>
+  'text' in entry
+    ? entry.text.length
+    : 'content' in entry
+      ? entry.content.length
+      : entry.arguments.length;
+
 const clipEntry = (entry: TranscriptEntry, max: number): TranscriptEntry => {
   if ('text' in entry) return { ...entry, text: clipMiddle(entry.text, max) };
   if ('content' in entry) return { ...entry, content: clipMiddle(entry.content, max) };
-  return entry;
+  return { ...entry, arguments: clipMiddle(entry.arguments, max) };
 };
 
-// Encodes an entry as one JSON line of at most `maxChars` when its text can be shortened that far.
-// Escaping makes the encoded text longer than the text, so the limit is halved until it fits.
+// Encodes an entry as one JSON line of at most `maxChars`, shortening its text by what the line
+// exceeds. Escaping can make the cut text encode longer than expected, hence the loop; each pass
+// cuts further, so it ends.
 const encodeEntry = (entry: TranscriptEntry, maxChars: number): string => {
   let line = JSON.stringify(entry);
-  let limit = maxChars;
-  while (line.length > maxChars && limit > 64) {
-    limit = Math.floor(limit / 2);
+  let limit = clippableLength(entry);
+  while (line.length > maxChars && limit > MIN_CLIPPED_CHARS) {
+    limit = Math.max(MIN_CLIPPED_CHARS, limit - (line.length - maxChars) - CLIP_MARKER_CHARS);
     line = JSON.stringify(clipEntry(entry, limit));
   }
   return line;
@@ -247,7 +264,7 @@ export const transcriptChunks = (
 // transcript instead of a summary).
 // Headings may carry Markdown decoration (`**GOAL:**`, `## GOAL`, `- GOAL`).
 export const isUsableSummary = (text: string): boolean =>
-  SUMMARY_SECTIONS.filter((section) => new RegExp(`^[\\s>#*_-]*${section}\\b`, 'm').test(text))
+  SUMMARY_SECTIONS.filter((section) => new RegExp(`^[ \\t>#*_-]*${section}\\b`, 'm').test(text))
     .length >= 3;
 
 const list = (items: readonly string[]): string =>

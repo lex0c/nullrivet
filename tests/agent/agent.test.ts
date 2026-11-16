@@ -81,6 +81,24 @@ describe('time limit', () => {
   });
 });
 
+describe('piped input', () => {
+  test('is sent as a fenced block after the prompt', async () => {
+    const provider = createMockProvider([textTurn('ok')]);
+    const agent = await createAgent({
+      provider,
+      tools: [],
+      mode: 'auto',
+      cwd: '/tmp',
+      instructions: null,
+    });
+    await agent.run('review this', { input: 'the diff' });
+    expect(provider.calls[0]?.req.messages[0]?.content).toEqual([
+      { type: 'text', text: 'review this' },
+      { type: 'text', text: `<stdin fence="${FENCE}">\nthe diff\n</stdin fence="${FENCE}">` },
+    ]);
+  });
+});
+
 describe('project instructions of the working directory', () => {
   test('are sent in the user turn, fenced, and not in the system prompt', async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), 'nullrivet-agent-')));

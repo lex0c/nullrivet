@@ -164,6 +164,51 @@ describe('createAnthropicProvider', () => {
     expect(cacheControls(body)).toHaveLength(3);
   });
 
+  test('a text block flagged as a stable prefix gets its own breakpoint, sent without the flag', async () => {
+    const { body } = await capture('claude-opus-4-8', {
+      system: 'you are an agent',
+      tools: TOOLS,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'project context', cacheBreakpoint: true },
+            { type: 'text', text: 'first' },
+          ],
+        },
+        { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'grep', input: {} }] },
+        { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] },
+      ],
+    });
+    expect(body.messages[0].content).toEqual([
+      { type: 'text', text: 'project context', cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: 'first' },
+    ]);
+    expect(cacheControls(body)).toHaveLength(4);
+  });
+
+  test('a flagged block is not marked when the request would exceed the breakpoint limit', async () => {
+    const { body } = await capture('claude-opus-4-8', {
+      systemSegments: [
+        { id: 'a', text: 'rules', cacheBreakpoint: true },
+        { id: 'b', text: 'more rules', cacheBreakpoint: true },
+      ],
+      system: 'rules\n\nmore rules',
+      tools: TOOLS,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'project context', cacheBreakpoint: true },
+            { type: 'text', text: 'first' },
+          ],
+        },
+      ],
+    });
+    expect(body.messages[0].content[0]).toEqual({ type: 'text', text: 'project context' });
+    expect(cacheControls(body)).toHaveLength(4);
+  });
+
   test('NULLRIVET_ANTHROPIC_CACHE_TTL=1h tags every breakpoint with the 1h TTL', async () => {
     const { body } = await capture(
       'claude-opus-4-8',

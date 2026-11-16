@@ -40,6 +40,9 @@ export interface AgentOptions {
 export interface RunOptions {
   signal?: AbortSignal;
   onEvent?: AgentEventListener;
+  // Material the prompt refers to, such as text piped on stdin. It is sent after the prompt as
+  // data, not as further requests.
+  input?: string;
 }
 
 export interface CompactOptions extends RunOptions {
@@ -58,8 +61,8 @@ export interface Agent {
   clear(): void;
   // Compacts the conversation now. Resolves with null when there is nothing to compact.
   compact(options?: CompactOptions): Promise<CompactionOutcome | null>;
-  // AGENTS.md files currently known: the ones in the system prompt plus the ones attached to
-  // tool results of the current conversation.
+  // AGENTS.md files currently known: the ones of the starting directory, sent with every request,
+  // plus the ones attached to tool results of the current conversation.
   instructions(): readonly InstructionFile[];
   // Reads the AGENTS.md files of the starting directory again. Files attached to earlier tool
   // results are forgotten, so they are attached again when their paths are touched.
@@ -101,7 +104,9 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
       date: localDate(),
       isGitRepo,
     });
-  const projectContext = (): string => renderProjectContext(bootInstructions);
+  // Rendered when the instructions are loaded, not for every request.
+  let projectContextText = renderProjectContext(bootInstructions);
+  const projectContext = (): string => projectContextText;
 
   const agent: Agent = {
     conversation,
@@ -123,6 +128,7 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
       if (running) throw new Error('instructions cannot be reloaded while a turn is running');
       const discovered = await options.instructions.reload([options.cwd]);
       bootInstructions = discovered.files;
+      projectContextText = renderProjectContext(bootInstructions);
       return discovered;
     },
 
@@ -179,20 +185,24 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
           maxOutputTokens: contextBudget(agent.provider.capabilities).maxOutput,
           stallMs: options.stallMs ?? DEFAULT_STALL_MS,
         };
-        return await runTurn(prompt, {
-          provider: agent.provider,
-          conversation,
-          tools,
-          mode: () => agent.mode,
-          cwd: options.cwd,
-          systemPrompt,
-          projectContext,
-          instructions: options.instructions,
-          limits,
-          ...(agent.effort === undefined ? {} : { effort: agent.effort }),
-          emit: runOptions.onEvent ?? (() => undefined),
-          signal,
-        });
+        return await runTurn(
+          prompt,
+          {
+            provider: agent.provider,
+            conversation,
+            tools,
+            mode: () => agent.mode,
+            cwd: options.cwd,
+            systemPrompt,
+            projectContext,
+            instructions: options.instructions,
+            limits,
+            ...(agent.effort === undefined ? {} : { effort: agent.effort }),
+            emit: runOptions.onEvent ?? (() => undefined),
+            signal,
+          },
+          runOptions.input,
+        );
       } finally {
         clearTimeout(timer);
         running = false;

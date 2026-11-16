@@ -5,10 +5,10 @@ const ANSI_PATTERN = new RegExp(
   [
     // CSI, including private-mode parameters such as `\x1b[<0;1;1M`.
     '\\x1b\\[[0-9;:<=>?]*[ -/]*[@-~]',
-    // OSC terminated by BEL.
-    '\\x1b\\][\\s\\S]*?\\x07',
-    // OSC, DCS, APC, PM and SOS terminated by ST.
-    '\\x1b[\\]PX^_][\\s\\S]*?\\x1b\\\\',
+    // OSC, DCS, APC, PM and SOS strings, terminated by BEL or ST. The string cannot contain ESC,
+    // which starts the terminator, so each match attempt stops at the next ESC and the scan stays
+    // linear; an unterminated string is left to the rules below, which remove its ESC.
+    '\\x1b[\\]PX^_][^\\x07\\x1b]*(?:\\x07|\\x1b\\\\)',
     // Single-character escapes, including RIS (terminal reset).
     '\\x1b[@-~]',
     // C1 control characters.

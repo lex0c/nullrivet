@@ -111,6 +111,31 @@ describe('toOpenRouterMessages text blocks', () => {
     );
     expect(out.at(-1)).toEqual({ role: 'user', content: 'fix the bug\n\nalso add tests' });
   });
+
+  test('a stable prefix block gets a cache marker on models with explicit caching', () => {
+    const req = reqGen({
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'project context', cacheBreakpoint: true },
+            { type: 'text', text: 'fix the bug' },
+          ],
+        },
+      ],
+    });
+    expect(toOpenRouterMessages(req, false, true).at(-1)).toEqual({
+      role: 'user',
+      content: [
+        { type: 'text', text: 'project context\n\n', cache_control: { type: 'ephemeral' } },
+        { type: 'text', text: 'fix the bug' },
+      ],
+    });
+    expect(toOpenRouterMessages(req, false, false).at(-1)).toEqual({
+      role: 'user',
+      content: 'project context\n\nfix the bug',
+    });
+  });
 });
 
 describe('createOpenRouterProvider', () => {

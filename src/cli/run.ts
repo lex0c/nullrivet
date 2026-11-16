@@ -7,7 +7,6 @@ import { headTailSummary } from '../context/output-reduction.ts';
 import { InstructionsLoader } from '../instructions/agents-loader.ts';
 import type { FetchLike } from '../providers/discovery.ts';
 import { type ModelOverrides, resolveModel } from '../providers/resolve.ts';
-import { fenced } from '../sanitize/fence.ts';
 import { BUILTIN_TOOLS } from '../tools/index.ts';
 import { parseCli, USAGE, UsageError } from './args.ts';
 import { createJsonSink, createPlainSink } from './output.ts';
@@ -39,17 +38,20 @@ export interface CliIO {
   fetch?: FetchLike;
 }
 
-export const composePrompt = (prompt: string, piped: string): string => {
+// Without a prompt, piped text is the task itself. With a prompt, it is the material the prompt
+// is about (a diff, a log), sent as data rather than as further requests.
+export const composePrompt = (
+  prompt: string,
+  piped: string,
+): { prompt: string; input?: string } => {
   const reduced = headTailSummary(piped, {
     maxBytes: STDIN_MAX_BYTES,
     headLines: 400,
     tailLines: 400,
   }).text;
-  if (reduced.trim().length === 0) return prompt;
-  if (prompt.length === 0) return reduced;
-  // With a prompt, piped text is the material the prompt is about (a diff, a log), not further
-  // requests, so it is fenced as data.
-  return `${prompt}\n\n${fenced('stdin', reduced)}`;
+  if (reduced.trim().length === 0) return { prompt };
+  if (prompt.length === 0) return { prompt: reduced };
+  return { prompt, input: reduced };
 };
 
 export const runCli = async (io: CliIO): Promise<number> => {
@@ -79,8 +81,10 @@ export const runCli = async (io: CliIO): Promise<number> => {
     return code;
   };
 
-  const prompt =
-    io.readStdin === null ? config.prompt : composePrompt(config.prompt, await io.readStdin());
+  const { prompt, input } =
+    io.readStdin === null
+      ? { prompt: config.prompt, input: undefined }
+      : composePrompt(config.prompt, await io.readStdin());
   if (io.signal.aborted) return fail('aborted while reading stdin', EXIT_CODES.aborted);
   const interactive = prompt.length === 0 && io.terminal !== null && !config.json;
   if (prompt.length === 0 && !interactive) {
@@ -142,7 +146,11 @@ export const runCli = async (io: CliIO): Promise<number> => {
   }
 
   for (const warning of warnings) sink.notice('warning', warning);
-  const result = await agent.run(prompt, { signal: io.signal, onEvent: (e) => sink.event(e) });
+  const result = await agent.run(prompt, {
+    signal: io.signal,
+    onEvent: (e) => sink.event(e),
+    ...(input === undefined ? {} : { input }),
+  });
   sink.finish();
   return EXIT_CODES[result.reason];
 };

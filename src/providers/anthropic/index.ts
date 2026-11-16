@@ -15,6 +15,7 @@ import type {
   ProviderContentBlock,
   ProviderMessage,
   ProviderReasoningBlock,
+  ProviderTextBlock,
   ProviderToolDef,
   ProviderToolResultBlock,
   StreamEvent,
@@ -100,7 +101,15 @@ const isErrorBody = (value: unknown): value is { error: { type?: string; message
 type ThinkingWireBlock =
   | { type: 'thinking'; thinking: string; signature: string }
   | { type: 'redacted_thinking'; data: string };
-type WireBlock = Exclude<ProviderContentBlock, ProviderReasoningBlock> | ThinkingWireBlock;
+type TextWireBlock = {
+  type: 'text';
+  text: string;
+  cache_control?: Anthropic.CacheControlEphemeral;
+};
+type WireBlock =
+  | Exclude<ProviderContentBlock, ProviderReasoningBlock | ProviderTextBlock>
+  | TextWireBlock
+  | ThinkingWireBlock;
 
 // The data is replayed verbatim because the signature must round-trip byte-identical. Blocks
 // captured by another family, or without a signature, cannot be replayed and are dropped.
@@ -122,9 +131,18 @@ const reasoningToWireBlock = (block: ProviderReasoningBlock): ThinkingWireBlock 
   return undefined;
 };
 
-// Anthropic rejects `name` on a tool result ("Extra inputs are not permitted"); the field exists
-// for providers that correlate results by function name.
-const toWireBlock = (block: Exclude<ProviderContentBlock, ProviderReasoningBlock>): WireBlock => {
+// Anthropic rejects fields it does not know ("Extra inputs are not permitted"), so blocks are
+// rebuilt with the wire fields only: a text block's cache hint becomes a marker or is dropped, and
+// a tool result loses `name`, which exists for providers that correlate results by function name.
+const toWireBlock = (
+  block: Exclude<ProviderContentBlock, ProviderReasoningBlock>,
+  hintMarker: Anthropic.CacheControlEphemeral | undefined,
+): WireBlock => {
+  if (block.type === 'text') {
+    return hintMarker !== undefined && block.cacheBreakpoint === true
+      ? { type: 'text', text: block.text, cache_control: hintMarker }
+      : { type: 'text', text: block.text };
+  }
   if (block.type !== 'tool_result') return block;
   const cleaned: ProviderToolResultBlock = {
     type: 'tool_result',
@@ -138,6 +156,7 @@ const toWireBlock = (block: Exclude<ProviderContentBlock, ProviderReasoningBlock
 const toAnthropicMessage = (
   m: ProviderMessage,
   reasoningReplay: boolean,
+  hintMarker: Anthropic.CacheControlEphemeral | undefined,
 ): { role: ProviderMessage['role']; content: string | WireBlock[] } => {
   if (typeof m.content === 'string') return { role: m.role, content: m.content };
   const out: WireBlock[] = [];
@@ -148,7 +167,7 @@ const toAnthropicMessage = (
       if (wire !== undefined) out.push(wire);
       continue;
     }
-    out.push(toWireBlock(b));
+    out.push(toWireBlock(b, hintMarker));
   }
   return { role: m.role, content: out };
 };
@@ -221,10 +240,17 @@ export const createAnthropicProvider = (
       req.tools !== undefined && req.tools.length > 0
         ? toolsWithCacheBreakpoint(req.tools.map(toAnthropicTool), marker)
         : undefined;
-    const messages = messagesWithTailCacheBreakpoint(
-      req.messages.map((m) => toAnthropicMessage(m, reasoningReplay)),
-      marker,
-    );
+    const buildMessages = (hintMarker: Anthropic.CacheControlEphemeral | undefined) =>
+      messagesWithTailCacheBreakpoint(
+        req.messages.map((m) => toAnthropicMessage(m, reasoningReplay, hintMarker)),
+        marker,
+      );
+    // Markers requested by message blocks are an optimization, so they are dropped first when the
+    // request would exceed the breakpoint limit.
+    let messages = buildMessages(marker);
+    if (countCacheBreakpoints({ system, tools, messages }) > MAX_CACHE_BREAKPOINTS_PER_REQUEST) {
+      messages = buildMessages(undefined);
+    }
     const breakpoints = countCacheBreakpoints({ system, tools, messages });
     if (breakpoints > MAX_CACHE_BREAKPOINTS_PER_REQUEST) {
       throw new Error(

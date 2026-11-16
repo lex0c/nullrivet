@@ -159,7 +159,13 @@ const withProjectContext = (
   const [first, ...rest] = messages;
   if (context.length === 0 || first === undefined || first.role !== 'user') return [...messages];
   return [
-    { role: 'user', content: [{ type: 'text', text: context }, ...contentBlocks(first.content)] },
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: context, cacheBreakpoint: true },
+        ...contentBlocks(first.content),
+      ],
+    },
     ...rest,
   ];
 };
@@ -266,7 +272,12 @@ const invalidToolCallFeedback = (errors: readonly CollectedError[]): string =>
 
 // Runs one user turn: request, stream, execute tool calls, feed results back, until the model
 // answers without tool calls, the turn is aborted, or a limit is reached.
-export const runTurn = async (prompt: string, deps: TurnDependencies): Promise<TurnResult> => {
+// `input` is material the prompt refers to, such as piped stdin; it is sent as data.
+export const runTurn = async (
+  prompt: string,
+  deps: TurnDependencies,
+  input?: string,
+): Promise<TurnResult> => {
   const { conversation, emit, signal, limits } = deps;
   let usage = emptyUsage();
   let steps = 0;
@@ -342,7 +353,7 @@ export const runTurn = async (prompt: string, deps: TurnDependencies): Promise<T
   };
 
   emit({ type: 'agent:start' });
-  conversation.appendUser(prompt);
+  conversation.appendUser(prompt, input);
 
   while (steps < limits.maxSteps) {
     if (signal.aborted) return end('aborted');

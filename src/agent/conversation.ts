@@ -7,6 +7,7 @@ import type {
   ProviderToolUseBlock,
 } from '../providers/types.ts';
 import { contentBlocks } from '../providers/types.ts';
+import { FENCE, fenced } from '../sanitize/fence.ts';
 
 export const INTERRUPTED_RESULT = '[interrupted: the tool call did not complete]';
 
@@ -18,6 +19,13 @@ const MIN_TRUSTED_USAGE_RATIO = 0.5;
 // after a compaction). The tag tells it apart from what the user typed.
 export const AGENT_NOTE_OPEN = '<agent-note>';
 export const agentNote = (text: string): string => `${AGENT_NOTE_OPEN}${text}</agent-note>`;
+
+// Text the user supplied as material for a prompt (piped on stdin), kept in its own block after
+// the prompt and fenced as data. The fence value is known only to this process, so a block that
+// starts with it was made here.
+const PIPED_INPUT_TAG = 'stdin';
+const PIPED_INPUT_OPEN = `<${PIPED_INPUT_TAG} fence="${FENCE}">`;
+export const isPipedInput = (text: string): boolean => text.startsWith(PIPED_INPUT_OPEN);
 
 export const interruptedResult = (toolUse: ProviderToolUseBlock): ProviderToolResultBlock => ({
   type: 'tool_result',
@@ -91,21 +99,26 @@ export class Conversation {
     this.summaryState = null;
   }
 
-  appendUser(text: string): void {
+  // `input` is material the prompt refers to, such as piped stdin; it is added as data.
+  appendUser(text: string, input?: string): void {
     const repairs = this.unansweredToolUses().map(interruptedResult);
+    const added: ProviderContentBlock[] = [{ type: 'text', text }];
+    if (input !== undefined && input.length > 0) {
+      added.push({ type: 'text', text: fenced(PIPED_INPUT_TAG, input) });
+    }
     const last = this.history.at(-1);
     if (last?.role === 'user') {
       // A turn that ended before the assistant answered (an abort or a provider error) leaves a
       // user message last; the new prompt joins it to keep roles alternating.
       this.history[this.history.length - 1] = {
         role: 'user',
-        content: [...contentBlocks(last.content), { type: 'text', text }],
+        content: [...contentBlocks(last.content), ...added],
       };
       return;
     }
     this.history.push({
       role: 'user',
-      content: repairs.length === 0 ? text : [...repairs, { type: 'text', text }],
+      content: repairs.length === 0 && added.length === 1 ? text : [...repairs, ...added],
     });
   }
 
