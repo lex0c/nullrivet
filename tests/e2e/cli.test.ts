@@ -331,4 +331,38 @@ describe('terminal', () => {
     },
     30_000,
   );
+
+  test.skipIf(Bun.which('python3') === null)(
+    'leaving the interactive session in the middle of a turn still saves the session',
+    async () => {
+      // The command ignores SIGTERM, so after the first Ctrl+C the turn keeps running for the
+      // grace period before SIGKILL; the second Ctrl+C leaves during it.
+      const sleep = uniqueSleep();
+      server.handle(toolsThenText([{ name: 'bash', args: { command: `trap '' TERM; ${sleep}` } }]));
+      const cwd = tempDir();
+      const child = Bun.spawn(inTerminal(cliCommand(['--session', 's.json'])), {
+        env: { ...cliEnv(server), TERM: 'xterm-256color' },
+        cwd,
+        stdin: 'pipe',
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      await Bun.sleep(1_500);
+      child.stdin.write('a prompt worth keeping\r');
+      child.stdin.flush();
+      await Bun.sleep(1_000);
+      expect(processRunning(sleep)).toBe(true);
+      // Ctrl+C twice: interrupt the turn, then leave while it is still stopping.
+      child.stdin.write('\x03');
+      child.stdin.flush();
+      await Bun.sleep(200);
+      child.stdin.write('\x03');
+      child.stdin.flush();
+      const [, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+      expect(code).toBe(130);
+      expect(readFileSync(join(cwd, 's.json'), 'utf8')).toContain('a prompt worth keeping');
+      Bun.spawnSync(['pkill', '-KILL', '-f', sleep]);
+    },
+    30_000,
+  );
 });

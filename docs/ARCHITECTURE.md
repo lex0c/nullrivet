@@ -342,9 +342,13 @@ The core stays free of session I/O. It offers two things:
 The CLI edge does the rest. `SessionFile` loads a file (refusing symbolic links, files over 64 MiB
 and anything that is not a valid session), and saves the whole state atomically with mode 0600.
 Each save first checks that the file is as this process last left it (inode, size, modification
-time); otherwise it throws instead of overwriting another writer's change. `SessionLink` attaches
-a file to the agent through the checkpoint, detaches it with one warning when a save fails, and
-backs `--session` and `/session`. The file records the model, effort and mode it was last run with:
+time); otherwise it throws instead of overwriting another writer's change. A state larger than
+loading accepts is not written. `SessionLink` attaches a file to the agent through the checkpoint,
+runs saves one at a time, skips a save when the conversation's revision, model, effort and mode
+are unchanged, and detaches the file with one warning when a save fails. Switching to a new file
+attaches it only after its first write succeeds. It backs `--session` and `/session`; the
+interactive session saves once more on the way out, since a turn interrupted then may not reach
+its own checkpoint. The file records the model, effort and mode it was last run with:
 the model and effort are used when the invocation does not choose them; the mode only produces a
 warning, because permissions come from the invocation alone.
 

@@ -336,9 +336,10 @@ nullrivet --session ci.json "Run the tests and list the failures"
 nullrivet --session ci.json "Fix the first failure"   # same conversation, next step
 ```
 
-- The file is written after each step of the agent, after each compaction and when a task ends,
-  so a crash or a killed process loses at most the step in progress. Writes are atomic: the file
-  holds either the previous state or the new one.
+- The file is written after each step of the agent, after each compaction, when a task ends and
+  when you leave the interactive session, so a crash or a killed process loses at most the step
+  in progress. Writes are atomic: the file holds either the previous state or the new one. Model,
+  effort and mode changes made with `/model`, `/effort` and `/permission` are saved too.
 - Continuing a session uses the model it was last run with, unless `--model` or `NULLRIVET_MODEL`
   chooses another. Effort works the same way. The execution mode is never taken from the file:
   pass `--permission readonly` again to keep a session read-only, and a warning says so when a
@@ -347,7 +348,8 @@ nullrivet --session ci.json "Fix the first failure"   # same conversation, next 
 - In the interactive session, `/session <file>` starts saving to a new file at any point. If a
   file was already in use, it keeps the conversation as it was until then, so switching files
   forks the session. `/session off` stops saving and keeps the file; `/session` shows its state.
-  `/session` never overwrites a file that already holds a session.
+  `/session` never overwrites a file that already holds a session, and `/clear` stops saving
+  rather than erasing the file: it keeps the cleared conversation.
 - If the file is changed by something else while nullrivet runs (another nullrivet, an editor),
   nullrivet stops saving to it and warns, rather than overwriting that change.
 
@@ -356,7 +358,8 @@ files. It is created readable by you only (mode 0600); keep it out of repositori
 loaded with the authority of your own messages, so only continue sessions you created: a file that
 is not exactly a nullrivet session file, or whose history breaks the rules the agent keeps
 (alternating roles, every tool call answered), is refused and left untouched. Symbolic links and
-files over 64 MiB are refused too.
+files over 64 MiB are refused too; a session that grows past that size stops being saved, with a
+warning, and its file keeps the last state that can be continued.
 
 ## What nullrivet does not store
 

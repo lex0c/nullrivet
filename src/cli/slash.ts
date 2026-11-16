@@ -101,6 +101,8 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
       }
       for (const warning of resolved.warnings) ctx.notice('warning', warning);
       ctx.agent.provider = resolved.provider;
+      // The session file records the model to continue with.
+      await ctx.agent.checkpoint?.();
       ctx.notice('info', `Model switched to ${resolved.provider.id}.`);
     },
   },
@@ -108,13 +110,14 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     name: 'effort',
     description: 'Show or set the reasoning effort',
     usage: `[${EFFORT_LEVELS.join('|')}|off]`,
-    run(args, ctx) {
+    async run(args, ctx) {
       if (args.length === 0) {
         ctx.notice('info', `Effort: ${ctx.agent.effort ?? 'provider default'}`);
         return;
       }
       if (args === 'off') {
         ctx.agent.effort = undefined;
+        await ctx.agent.checkpoint?.();
         ctx.notice('info', 'Effort reset to the provider default.');
         return;
       }
@@ -123,6 +126,7 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
         return;
       }
       ctx.agent.effort = args as ProviderEffort;
+      await ctx.agent.checkpoint?.();
       ctx.notice('info', `Effort set to ${args}.`);
     },
   },
@@ -130,7 +134,7 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     name: 'permission',
     description: 'Show or change the execution mode',
     usage: '[auto|readonly]',
-    run(args, ctx) {
+    async run(args, ctx) {
       if (args.length === 0) {
         ctx.notice('info', `Execution mode: ${ctx.agent.mode}`);
         return;
@@ -140,6 +144,7 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
         return;
       }
       ctx.agent.mode = args;
+      await ctx.agent.checkpoint?.();
       ctx.notice('info', `Execution mode set to ${args}; it applies from the next tool call.`);
     },
   },
@@ -156,11 +161,18 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     name: 'clear',
     description: 'Discard the conversation and clear the screen',
     idleOnly: true,
-    async run(_args, ctx) {
+    run(_args, ctx) {
       ctx.agent.clear();
       ctx.clearScreen();
-      await ctx.agent.checkpoint?.();
-      ctx.notice('info', 'Conversation cleared.');
+      // The file keeps the conversation that was cleared: clearing never erases a saved session.
+      const path = ctx.session.path;
+      ctx.session.detach();
+      ctx.notice(
+        'info',
+        path === null
+          ? 'Conversation cleared.'
+          : `Conversation cleared. ${path} keeps the previous conversation; /session <file> saves the new one.`,
+      );
     },
   },
   {
@@ -198,9 +210,14 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
         return;
       }
       const previous = ctx.session.path;
-      ctx.session.attach(opened.file);
-      await ctx.session.save();
-      if (ctx.session.path === null) return;
+      const failure = await ctx.session.switchTo(opened.file);
+      if (failure !== null) {
+        ctx.notice(
+          'error',
+          previous === null ? failure : `${failure}; the session is still saved to ${previous}.`,
+        );
+        return;
+      }
       ctx.notice(
         'info',
         previous === null

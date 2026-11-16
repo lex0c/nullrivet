@@ -155,8 +155,6 @@ export const runCli = async (io: CliIO): Promise<number> => {
       warnings.push(`this session was last run in ${resumed.cwd}; it continues in ${cwd}`);
     }
   }
-  const link = new SessionLink(agent, cwd, (message) => sink.notice('warning', message));
-  if (session !== null) link.attach(session.file);
 
   if (interactive && io.terminal !== null) {
     return runRepl({
@@ -165,7 +163,7 @@ export const runCli = async (io: CliIO): Promise<number> => {
       cwd,
       resolveModel: (id) => resolveWith(id, {}),
       warnings,
-      session: link,
+      sessionFile: session?.file ?? null,
       resumedMessages: resumed === null ? null : resumed.conversation.messages.length,
       signal: io.signal,
       stdin: io.terminal.stdin,
@@ -175,6 +173,9 @@ export const runCli = async (io: CliIO): Promise<number> => {
   }
 
   for (const warning of warnings) sink.notice('warning', warning);
+  if (session !== null) {
+    new SessionLink(agent, cwd, (message) => sink.notice('warning', message)).attach(session.file);
+  }
   const result = await agent.run(prompt, {
     signal: io.signal,
     onEvent: (e) => sink.event(e),

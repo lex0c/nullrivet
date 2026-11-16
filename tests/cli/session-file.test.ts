@@ -180,11 +180,62 @@ describe('SessionLink', () => {
     link.attach((await openOk(path)).file);
     await link.save();
     writeFileSync(path, 'replaced');
+    agent.conversation.appendUser('more');
     await link.save();
+    agent.conversation.appendAssistant([{ type: 'text', text: 'again' }]);
     await link.save();
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain('no longer saved');
     expect(link.path).toBeNull();
     expect(readFileSync(path, 'utf8')).toBe('replaced');
+  });
+
+  test('a state that has not changed is not written again', async () => {
+    const agent = await agentWith();
+    const path = join(tempDir(), 's.json');
+    const link = new SessionLink(agent, '/tmp', () => undefined);
+    link.attach((await openOk(path)).file);
+    agent.conversation.appendUser('once');
+    await link.save();
+    const first = statSync(path).ino;
+    await link.save();
+    expect(statSync(path).ino).toBe(first);
+    agent.effort = 'high';
+    await link.save();
+    expect(statSync(path).ino).not.toBe(first);
+  });
+
+  test('a session that outgrows the size limit stops being saved and keeps its last state', async () => {
+    const agent = await agentWith();
+    const path = join(tempDir(), 's.json');
+    const warnings: string[] = [];
+    const link = new SessionLink(agent, '/tmp', (message) => warnings.push(message));
+    const opened = await SessionFile.open(path, { maxBytes: 4_000 });
+    if (!opened.ok) throw new Error(opened.error);
+    link.attach(opened.file);
+    agent.conversation.appendUser('small');
+    await link.save();
+    const saved = readFileSync(path, 'utf8');
+    agent.conversation.appendAssistant([{ type: 'text', text: 'x'.repeat(5_000) }]);
+    await link.save();
+    expect(warnings[0]).toContain('grown past');
+    expect(link.path).toBeNull();
+    expect(readFileSync(path, 'utf8')).toBe(saved);
+  });
+
+  test('switching to a file that cannot be written keeps the current one', async () => {
+    const agent = await agentWith();
+    const dir = tempDir();
+    const link = new SessionLink(agent, '/tmp', () => undefined);
+    link.attach((await openOk(join(dir, 'a.json'))).file);
+    agent.conversation.appendUser('first');
+    await link.save();
+    // A file that appears between opening and the first write stands in for a write that fails.
+    const target = await openOk(join(dir, 'b.json'));
+    writeFileSync(join(dir, 'b.json'), 'someone else');
+    const failure = await link.switchTo(target.file);
+    expect(failure).toContain('changed by something else');
+    expect(link.path).toBe(join(dir, 'a.json'));
+    expect(readFileSync(join(dir, 'b.json'), 'utf8')).toBe('someone else');
   });
 });

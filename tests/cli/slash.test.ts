@@ -196,4 +196,31 @@ describe('/session', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  test('/clear keeps the saved conversation in its file and stops saving', async () => {
+    const dir = sessionDir();
+    try {
+      const h = await harness(undefined, dir);
+      h.agent.conversation.appendUser('worth keeping');
+      await run(h, '/session s.json');
+      await run(h, '/clear');
+      expect(h.agent.checkpoint).toBeNull();
+      expect(h.notices.at(-1)?.text).toContain('keeps the previous conversation');
+      expect(readFileSync(join(dir, 's.json'), 'utf8')).toContain('worth keeping');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a change of effort is saved to the session file', async () => {
+    const dir = sessionDir();
+    try {
+      const h = await harness(undefined, dir);
+      await run(h, '/session s.json');
+      await run(h, '/effort high');
+      expect(JSON.parse(readFileSync(join(dir, 's.json'), 'utf8')).effort).toBe('high');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

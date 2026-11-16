@@ -79,6 +79,7 @@ export class Conversation {
   private history: ProviderMessage[] = [];
   private anchor: MeasurementAnchor | null = null;
   private summaryState: SummaryState | null = null;
+  private changed = 0;
 
   messages(): readonly ProviderMessage[] {
     return this.history;
@@ -94,7 +95,13 @@ export class Conversation {
     return this.summaryState;
   }
 
+  // Counts changes to the state, so a copy that is up to date need not be written again.
+  get revision(): number {
+    return this.changed;
+  }
+
   clear(): void {
+    this.changed++;
     this.history = [];
     this.anchor = null;
     this.summaryState = null;
@@ -102,6 +109,7 @@ export class Conversation {
 
   // `input` is material the prompt refers to, such as piped stdin; it is added as data.
   appendUser(text: string, input?: string): void {
+    this.changed++;
     const repairs = this.unansweredToolUses().map(interruptedResult);
     const added: ProviderContentBlock[] = [{ type: 'text', text }];
     if (input !== undefined && input.length > 0) {
@@ -125,11 +133,13 @@ export class Conversation {
 
   appendAssistant(blocks: readonly ProviderContentBlock[]): void {
     if (blocks.length === 0) return;
+    this.changed++;
     this.history.push({ role: 'assistant', content: [...blocks] });
   }
 
   appendToolResults(results: readonly ProviderToolResultBlock[]): void {
     if (results.length === 0) return;
+    this.changed++;
     this.history.push({ role: 'user', content: [...results] });
   }
 
@@ -171,7 +181,6 @@ export class Conversation {
     return estimatePromptTokens(this.history, requestOverhead(shape));
   }
 
-  // Replaces the history with its compacted form. The measurement no longer describes it.
   // A copy of the state, enough to continue the conversation later.
   snapshot(): ConversationSnapshot {
     return structuredClone({ messages: this.history, summary: this.summaryState });
@@ -183,9 +192,12 @@ export class Conversation {
     this.history = structuredClone(snapshot.messages);
     this.summaryState = structuredClone(snapshot.summary);
     this.anchor = null;
+    this.changed++;
   }
 
+  // Replaces the history with its compacted form. The measurement no longer describes it.
   replaceAfterCompaction(history: ProviderMessage[], summary: SummaryState): void {
+    this.changed++;
     this.history = history;
     this.summaryState = summary;
     this.anchor = null;

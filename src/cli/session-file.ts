@@ -107,7 +107,13 @@ export interface SessionState {
   effort: ProviderEffort | undefined;
   mode: ExecutionMode;
   cwd: string;
-  conversation: ConversationSnapshot;
+  // Read while the state is serialized, before the save waits for anything, so the conversation
+  // written is the one at the time of the call.
+  conversation: Readonly<ConversationSnapshot>;
+}
+
+export interface SessionLimits {
+  maxBytes?: number;
 }
 
 export class SessionFile {
@@ -116,10 +122,12 @@ export class SessionFile {
     // What the file looked like after this process last read or wrote it; null before it exists.
     private stamp: FileStamp | null,
     private readonly createdAt: string,
+    private readonly maxBytes: number,
   ) {}
 
   // Reads an existing session, or prepares a new one that the first save creates.
-  static async open(path: string): Promise<OpenResult> {
+  static async open(path: string, limits: SessionLimits = {}): Promise<OpenResult> {
+    const maxBytes = limits.maxBytes ?? MAX_SESSION_BYTES;
     let info: Stats;
     try {
       info = await lstat(path);
@@ -135,7 +143,11 @@ export class SessionFile {
           error: `the directory of the session file does not exist: ${dirname(path)}`,
         };
       }
-      return { ok: true, file: new SessionFile(path, null, new Date().toISOString()), data: null };
+      return {
+        ok: true,
+        file: new SessionFile(path, null, new Date().toISOString(), maxBytes),
+        data: null,
+      };
     }
     // A link would let the session be written somewhere other than the path the user named.
     if (info.isSymbolicLink()) {
@@ -144,8 +156,11 @@ export class SessionFile {
     if (!info.isFile()) {
       return { ok: false, error: `the session file is not a regular file: ${path}` };
     }
-    if (info.size > MAX_SESSION_BYTES) {
-      return { ok: false, error: `the session file is larger than 64 MiB: ${path}` };
+    if (info.size > maxBytes) {
+      return {
+        ok: false,
+        error: `the session file is larger than ${sizeLabel(maxBytes)}: ${path}`,
+      };
     }
     let text: string;
     try {
@@ -159,15 +174,32 @@ export class SessionFile {
     }
     return {
       ok: true,
-      file: new SessionFile(path, stampOf(info), parsed.data.createdAt),
+      file: new SessionFile(path, stampOf(info), parsed.data.createdAt, maxBytes),
       data: parsed.data,
     };
   }
 
   // Writes the whole state atomically, so a crash leaves either the previous state or the new one.
-  // Throws when the file was changed by something else since this process last touched it:
-  // overwriting it would discard that change.
+  // Throws when the file was changed by something else since this process last touched it
+  // (overwriting it would discard that change), and when the state has grown past what loading
+  // accepts (the file keeps the last state that can be continued).
   async save(state: SessionState): Promise<void> {
+    const text = `${JSON.stringify({
+      format: SESSION_FORMAT,
+      version: SESSION_VERSION,
+      createdAt: this.createdAt,
+      updatedAt: new Date().toISOString(),
+      model: state.model,
+      ...(state.effort === undefined ? {} : { effort: state.effort }),
+      mode: state.mode,
+      cwd: state.cwd,
+      conversation: state.conversation,
+    })}\n`;
+    if (Buffer.byteLength(text, 'utf8') > this.maxBytes) {
+      throw new Error(
+        `the session has grown past ${sizeLabel(this.maxBytes)}, the most a session file can hold`,
+      );
+    }
     let current: Stats | null;
     try {
       current = await lstat(this.path);
@@ -190,32 +222,29 @@ export class SessionFile {
         throw new Error('the file was changed by something else');
       }
     }
-    const data = {
-      format: SESSION_FORMAT,
-      version: SESSION_VERSION,
-      createdAt: this.createdAt,
-      updatedAt: new Date().toISOString(),
-      model: state.model,
-      ...(state.effort === undefined ? {} : { effort: state.effort }),
-      mode: state.mode,
-      cwd: state.cwd,
-      conversation: state.conversation,
-    };
-    atomicWrite(this.path, `${JSON.stringify(data, null, 2)}\n`, { mode: SESSION_FILE_MODE });
+    atomicWrite(this.path, text, { mode: SESSION_FILE_MODE });
     this.stamp = stampOf(await lstat(this.path));
   }
 }
+
+const sizeLabel = (bytes: number): string =>
+  bytes % (1024 * 1024) === 0 ? `${bytes / (1024 * 1024)} MiB` : `${bytes} bytes`;
 
 // Keeps a session file up to date with an agent's conversation, through the agent's checkpoint.
 // A file that cannot be written is detached with one warning; the task itself goes on.
 export class SessionLink {
   private file: SessionFile | null = null;
   private savedAt: Date | null = null;
+  // What the file holds, to skip writing it again when nothing changed.
+  private savedKey: string | null = null;
+  // Saves run one after another: two overlapping saves would each see the other's write as a
+  // change made by something else.
+  private queue: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly agent: Agent,
     private readonly cwd: string,
-    public warn: (message: string) => void,
+    private readonly warn: (message: string) => void,
   ) {}
 
   get path(): string | null {
@@ -225,6 +254,7 @@ export class SessionLink {
   attach(file: SessionFile): void {
     this.file = file;
     this.savedAt = null;
+    this.savedKey = null;
     this.agent.checkpoint = () => this.save();
   }
 
@@ -233,20 +263,58 @@ export class SessionLink {
     this.agent.checkpoint = null;
   }
 
-  async save(): Promise<void> {
+  // Starts saving to a new file, which takes over only once it holds the current state: when the
+  // first write fails, the file already in use stays attached. Returns the reason on failure.
+  switchTo(file: SessionFile): Promise<string | null> {
+    const run = this.queue.then(async () => {
+      try {
+        await file.save(this.state());
+      } catch (error) {
+        return `cannot save the session to ${file.path}: ${errorMessage(error)}`;
+      }
+      this.attach(file);
+      this.savedAt = new Date();
+      this.savedKey = this.key();
+      return null;
+    });
+    this.queue = run.then(() => undefined);
+    return run;
+  }
+
+  save(): Promise<void> {
+    this.queue = this.queue.then(() => this.saveNow());
+    return this.queue;
+  }
+
+  private key(): string {
+    const a = this.agent;
+    return `${a.conversation.revision}\0${a.provider.id}\0${a.effort ?? ''}\0${a.mode}`;
+  }
+
+  private state(): SessionState {
+    return {
+      model: this.agent.provider.id,
+      effort: this.agent.effort,
+      mode: this.agent.mode,
+      cwd: this.cwd,
+      conversation: {
+        messages: [...this.agent.conversation.messages()],
+        summary: this.agent.conversation.summary(),
+      },
+    };
+  }
+
+  private async saveNow(): Promise<void> {
     const file = this.file;
     if (file === null) return;
+    const key = this.key();
+    if (key === this.savedKey) return;
     try {
-      await file.save({
-        model: this.agent.provider.id,
-        effort: this.agent.effort,
-        mode: this.agent.mode,
-        cwd: this.cwd,
-        conversation: this.agent.conversation.snapshot(),
-      });
+      await file.save(this.state());
       this.savedAt = new Date();
+      this.savedKey = key;
     } catch (error) {
-      this.detach();
+      if (this.file === file) this.detach();
       this.warn(`the session is no longer saved to ${file.path}: ${errorMessage(error)}`);
     }
   }

@@ -1,5 +1,6 @@
 import { SUMMARY_OPEN } from '../context/compaction.ts';
-import type { ProviderContentBlock, ProviderFamily, ProviderMessage } from '../providers/types.ts';
+import { isProviderFamily } from '../providers/resolve.ts';
+import type { ProviderContentBlock, ProviderMessage } from '../providers/types.ts';
 import type { SummaryState } from './conversation.ts';
 
 // The state of a conversation, enough to continue it: the history as the agent keeps it and what
@@ -12,15 +13,6 @@ export interface ConversationSnapshot {
 export type SnapshotResult =
   | { ok: true; snapshot: ConversationSnapshot }
   | { ok: false; error: string };
-
-const FAMILIES: readonly ProviderFamily[] = [
-  'anthropic',
-  'openai',
-  'ollama',
-  'google',
-  'openrouter',
-  'xai',
-];
 
 class InvalidSnapshot extends Error {}
 
@@ -68,10 +60,10 @@ const block = (value: unknown, where: string): ProviderContentBlock => {
       return result;
     }
     case 'reasoning':
-      if (!FAMILIES.includes(value.provider as ProviderFamily)) {
+      if (typeof value.provider !== 'string' || !isProviderFamily(value.provider)) {
         return fail(`${where}.provider is not a known provider family`);
       }
-      return { type: 'reasoning', provider: value.provider as ProviderFamily, data: value.data };
+      return { type: 'reasoning', provider: value.provider, data: value.data };
     default:
       return fail(`${where}.type is not a known block type`);
   }
