@@ -18,18 +18,7 @@ export const DEFAULT_CAPABILITIES: Readonly<ProviderCapabilities> = {
   supports_sampling: false,
 };
 
-// A Record instead of an array so adding a family to ProviderFamily fails to compile until it is
-// listed here.
-const KNOWN_FAMILIES: Record<ProviderFamily, true> = {
-  anthropic: true,
-  openai: true,
-  ollama: true,
-  google: true,
-  openrouter: true,
-  xai: true,
-};
-
-const isProviderFamily = (s: string): s is ProviderFamily => Object.hasOwn(KNOWN_FAMILIES, s);
+const isProviderFamily = (s: string): s is ProviderFamily => Object.hasOwn(FAMILY_ADAPTERS, s);
 
 export interface ModelOverrides {
   contextWindow?: number;
@@ -159,12 +148,6 @@ export const resolveModel = async (
     };
   }
   const adapter = FAMILY_ADAPTERS[familyName];
-  if (adapter === undefined) {
-    return {
-      ok: false,
-      error: `provider family "${familyName}" is not supported yet; supported families: ${supportedFamilies()}`,
-    };
-  }
 
   const overrideError = validateOverrides(overrides);
   if (overrideError !== undefined) return { ok: false, error: overrideError };

@@ -8,8 +8,8 @@ conversation lives only in memory: nullrivet writes no files of its own, and whe
 nothing of the session remains except the changes the tools made on purpose.
 
 > **Status:** early development. The interactive session and the one-shot mode work end to end,
-> long conversations are compacted automatically, and Anthropic, OpenAI, Ollama and OpenRouter
-> models are supported.
+> long conversations are compacted automatically, and Anthropic, OpenAI, Google (Gemini), xAI
+> (Grok), Ollama and OpenRouter models are supported.
 
 - **Ephemeral.** No database, history, logs, caches or configuration files. See
   [What nullrivet does not store](#what-nullrivet-does-not-store).
@@ -71,7 +71,7 @@ ln -s "$PWD/src/main.ts" ~/.local/bin/nullrivet
 ## Quick start
 
 ```bash
-export OPENROUTER_API_KEY=sk-or-...   # or ANTHROPIC_API_KEY, OPENAI_API_KEY, OLLAMA_API_KEY
+export OPENROUTER_API_KEY=sk-or-...   # or ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, XAI_API_KEY, OLLAMA_API_KEY
 export NULLRIVET_MODEL=openrouter/nvidia/nemotron-3-ultra-550b-a55b:free
 
 # Start an interactive session in the current directory
@@ -132,6 +132,8 @@ Flags take precedence over environment variables, which take precedence over the
 |---|---|
 | `ANTHROPIC_API_KEY` | Credentials for `anthropic/*` models. |
 | `OPENAI_API_KEY` | Credentials for `openai/*` models. |
+| `GEMINI_API_KEY` | Credentials for `google/*` models. |
+| `XAI_API_KEY` | Credentials for `xai/*` models. |
 | `OPENROUTER_API_KEY` | Credentials for `openrouter/*` models. |
 | `OLLAMA_API_KEY` | Credentials for Ollama Cloud models (a local Ollama server needs none). |
 | `NULLRIVET_MODEL` | Default model id. |
@@ -211,8 +213,9 @@ and stays in the input; to send text that starts with `/` as a prompt, begin it 
 ## Models
 
 A model id is `<family>/<model>`, for example `anthropic/claude-sonnet-5-5`, `openai/gpt-5.4`,
-`ollama/qwen3-coder:480b` or `openrouter/deepseek/deepseek-v4-flash`. OpenRouter model names
-contain slashes themselves, so the family is everything before the first `/`.
+`google/gemini-3.5-flash`, `xai/grok-4.5`, `ollama/qwen3-coder:480b` or
+`openrouter/deepseek/deepseek-v4-flash`. OpenRouter model names contain slashes themselves, so the
+family is everything before the first `/`.
 
 There is no catalog file. A model is resolved, in order, from:
 

@@ -8,6 +8,9 @@ import {
   discoverOpenRouterModel,
 } from './discovery.ts';
 import type { Env } from './env.ts';
+import { GOOGLE_CAPS } from './google/capabilities.ts';
+import { DEFAULT_GOOGLE_BASE_URL } from './google/http.ts';
+import { createGoogleProvider } from './google/index.ts';
 import { OLLAMA_CLOUD_CAPS, OLLAMA_LOCAL_CAPS } from './ollama/capabilities.ts';
 import { DEFAULT_OLLAMA_BASE_URL } from './ollama/http.ts';
 import { createOllamaProvider, isOllamaCloud, OLLAMA_CLOUD_BASE_URL } from './ollama/index.ts';
@@ -16,6 +19,8 @@ import { createOpenAIProvider, DEFAULT_OPENAI_BASE_URL } from './openai/index.ts
 import { OPENROUTER_CAPS } from './openrouter/capabilities.ts';
 import { createOpenRouterProvider, DEFAULT_OPENROUTER_BASE_URL } from './openrouter/index.ts';
 import type { Provider, ProviderCapabilities, ProviderFamily } from './types.ts';
+import { XAI_CAPS } from './xai/capabilities.ts';
+import { createXaiProvider, DEFAULT_XAI_BASE_URL } from './xai/index.ts';
 
 export interface ModelEntry {
   // `<family>/<model>`, as typed by the user.
@@ -46,6 +51,8 @@ export const MODEL_CATALOG: readonly ModelEntry[] = [
   ...entriesOf('ollama', OLLAMA_LOCAL_CAPS),
   ...entriesOf('ollama', OLLAMA_CLOUD_CAPS, OLLAMA_CLOUD_BASE_URL),
   ...entriesOf('openrouter', OPENROUTER_CAPS),
+  ...entriesOf('google', GOOGLE_CAPS),
+  ...entriesOf('xai', XAI_CAPS),
 ];
 
 export const findCatalogEntry = (id: string): ModelEntry | undefined =>
@@ -76,7 +83,8 @@ export interface FamilyAdapter {
   discover?: (model: string, options: DiscoveryOptions) => Promise<DiscoveryResult>;
 }
 
-export const FAMILY_ADAPTERS: Partial<Record<ProviderFamily, FamilyAdapter>> = {
+// A full Record, so adding a family to ProviderFamily fails to compile until it has an adapter.
+export const FAMILY_ADAPTERS: Record<ProviderFamily, FamilyAdapter> = {
   anthropic: {
     apiKeyEnv: 'ANTHROPIC_API_KEY',
     baseUrlEnv: 'NULLRIVET_ANTHROPIC_BASE_URL',
@@ -104,5 +112,17 @@ export const FAMILY_ADAPTERS: Partial<Record<ProviderFamily, FamilyAdapter>> = {
     defaultBaseUrl: DEFAULT_OPENROUTER_BASE_URL,
     create: createOpenRouterProvider,
     discover: discoverOpenRouterModel,
+  },
+  google: {
+    apiKeyEnv: 'GEMINI_API_KEY',
+    baseUrlEnv: 'NULLRIVET_GOOGLE_BASE_URL',
+    defaultBaseUrl: DEFAULT_GOOGLE_BASE_URL,
+    create: createGoogleProvider,
+  },
+  xai: {
+    apiKeyEnv: 'XAI_API_KEY',
+    baseUrlEnv: 'NULLRIVET_XAI_BASE_URL',
+    defaultBaseUrl: DEFAULT_XAI_BASE_URL,
+    create: createXaiProvider,
   },
 };

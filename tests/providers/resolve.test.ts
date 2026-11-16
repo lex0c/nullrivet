@@ -225,15 +225,9 @@ describe('resolveModel', () => {
   test('an unknown family is an error listing the supported families', async () => {
     const error = expectError(await resolve('foo/bar'));
     expect(error).toContain('unknown provider family "foo"');
-    expect(error).toContain('supported families: anthropic, ollama, openai, openrouter');
-  });
-
-  test('a known family without an adapter is not supported yet', async () => {
-    for (const family of ['google', 'xai']) {
-      const error = expectError(await resolve(`${family}/some-model`));
-      expect(error).toContain(`"${family}" is not supported yet`);
-      expect(error).toContain('supported families: anthropic, ollama, openai, openrouter');
-    }
+    expect(error).toContain(
+      'supported families: anthropic, google, ollama, openai, openrouter, xai',
+    );
   });
 
   test('ids without a family or a model are rejected', async () => {
@@ -278,6 +272,10 @@ describe('resolveModel for the direct provider families', () => {
       ['anthropic/claude-opus-4-8', { ANTHROPIC_API_KEY: 'sk-ant' }],
       ['openai/gpt-5.4', { OPENAI_API_KEY: 'sk-oai' }],
       ['openai/gpt-4o', { OPENAI_API_KEY: 'sk-oai' }],
+      ['google/gemini-3.5-flash', { GEMINI_API_KEY: 'gk' }],
+      ['google/gemini-2.5-flash-lite', { GEMINI_API_KEY: 'gk' }],
+      ['xai/grok-4.5', { XAI_API_KEY: 'xk' }],
+      ['xai/grok-4.20-0309-non-reasoning', { XAI_API_KEY: 'xk' }],
     ] as const) {
       const r = expectOk(await resolveWith(id, env));
       expect(r.source).toBe('catalog');
@@ -290,6 +288,8 @@ describe('resolveModel for the direct provider families', () => {
     for (const [id, variable] of [
       ['anthropic/claude-opus-4-8', 'ANTHROPIC_API_KEY'],
       ['openai/gpt-5.4', 'OPENAI_API_KEY'],
+      ['google/gemini-3.5-flash', 'GEMINI_API_KEY'],
+      ['xai/grok-4.5', 'XAI_API_KEY'],
     ] as const) {
       const f = listingFetch([]);
       const error = expectError(
@@ -305,6 +305,29 @@ describe('resolveModel for the direct provider families', () => {
     expect(r.source).toBe('defaults');
     expect(r.warnings[0]).toContain('no discovery endpoint');
     expect(r.provider.id).toBe('openai/gpt-future');
+  });
+
+  test('models outside the Google and xAI catalogs get defaults with a warning', async () => {
+    for (const [id, env] of [
+      ['google/gemini-future', { GEMINI_API_KEY: 'gk' }],
+      ['xai/grok-future', { XAI_API_KEY: 'xk' }],
+    ] as const) {
+      const r = expectOk(await resolveWith(id, env));
+      expect(r.source).toBe('defaults');
+      expect(r.warnings[0]).toContain('no discovery endpoint');
+      expect(r.provider.id).toBe(id);
+    }
+  });
+
+  test('the Google and xAI base URL variables are validated', async () => {
+    for (const [id, env, variable] of [
+      ['google/gemini-3.5-flash', { GEMINI_API_KEY: 'gk' }, 'NULLRIVET_GOOGLE_BASE_URL'],
+      ['xai/grok-4.5', { XAI_API_KEY: 'xk' }, 'NULLRIVET_XAI_BASE_URL'],
+    ] as const) {
+      expectOk(await resolveWith(id, { ...env, [variable]: 'https://proxy.example/v1' }));
+      const error = expectError(await resolveWith(id, { ...env, [variable]: 'ftp://host' }));
+      expect(error).toContain(variable);
+    }
   });
 
   test('a model outside the Anthropic catalog is resolved from the model endpoint', async () => {

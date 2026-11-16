@@ -26,13 +26,15 @@ export const OPENAI_REASONING_EFFORT: Record<ProviderEffort, 'low' | 'medium' | 
     max: 'xhigh',
   };
 
-// xAI accepts only low|medium|high, and `high` is its top level, so `xhigh` and `max` clamp to it.
-export const XAI_REASONING_EFFORT: Record<ProviderEffort, 'low' | 'medium' | 'high'> = {
-  low: 'low',
-  medium: 'medium',
-  high: 'high',
-  xhigh: 'high',
-  max: 'high',
+// For providers whose named levels end at `high`, or at `xhigh` on some models (xAI, Gemini 3 and
+// later). Both reject a level the model does not list, so `xhigh` is clamped to `high` unless the
+// model accepts it, and `max`, which has no counterpart, maps to the highest accepted level.
+export const cappedEffortLevel = (
+  effort: ProviderEffort,
+  supportsXhigh: boolean,
+): 'low' | 'medium' | 'high' | 'xhigh' => {
+  if (effort === 'xhigh' || effort === 'max') return supportsXhigh ? 'xhigh' : 'high';
+  return effort;
 };
 
 // Anthropic rejects `xhigh` with a 400 on models that do not expose it, so it is clamped to `high`.

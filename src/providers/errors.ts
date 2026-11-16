@@ -37,18 +37,19 @@ export class ContextOverflowError extends Error {
 }
 
 // Wordings providers use when a prompt does not fit the context window: Anthropic ("prompt is too
-// long", "exceed context limit"), OpenAI ("context_length_exceeded", "exceeds the context
-// window"), Ollama ("exceeds the context length", "exceeded max context length"), and the
+// long", "exceed context limit"), xAI ("prompt is too long"), OpenAI ("context_length_exceeded",
+// "exceeds the context window"), Ollama ("exceeds the context length", "exceeded max context
+// length"), Gemini ("input token count ... exceeds the maximum number of tokens"), and the
 // OpenAI-compatible servers whose errors OpenRouter relays ("maximum context length", "maximum
-// prompt length"). Every pattern names the context or prompt length, so an unrelated 400 such as
-// an invalid parameter does not match.
+// prompt length"). Every pattern names the context, the prompt or the input token count, so an
+// unrelated 400 such as an invalid parameter does not match.
 const CONTEXT_OVERFLOW_PATTERNS: readonly RegExp[] = [
   /prompt is too long/i,
   /context[_ ]length[_ ]exceeded/i,
   /maximum (context|prompt) length/i,
   /exceeds? (the )?(model'?s? )?context (window|length|limit)/i,
   /exceeded max context length/i,
-  /input token count .* exceeds the maximum number of tokens/i,
+  /input token count\b.*\bexceeds the maximum number of tokens/i,
 ];
 
 export const isContextOverflowMessage = (text: string): boolean =>

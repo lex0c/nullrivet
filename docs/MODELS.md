@@ -9,14 +9,20 @@ a vendor prefix of their own:
 ```
 anthropic/claude-sonnet-5-5
 openai/gpt-5.4
+google/gemini-3.5-flash
+xai/grok-4.5
 ollama/qwen3-coder:480b
 openrouter/deepseek/deepseek-v4-flash
 ```
 
-| Family | Status |
-|---|---|
-| `anthropic`, `openai`, `ollama`, `openrouter` | Supported. |
-| `google`, `xai` | Planned; selecting them reports that the family is not supported yet. |
+| Family | Provider | Credentials |
+|---|---|---|
+| `anthropic` | Anthropic Messages API | `ANTHROPIC_API_KEY` |
+| `openai` | OpenAI Chat Completions and Responses APIs | `OPENAI_API_KEY` |
+| `google` | Gemini API (Google AI Studio) | `GEMINI_API_KEY` |
+| `xai` | xAI API (Grok) | `XAI_API_KEY` |
+| `ollama` | Ollama, local or Ollama Cloud | `OLLAMA_API_KEY` for Ollama Cloud only |
+| `openrouter` | OpenRouter | `OPENROUTER_API_KEY` |
 
 ## Resolution
 
@@ -30,7 +36,8 @@ output limit, reasoning and sampling support) are resolved in this order:
    - Anthropic: `GET /v1/models/{model}` (with the API key);
    - OpenRouter: `GET /models`, the public listing (no key needed);
    - Ollama: `POST /api/show` on the server that serves the model;
-   - OpenAI has no endpoint with this information, so only catalog models get exact values.
+   - OpenAI has no endpoint with this information, and Google and xAI models are not discovered,
+     so only catalog models of these three families get exact values.
 3. **Defaults.** When discovery is unavailable or fails, the model is accepted with a warning and
    conservative values: a 32,768-token window, 8,192 output tokens, no reasoning, and no sampling
    parameters.
@@ -65,6 +72,15 @@ be stale. nullrivet reports token counts instead (see [Usage and cost](#usage-an
 The OpenRouter catalog lives in `src/providers/openrouter/capabilities.ts`. Its context windows are
 the window served by the default-routed provider, which can be smaller than the model's headline
 maximum.
+
+The Google and xAI catalogs (`src/providers/google/capabilities.ts`,
+`src/providers/xai/capabilities.ts`) list current models whose ids were checked against each API's
+model listing:
+
+| Family | Models |
+|---|---|
+| `google` | `gemini-4-hydrogen`, `gemini-4-argon`, `gemini-4-carbon`, `gemini-3.8-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-pro-preview`, `gemini-3.1-flash-lite`, `gemini-3-flash-preview`, `gemini-2.5-flash-lite` |
+| `xai` | `grok-4.7`, `grok-4.6`, `grok-4.5`, `grok-4.3`, `grok-build-0.1`, `grok-4.20-0309-reasoning`, `grok-4.20-0309-non-reasoning` |
 
 ### Discovery mapping
 
@@ -111,8 +127,12 @@ always fit in the window. See [ARCHITECTURE.md](ARCHITECTURE.md#context-manageme
 `--effort` (`low`, `medium`, `high`, `xhigh`, `max`) is translated per model:
 
 - models with `supports_reasoning_effort` receive the level in the provider's own parameter
-  (Anthropic `output_config.effort`, OpenAI and OpenRouter `reasoning.effort`); OpenAI's top level
-  is `xhigh`, so `max` maps to it, and Anthropic models without `xhigh` get `high`;
+  (Anthropic `output_config.effort`, OpenAI and OpenRouter `reasoning.effort`, xAI
+  `reasoning_effort`, Gemini 3 and later `thinkingConfig.thinkingLevel`); OpenAI's top level is
+  `xhigh`, so `max` maps to it, Anthropic models without `xhigh` get `high`, and on xAI and Gemini
+  `xhigh` and `max` become `xhigh` where the model accepts it and `high` elsewhere;
+- Gemini 2.5 models take a thinking token budget instead, sized from the level and capped by the
+  model's `max_thinking_budget`;
 - models with only `supports_reasoning` have reasoning switched on (Anthropic models with a manual
   budget get one sized from the level; Ollama `gpt-oss` gets low/medium/high);
 - other models ignore it.
@@ -207,6 +227,44 @@ To list the free models that currently support tools:
 curl -s https://openrouter.ai/api/v1/models \
   | jq -r '.data[] | select((.id | endswith(":free")) and (.supported_parameters | index("tools"))) | .id'
 ```
+
+## Google
+
+| Variable | Description |
+|---|---|
+| `GEMINI_API_KEY` | API key from Google AI Studio. Required. |
+| `NULLRIVET_GOOGLE_BASE_URL` | Endpoint including the API version (default `https://generativelanguage.googleapis.com/v1beta`). |
+
+- Requests go to `streamGenerateContent` over plain HTTP, with no SDK, so no other credential or
+  setting is read from the environment. The key is sent in the `x-goog-api-key` header, never in
+  the URL.
+- **Thought signatures.** Thinking models attach a signature to their function calls, and
+  Gemini 3 and later reject a function call of the current turn whose signature is not sent back.
+  nullrivet keeps each signature unmodified, attached to the part it came with, and sends it back
+  on every following request.
+- Tool schemas are sent as JSON Schema (`parametersJsonSchema`), so keywords such as
+  `additionalProperties` are accepted.
+- Gemini 3 and later models are sent no `temperature` or `top_p`, as Google advises keeping their
+  defaults on these models.
+- Usage counts thinking tokens as output tokens; Gemini reports them separately.
+- `gemini-2.5-flash-lite` is served only to projects that used Gemini 2.5 before; other projects
+  get a 404 naming the model to use instead.
+
+## xAI
+
+| Variable | Description |
+|---|---|
+| `XAI_API_KEY` | API key. Required. |
+| `NULLRIVET_XAI_BASE_URL` | Endpoint (default `https://api.x.ai/v1`). |
+
+- The xAI API speaks OpenAI Chat Completions; the OpenAI SDK is used as the transport, with
+  `OPENAI_ORG_ID` and `OPENAI_PROJECT_ID` disabled so they are never sent to xAI.
+- Reasoning models reject `stop`, so stop sequences are sent only to non-reasoning models.
+- Requests to `https://api.x.ai/v1` carry an `x-grok-conv-id` header, a hash of the system prompt
+  and the tools, which routes a session to the same server and raises prompt-cache hits.
+- Usage counts reasoning tokens as output tokens; xAI reports them apart from the completion
+  tokens.
+- Grok's reasoning is not sent back: Chat Completions has no input for it.
 
 ## Usage and cost
 

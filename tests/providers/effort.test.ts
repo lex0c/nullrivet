@@ -1,10 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 import {
   anthropicEffort,
+  cappedEffortLevel,
   EFFORT_THINKING_BUDGET,
   effortThinkingBudget,
   OPENAI_REASONING_EFFORT,
-  XAI_REASONING_EFFORT,
 } from '../../src/providers/effort.ts';
 import type { ProviderEffort } from '../../src/providers/types.ts';
 
@@ -37,13 +37,22 @@ describe('OPENAI_REASONING_EFFORT', () => {
   });
 });
 
-describe('XAI_REASONING_EFFORT', () => {
-  test('low/medium/high are 1:1; xhigh and max clamp to high', () => {
-    expect(XAI_REASONING_EFFORT.low).toBe('low');
-    expect(XAI_REASONING_EFFORT.medium).toBe('medium');
-    expect(XAI_REASONING_EFFORT.high).toBe('high');
-    expect(XAI_REASONING_EFFORT.xhigh).toBe('high');
-    expect(XAI_REASONING_EFFORT.max).toBe('high');
+describe('cappedEffortLevel', () => {
+  test('low/medium/high are 1:1 regardless of xhigh support', () => {
+    for (const e of ['low', 'medium', 'high'] as const) {
+      expect(cappedEffortLevel(e, false)).toBe(e);
+      expect(cappedEffortLevel(e, true)).toBe(e);
+    }
+  });
+
+  test('xhigh and max clamp to high when the model does not accept xhigh', () => {
+    expect(cappedEffortLevel('xhigh', false)).toBe('high');
+    expect(cappedEffortLevel('max', false)).toBe('high');
+  });
+
+  test('xhigh passes through and max maps to xhigh when the model accepts xhigh', () => {
+    expect(cappedEffortLevel('xhigh', true)).toBe('xhigh');
+    expect(cappedEffortLevel('max', true)).toBe('xhigh');
   });
 });
 

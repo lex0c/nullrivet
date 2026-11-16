@@ -47,6 +47,7 @@ src/
     discovery.ts           in-memory lookup of unknown models
     errors.ts              AbortError, ProviderRequestError, canonical error codes
     anthropic/, openai/,   adapters: request building, message conversion, stream normalizers
+    google/, xai/,
     ollama/, openrouter/
   tools/
     types.ts, policy.ts    tool contract and execution modes
@@ -331,7 +332,3 @@ outlive the call. Every live group is killed when nullrivet exits.
 
 The session keeps one agent, and therefore one conversation, alive between prompts. Its
 rendering, input handling and interrupt behavior are described in [TUI.md](TUI.md).
-
-## Not implemented yet
-
-- Google and xAI providers.

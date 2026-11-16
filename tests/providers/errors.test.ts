@@ -14,6 +14,8 @@ describe('isContextOverflowMessage', () => {
       "This endpoint's maximum context length is 131072 tokens.",
       "This model's maximum prompt length is 131072 but the request contains 140000 tokens.",
       'The input token count (1200000) exceeds the maximum number of tokens allowed (1048576).',
+      'The input token count exceeds the maximum number of tokens allowed 1048576.',
+      "Failed to start sampling: [input_too_large] The prompt is too long for this model's context window (300188 tokens > 256000 tokens)",
     ]) {
       expect(isContextOverflowMessage(message)).toBe(true);
     }
