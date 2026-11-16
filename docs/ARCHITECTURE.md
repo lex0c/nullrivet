@@ -77,7 +77,9 @@ src/
 
 1. The prompt is appended to the conversation.
 2. A request is built from the system prompt, the conversation and the tools allowed in the
-   current mode. The output token limit is reduced to what still fits in the context window.
+   current mode, with the project instructions of the starting directory at the start of the
+   first user message. The output token limit is reduced to what still fits in the context
+   window.
 3. The provider stream is consumed into a *collected step*: text, reasoning, tool calls, usage and
    stop reason, with the original order of the blocks preserved.
 4. The assistant message is appended. If it has no tool calls, the turn ends.
@@ -165,8 +167,9 @@ When the estimate exceeds the trigger before a request (or on `/compact`):
 1. **Cut.** The recent part of the conversation, up to the kept-tail budget, stays verbatim. It
    starts at a prompt when possible, or at an assistant message, never at tool results, which
    would lose the calls they answer. The latest exchange always stays.
-2. **Summary.** The older part is serialized as a labeled transcript (long tool results and large
-   arguments shortened) and sent to the current model with the previous summary, asking for an
+2. **Summary.** The older part is encoded as a JSON transcript, one entry per user message,
+   assistant message, tool call or tool result (long tool results and large arguments shortened),
+   and sent to the current model with the previous summary, asking for an
    updated one with fixed sections: goal, constraints, next steps, progress, errors, decisions,
    anchors (file:line, symbols, commands) and rejected approaches. Each compaction updates the
    previous summary instead of replacing it, so nothing earlier is lost on the second one. A large
@@ -217,9 +220,11 @@ See [TOOLS.md](TOOLS.md) for each tool.
   and collects every `AGENTS.md`. The walk stops at the root of the git repository. Outside a
   repository, it stops below the home directory and the filesystem root, so files in shared
   parents are not picked up. The walk never limits which paths the tools may access.
-- **When they are loaded.** At start, the files that apply to the starting directory go into the
-  system prompt. After each tool call, the paths it touched are checked, and files not seen before
-  are attached to that tool result, ordered from the outermost directory to the innermost.
+- **When they are loaded.** At start, the files that apply to the starting directory are loaded,
+  and every request carries them at the start of the first user message. They are added when the
+  request is built, not stored in the conversation, so compaction and clearing never drop them.
+  After each tool call, the paths it touched are checked, and files not seen before are attached
+  to that tool result, ordered from the outermost directory to the innermost.
 - **Before a write.** `edit_file` and `write_file` declare their target path before they run. If
   files not seen before govern it, the call is not executed: it returns an `instructions.new`
   error with the files attached, and the model repeats the call once it has read them. Files
@@ -234,6 +239,37 @@ See [TOOLS.md](TOOLS.md) for each tool.
   Unreadable files are skipped with a warning.
 - **Clearing.** When the conversation is cleared, files that were only attached to tool results
   are forgotten so they are attached again when needed.
+
+## Trust boundaries
+
+Instructions and data reach the model through separate channels, and text from outside the agent
+is never placed where it would carry the authority of the rules or of the user.
+
+| Channel | Content | Authority |
+|---|---|---|
+| System prompt | nullrivet's rules, the execution mode, the environment | Rules |
+| User turn | The user's prompts | The user's requests |
+| User turn, fenced | `AGENTS.md` of the starting directory, text piped on stdin with a prompt | Data |
+| User turn, first block after a compaction | Notes written by the agent, then the user's requests quoted verbatim | Notes; only the quoted requests are the user's |
+| User turn, `<agent-note>` | Feedback from the runtime, such as a rejected tool call | Runtime |
+| Tool results | File contents, command output, search results, `AGENTS.md` found later | Data |
+
+- **The rules state the hierarchy.** Instructions come only from the rules and the user. Data can
+  tell the model how to carry out the task, but not change it: instructions found in data are
+  not followed and are reported to the user. Credentials found along the way are not printed or
+  sent, and local data is not sent to external services, unless the user's request requires it.
+- **Fences.** Text embedded in a user turn is wrapped in a tag whose opening and closing carry a
+  value drawn at random when the process starts (`<stdin fence="…">` … `</stdin fence="…">`). The
+  text cannot know the value, so it cannot end the block early. The value is fixed for the
+  process, so prompts stay identical across requests for prompt caching.
+- **Summaries.** The summarizer receives the transcript as JSON, so a file or command output
+  cannot pose as a user message or end the transcript. Its instructions take the goal and the
+  constraints from user entries only, and record instructions found in tool results only as
+  attributed observations.
+- **Enforcement is in code.** The rules make injection less likely to succeed; they do not stop
+  it. What a successful injection can do is bounded by the code: the execution mode is checked
+  before every tool call, commands run without the agent's API keys, and the `git` tool and the
+  file listing cannot run programs configured by a repository.
 
 ## Events
 

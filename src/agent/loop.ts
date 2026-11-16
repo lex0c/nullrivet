@@ -3,13 +3,15 @@ import { errorMessage } from '../errors.ts';
 import type { InstructionsLoader } from '../instructions/agents-loader.ts';
 import { renderInstructionFiles } from '../instructions/agents-loader.ts';
 import { CONTEXT_OVERFLOW, ContextOverflowError, INVALID_TOOL_CALL } from '../providers/errors.ts';
-import type {
-  GenerateRequest,
-  Provider,
-  ProviderEffort,
-  ProviderToolResultBlock,
-  StreamEvent,
-  UsageInfo,
+import {
+  contentBlocks,
+  type GenerateRequest,
+  type Provider,
+  type ProviderEffort,
+  type ProviderMessage,
+  type ProviderToolResultBlock,
+  type StreamEvent,
+  type UsageInfo,
 } from '../providers/types.ts';
 import { addUsage, emptyUsage } from '../providers/usage.ts';
 import { type ExecutionMode, toolsForMode } from '../tools/policy.ts';
@@ -58,6 +60,9 @@ export interface TurnDependencies {
   mode: () => ExecutionMode;
   cwd: string;
   systemPrompt: () => string;
+  // Text sent at the start of the first user message of every request, such as the project
+  // instructions of the working directory; empty for none.
+  projectContext: () => string;
   instructions: InstructionsLoader | null;
   limits: LoopLimits;
   effort?: ProviderEffort;
@@ -131,16 +136,32 @@ const CONTEXT_FULL = 'the conversation does not fit the context window, even aft
 const OVERFLOW_TAIL_FACTOR = 0.5;
 
 export const promptShape = (
-  deps: Pick<TurnDependencies, 'provider' | 'mode' | 'tools' | 'systemPrompt'>,
+  deps: Pick<TurnDependencies, 'provider' | 'mode' | 'tools' | 'systemPrompt' | 'projectContext'>,
 ): PromptShape => {
   const system = deps.systemPrompt();
+  const context = deps.projectContext();
   const tools = toolsForMode(deps.mode(), [...deps.tools.values()]).map(toToolDefinition);
   return {
-    key: `${deps.provider.id}\0${system}\0${tools.map((t) => t.name).join(',')}`,
+    key: `${deps.provider.id}\0${system}\0${context}\0${tools.map((t) => t.name).join(',')}`,
     system,
+    context,
     tools,
     countReasoning: deps.provider.replaysReasoning === true,
   };
+};
+
+// The context is added when the request is built instead of being stored in the conversation, so
+// compaction and clearing never drop it and it always reflects the current instructions.
+const withProjectContext = (
+  messages: readonly ProviderMessage[],
+  context: string,
+): ProviderMessage[] => {
+  const [first, ...rest] = messages;
+  if (context.length === 0 || first === undefined || first.role !== 'user') return [...messages];
+  return [
+    { role: 'user', content: [{ type: 'text', text: context }, ...contentBlocks(first.content)] },
+    ...rest,
+  ];
 };
 
 const describeErrors = (errors: readonly CollectedError[]): string =>
@@ -348,7 +369,7 @@ export const runTurn = async (prompt: string, deps: TurnDependencies): Promise<T
     const request: GenerateRequest = {
       model: deps.provider.id,
       system: shape.system,
-      messages: [...conversation.messages()],
+      messages: withProjectContext(conversation.messages(), shape.context),
       tools: [...shape.tools],
       max_tokens: maxTokens,
       ...(deps.effort === undefined ? {} : { effort: deps.effort }),

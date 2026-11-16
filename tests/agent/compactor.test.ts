@@ -6,7 +6,13 @@ import { SUMMARY_OPEN } from '../../src/context/compaction.ts';
 import type { ProviderMessage } from '../../src/providers/types.ts';
 import { createMockProvider, type ScriptedTurn, textTurn } from '../helpers/mock-provider.ts';
 
-const shape: PromptShape = { key: 'k', system: 'system', tools: [], countReasoning: false };
+const shape: PromptShape = {
+  key: 'k',
+  system: 'system',
+  context: '',
+  tools: [],
+  countReasoning: false,
+};
 
 const SUMMARY = 'GOAL:\nfix the parser\nNEXT:\nadd tests\nERRORS:\n(none)\nDECISIONS:\nkeep API';
 // The span may be summarized in several requests, one per transcript chunk.
@@ -86,9 +92,10 @@ describe('compactConversation', () => {
     }
     const { provider } = await run(conversation, summaries(`${SUMMARY}\nPROGRESS:\nmore`));
     const request = provider.calls[0]?.req.messages[0]?.content;
-    expect(typeof request === 'string' ? request : '').toContain(
-      '<previous_summary>\nGOAL:\nfix the parser',
-    );
+    const input = JSON.parse(typeof request === 'string' ? request : '{}') as {
+      previous_summary?: string;
+    };
+    expect(input.previous_summary).toStartWith('GOAL:\nfix the parser');
     const head = firstText(conversation.messages()[0]);
     expect(head).toContain('- request 0');
     expect(head).toContain('- request 6');
@@ -98,7 +105,12 @@ describe('compactConversation', () => {
   test('passes the focus requested with /compact', async () => {
     const { provider } = await run(filled(), summaries(), { instructions: 'the parser' });
     const request = provider.calls[0]?.req.messages[0]?.content;
-    expect(typeof request === 'string' ? request : '').toContain('<focus>\nthe parser\n</focus>');
+    const input = JSON.parse(typeof request === 'string' ? request : '{}') as {
+      focus?: string;
+      transcript?: { role: string }[];
+    };
+    expect(input.focus).toBe('the parser');
+    expect(input.transcript?.[0]?.role).toBe('user');
   });
 
   test('falls back to the deterministic sections when the summary is unusable', async () => {

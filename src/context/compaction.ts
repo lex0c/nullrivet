@@ -156,7 +156,14 @@ export const updateDeterministic = (
   };
 };
 
-const argsForTranscript = (input: Record<string, unknown>): string => {
+// One entry of the transcript sent to the summarizer. Entries are encoded as JSON one by one, so
+// text inside a file or a command output cannot pose as another entry or end the transcript.
+export type TranscriptEntry =
+  | { role: 'user' | 'assistant' | 'runtime_note'; text: string }
+  | { role: 'tool_call'; tool: string; arguments: Record<string, unknown> }
+  | { role: 'tool_result'; tool?: string; error?: true; content: string };
+
+const shownArguments = (input: Record<string, unknown>): Record<string, unknown> => {
   const shown: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(input)) {
     shown[key] =
@@ -164,45 +171,73 @@ const argsForTranscript = (input: Record<string, unknown>): string => {
         ? `[${value.length} characters]`
         : value;
   }
-  return JSON.stringify(shown);
+  return shown;
 };
 
-// Labels make the transcript read as material to summarize rather than a conversation to continue.
-export const serializeMessage = (message: ProviderMessage): string => {
-  const lines: string[] = [];
+export const transcriptEntries = (message: ProviderMessage): TranscriptEntry[] => {
+  const entries: TranscriptEntry[] = [];
   for (const block of contentBlocks(message.content)) {
     if (block.type === 'text') {
-      const label =
+      const role =
         message.role === 'assistant'
-          ? '[Assistant]'
+          ? 'assistant'
           : block.text.startsWith(AGENT_NOTE_OPEN)
-            ? '[Note]'
-            : '[User]';
-      lines.push(`${label} ${block.text}`);
+            ? 'runtime_note'
+            : 'user';
+      entries.push({ role, text: block.text });
     } else if (block.type === 'tool_use') {
-      lines.push(`[Tool call] ${block.name} ${argsForTranscript(block.input)}`);
+      entries.push({ role: 'tool_call', tool: block.name, arguments: shownArguments(block.input) });
     } else if (block.type === 'tool_result') {
       const limit = block.is_error === true ? TRANSCRIPT_ERROR_CHARS : TRANSCRIPT_RESULT_CHARS;
-      const label = `[Tool result${block.name === undefined ? '' : ` ${block.name}`}${block.is_error === true ? ', error' : ''}]`;
-      lines.push(`${label}\n${clipMiddle(block.content, limit)}`);
+      entries.push({
+        role: 'tool_result',
+        ...(block.name === undefined ? {} : { tool: block.name }),
+        ...(block.is_error === true ? { error: true as const } : {}),
+        content: clipMiddle(block.content, limit),
+      });
     }
   }
-  return lines.join('\n');
+  return entries;
 };
 
-// Groups the span into transcript chunks of at most `maxChars`, split at message boundaries, so a
-// span too large for one summarizer request is summarized in sequence.
-export const transcriptChunks = (span: readonly ProviderMessage[], maxChars: number): string[] => {
-  const chunks: string[] = [];
-  let current = '';
+const clipEntry = (entry: TranscriptEntry, max: number): TranscriptEntry => {
+  if ('text' in entry) return { ...entry, text: clipMiddle(entry.text, max) };
+  if ('content' in entry) return { ...entry, content: clipMiddle(entry.content, max) };
+  return entry;
+};
+
+// Encodes an entry as one JSON line of at most `maxChars` when its text can be shortened that far.
+// Escaping makes the encoded text longer than the text, so the limit is halved until it fits.
+const encodeEntry = (entry: TranscriptEntry, maxChars: number): string => {
+  let line = JSON.stringify(entry);
+  let limit = maxChars;
+  while (line.length > maxChars && limit > 64) {
+    limit = Math.floor(limit / 2);
+    line = JSON.stringify(clipEntry(entry, limit));
+  }
+  return line;
+};
+
+// Groups the encoded entries of the span into chunks of at most `maxChars`, so a span too large for
+// one summarizer request is summarized in sequence.
+export const transcriptChunks = (
+  span: readonly ProviderMessage[],
+  maxChars: number,
+): string[][] => {
+  const chunks: string[][] = [];
+  let current: string[] = [];
+  let size = 0;
   for (const message of span) {
-    const text = clipMiddle(serializeMessage(message), maxChars);
-    if (text.length === 0) continue;
-    if (current.length > 0 && current.length + text.length + 2 > maxChars) {
-      chunks.push(current);
-      current = '';
+    for (const entry of transcriptEntries(message)) {
+      const line = encodeEntry(entry, maxChars);
+      if (current.length > 0 && size + line.length + 2 > maxChars) {
+        chunks.push(current);
+        current = [];
+        size = 0;
+      }
+      current.push(line);
+      size += line.length + 2;
     }
-    current = current.length === 0 ? text : `${current}\n\n${text}`;
   }
   if (current.length > 0) chunks.push(current);
   return chunks;
@@ -227,7 +262,7 @@ export const renderSummary = (state: SummaryState): string => {
   }
   return [
     SUMMARY_OPEN,
-    'Earlier parts of this conversation were compacted. This is what they contained.',
+    "Earlier parts of this conversation were compacted. The notes below were written by the agent about that work; the user's own requests are quoted verbatim under USER_REQUESTS.",
     '',
     state.llmSummary.replaceAll(SUMMARY_CLOSE, '').trim() || '(no summary available)',
     '',

@@ -42,12 +42,14 @@ export const estimatePromptTokens = (
   messages: readonly ProviderMessage[],
   options: {
     system?: string;
+    // Text added to the first user message when the request is built.
+    context?: string;
     tools?: readonly ProviderToolDef[];
     countReasoning?: boolean;
   } = {},
 ): number => {
   const countReasoning = options.countReasoning === true;
-  let chars = options.system?.length ?? 0;
+  let chars = (options.system?.length ?? 0) + (options.context?.length ?? 0);
   for (const t of options.tools ?? []) chars += charsInTool(t);
   for (const m of messages) chars += charsInMessage(m, countReasoning);
   return charsToTokens(chars);

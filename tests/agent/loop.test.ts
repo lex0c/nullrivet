@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { Conversation } from '../../src/agent/conversation.ts';
 import type { AgentEvent } from '../../src/agent/events.ts';
 import { runTurn, type TurnDependencies } from '../../src/agent/loop.ts';
+import { assembleHistory, emptySummary, SUMMARY_OPEN } from '../../src/context/compaction.ts';
 import { InstructionsLoader } from '../../src/instructions/agents-loader.ts';
 import { ContextOverflowError } from '../../src/providers/errors.ts';
 import type { ProviderMessage, StreamEvent } from '../../src/providers/types.ts';
@@ -48,6 +49,7 @@ const harness = (
     signal?: AbortSignal;
     instructions?: InstructionsLoader;
     cwd?: string;
+    projectContext?: string;
   } = {},
 ): Harness => {
   const provider = createMockProvider(turns);
@@ -67,6 +69,7 @@ const harness = (
       mode: () => mode,
       cwd: options.cwd ?? '/tmp',
       systemPrompt: () => `system for ${mode}`,
+      projectContext: () => options.projectContext ?? '',
       instructions: options.instructions ?? null,
       limits: {
         maxSteps: options.maxSteps ?? 10,
@@ -474,6 +477,27 @@ describe('runTurn', () => {
       const sent = JSON.stringify(h.provider.calls.at(-1)?.req.messages);
       expect(sent).toContain('partial answer');
       expect(sent).toContain('cut off by the context window');
+    });
+  });
+
+  describe('project context', () => {
+    const firstBlocks = (messages: ProviderMessage[] | undefined): string[] => {
+      const content = messages?.[0]?.content;
+      return Array.isArray(content) ? content.map((b) => (b.type === 'text' ? b.text : '')) : [];
+    };
+
+    test('opens the first user message of every request, also after a compaction', async () => {
+      const h = harness([textTurn('one'), textTurn('two')], { projectContext: 'CONTEXT' });
+      await runTurn('first', h.deps);
+      const state = { ...emptySummary(), llmSummary: 'GOAL:\nx' };
+      h.deps.conversation.replaceAfterCompaction(assembleHistory(state, []), state);
+      await runTurn('second', h.deps);
+      for (const call of h.provider.calls) {
+        expect(call.req.system).not.toContain('CONTEXT');
+        expect(firstBlocks(call.req.messages)[0]).toBe('CONTEXT');
+      }
+      expect(firstBlocks(h.provider.calls[1]?.req.messages)[1]).toStartWith(SUMMARY_OPEN);
+      expect(JSON.stringify(h.deps.conversation.messages())).not.toContain('CONTEXT');
     });
   });
 

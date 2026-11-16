@@ -15,7 +15,7 @@ import {
   TimeLimitReached,
   type TurnResult,
 } from './loop.ts';
-import { buildSystemPrompt, localDate } from './system-prompt.ts';
+import { buildSystemPrompt, localDate, renderProjectContext } from './system-prompt.ts';
 
 export const DEFAULT_MAX_STEPS = 200;
 export const DEFAULT_STALL_MS = 120_000;
@@ -100,8 +100,8 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
       platform: process.platform,
       date: localDate(),
       isGitRepo,
-      instructions: bootInstructions,
     });
+  const projectContext = (): string => renderProjectContext(bootInstructions);
 
   const agent: Agent = {
     conversation,
@@ -128,7 +128,7 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
 
     clear(): void {
       conversation.clear();
-      // Boot instructions live in the system prompt; the ones attached to tool results of the
+      // Boot instructions are sent with every request; the ones attached to tool results of the
       // discarded conversation must be attached again when needed.
       options.instructions?.retainOnly(new Set(bootInstructions.map((file) => file.path)));
     },
@@ -145,6 +145,7 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
             mode: () => agent.mode,
             tools,
             systemPrompt,
+            projectContext,
           }),
           reason: 'manual',
           ...(compactOptions.instructions === undefined
@@ -185,6 +186,7 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
           mode: () => agent.mode,
           cwd: options.cwd,
           systemPrompt,
+          projectContext,
           instructions: options.instructions,
           limits,
           ...(agent.effort === undefined ? {} : { effort: agent.effort }),

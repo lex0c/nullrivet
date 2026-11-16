@@ -43,9 +43,19 @@ export interface PromptShape {
   // measured usage only describes requests with the same shape.
   key: string;
   system: string;
+  // Sent at the start of the first user message; see TurnDependencies.projectContext.
+  context: string;
   tools: readonly ProviderToolDef[];
   countReasoning: boolean;
 }
+
+// What a request carries besides the history, in the form the token estimate takes.
+export const requestOverhead = (shape: PromptShape) => ({
+  system: shape.system,
+  context: shape.context,
+  tools: shape.tools,
+  countReasoning: shape.countReasoning,
+});
 
 interface MeasurementAnchor {
   tokens: number;
@@ -126,11 +136,7 @@ export class Conversation {
   // servers count only the tokens they did not reuse from their cache. It is ignored, and the
   // estimate stays in use.
   recordPromptUsage(promptTokens: number, shape: PromptShape): void {
-    const estimated = estimatePromptTokens(this.history, {
-      system: shape.system,
-      tools: shape.tools,
-      countReasoning: shape.countReasoning,
-    });
+    const estimated = estimatePromptTokens(this.history, requestOverhead(shape));
     this.anchor =
       promptTokens >= estimated * MIN_TRUSTED_USAGE_RATIO
         ? { tokens: promptTokens, messages: this.history.length, key: shape.key }
@@ -148,11 +154,7 @@ export class Conversation {
         })
       );
     }
-    return estimatePromptTokens(this.history, {
-      system: shape.system,
-      tools: shape.tools,
-      countReasoning: shape.countReasoning,
-    });
+    return estimatePromptTokens(this.history, requestOverhead(shape));
   }
 
   // Replaces the history with its compacted form. The measurement no longer describes it.

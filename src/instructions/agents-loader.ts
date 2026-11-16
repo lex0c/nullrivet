@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { errorMessage } from '../errors.ts';
 import { stripAnsi } from '../sanitize/ansi.ts';
+import { fenced } from '../sanitize/fence.ts';
 
 export const INSTRUCTIONS_FILE_NAME = 'AGENTS.md';
 const DEFAULT_MAX_FILE_BYTES = 16 * 1024;
@@ -241,17 +242,13 @@ export class InstructionsLoader {
   }
 }
 
-const escapeClosingTag = (text: string): string =>
-  text.replaceAll('</project_instructions>', '<\\/project_instructions>');
-
 export const renderInstructionFiles = (files: readonly InstructionFile[]): string =>
   files
     .map((file) =>
-      [
-        `<project_instructions source="${file.path}" applies_to="${file.dir}">`,
-        escapeClosingTag(file.content),
-        ...(file.truncated ? ['[truncated: the file exceeds the size limit]'] : []),
-        '</project_instructions>',
-      ].join('\n'),
+      fenced('project_instructions', file.content, {
+        source: file.path,
+        applies_to: file.dir,
+        ...(file.truncated ? { truncated: 'the file exceeds the size limit' } : {}),
+      }),
     )
     .join('\n\n');

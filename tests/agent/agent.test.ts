@@ -1,6 +1,11 @@
 import { describe, expect, test } from 'bun:test';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createAgent } from '../../src/agent/agent.ts';
 import type { AgentEvent } from '../../src/agent/events.ts';
+import { InstructionsLoader } from '../../src/instructions/agents-loader.ts';
+import { FENCE } from '../../src/sanitize/fence.ts';
 import { createMockProvider, textTurn } from '../helpers/mock-provider.ts';
 
 // A provider whose stream stays open until the request is cancelled.
@@ -73,5 +78,35 @@ describe('time limit', () => {
     expect((await agent.run('first')).reason).toBe('done');
     await Bun.sleep(250);
     expect((await agent.run('second')).reason).toBe('done');
+  });
+});
+
+describe('project instructions of the working directory', () => {
+  test('are sent in the user turn, fenced, and not in the system prompt', async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'nullrivet-agent-')));
+    try {
+      const project = join(root, 'project');
+      await mkdir(join(project, '.git'), { recursive: true });
+      await writeFile(join(project, 'AGENTS.md'), 'use tabs');
+      const provider = createMockProvider([textTurn('ok')]);
+      const agent = await createAgent({
+        provider,
+        tools: [],
+        mode: 'auto',
+        cwd: project,
+        instructions: new InstructionsLoader({ home: root }),
+      });
+      await agent.run('go');
+      const request = provider.calls[0]?.req;
+      expect(request?.system).not.toContain('use tabs');
+      const first = request?.messages[0]?.content;
+      const context = Array.isArray(first) && first[0]?.type === 'text' ? first[0].text : '';
+      expect(context).toContain(
+        `fence="${FENCE}">\nuse tabs\n</project_instructions fence="${FENCE}">`,
+      );
+      expect(Array.isArray(first) && first[1]?.type === 'text' ? first[1].text : '').toBe('go');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

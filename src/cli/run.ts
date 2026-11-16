@@ -7,6 +7,7 @@ import { headTailSummary } from '../context/output-reduction.ts';
 import { InstructionsLoader } from '../instructions/agents-loader.ts';
 import type { FetchLike } from '../providers/discovery.ts';
 import { type ModelOverrides, resolveModel } from '../providers/resolve.ts';
+import { fenced } from '../sanitize/fence.ts';
 import { BUILTIN_TOOLS } from '../tools/index.ts';
 import { parseCli, USAGE, UsageError } from './args.ts';
 import { createJsonSink, createPlainSink } from './output.ts';
@@ -38,7 +39,7 @@ export interface CliIO {
   fetch?: FetchLike;
 }
 
-const composePrompt = (prompt: string, piped: string): string => {
+export const composePrompt = (prompt: string, piped: string): string => {
   const reduced = headTailSummary(piped, {
     maxBytes: STDIN_MAX_BYTES,
     headLines: 400,
@@ -46,7 +47,9 @@ const composePrompt = (prompt: string, piped: string): string => {
   }).text;
   if (reduced.trim().length === 0) return prompt;
   if (prompt.length === 0) return reduced;
-  return `${prompt}\n\n<stdin>\n${reduced}\n</stdin>`;
+  // With a prompt, piped text is the material the prompt is about (a diff, a log), not further
+  // requests, so it is fenced as data.
+  return `${prompt}\n\n${fenced('stdin', reduced)}`;
 };
 
 export const runCli = async (io: CliIO): Promise<number> => {
