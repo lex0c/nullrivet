@@ -17,12 +17,18 @@ const shellQuote = (arg: string): string => `'${arg.replaceAll("'", "'\\''")}'`;
 export const cliShellCommand = (args: readonly string[]): string =>
   cliCommand(args).map(shellQuote).join(' ');
 
-// Runs a shell command in a pseudo-terminal with script(1), whose arguments differ between the
-// util-linux and BSD versions.
-export const inTerminal = (command: string): string[] =>
-  process.platform === 'darwin'
-    ? ['script', '-q', '/dev/null', 'sh', '-c', command]
-    : ['script', '-qec', command, '/dev/null'];
+// Runs a command in a pseudo-terminal through Python's pty module, which behaves the same on Linux
+// and macOS, unlike script(1). It forwards its stdin to the terminal and exits with the command's
+// status.
+const PTY_RUNNER =
+  'import os, pty, sys; sys.exit(os.waitstatus_to_exitcode(pty.spawn(sys.argv[1:])))';
+
+export const inTerminal = (argv: readonly string[]): string[] => [
+  'python3',
+  '-c',
+  PTY_RUNNER,
+  ...argv,
+];
 
 export interface ChatMessage {
   role: string;

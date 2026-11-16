@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { bashTool, buildChildEnv } from '../../src/tools/bash.ts';
@@ -8,7 +8,9 @@ import type { ToolContext } from '../../src/tools/types.ts';
 let dir: string;
 
 beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'nullrivet-bash-'));
+  // Resolved, because pwd reports the physical path and the temporary directory can sit behind a
+  // symbolic link (/var/folders is /private/var/folders on macOS).
+  dir = await realpath(await mkdtemp(join(tmpdir(), 'nullrivet-bash-')));
 });
 
 afterEach(async () => {

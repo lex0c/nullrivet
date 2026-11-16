@@ -227,13 +227,13 @@ describe('working directory', () => {
 });
 
 describe('terminal', () => {
-  test.skipIf(Bun.which('script') === null)(
+  test.skipIf(Bun.which('python3') === null)(
     'the interactive session starts in a terminal and exits with /exit',
     async () => {
       server.handle(() => ({ text: 'ok' }));
       const cwd = tempDir();
       mkdirSync(join(cwd, 'sub'));
-      const child = Bun.spawn(inTerminal(cliShellCommand([])), {
+      const child = Bun.spawn(inTerminal(cliCommand([])), {
         env: { ...cliEnv(server), TERM: 'xterm-256color' },
         cwd,
         stdin: 'pipe',
