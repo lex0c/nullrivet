@@ -1,0 +1,124 @@
+import { stat } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import packageJson from '../../package.json' with { type: 'json' };
+import { createAgent } from '../agent/agent.ts';
+import type { AgentEndReason } from '../agent/events.ts';
+import { headTailSummary } from '../context/output-reduction.ts';
+import { InstructionsLoader } from '../instructions/agents-loader.ts';
+import type { FetchLike } from '../providers/discovery.ts';
+import { resolveModel } from '../providers/resolve.ts';
+import { BUILTIN_TOOLS } from '../tools/index.ts';
+import { parseCli, USAGE, UsageError } from './args.ts';
+import { createJsonSink, createPlainSink } from './output.ts';
+
+export const EXIT_CODES: Record<AgentEndReason | 'usage', number> = {
+  done: 0,
+  error: 1,
+  usage: 2,
+  budget: 3,
+  aborted: 130,
+};
+
+// Piped input can be arbitrarily large; it is reduced like tool output before entering the prompt.
+const STDIN_MAX_BYTES = 128 * 1024;
+
+export interface CliIO {
+  argv: readonly string[];
+  env: Record<string, string | undefined>;
+  cwd: string;
+  // Null when stdin is a terminal, so nothing is read from it.
+  readStdin: (() => Promise<string>) | null;
+  stdout: (text: string) => void;
+  stderr: (text: string) => void;
+  color: boolean;
+  signal: AbortSignal;
+  fetch?: FetchLike;
+}
+
+const composePrompt = (prompt: string, piped: string): string => {
+  const reduced = headTailSummary(piped, {
+    maxBytes: STDIN_MAX_BYTES,
+    headLines: 400,
+    tailLines: 400,
+  }).text;
+  if (reduced.trim().length === 0) return prompt;
+  if (prompt.length === 0) return reduced;
+  return `${prompt}\n\n<stdin>\n${reduced}\n</stdin>`;
+};
+
+export const runCli = async (io: CliIO): Promise<number> => {
+  let config: ReturnType<typeof parseCli>;
+  try {
+    config = parseCli(io.argv, io.env, io.cwd);
+  } catch (error) {
+    if (!(error instanceof UsageError)) throw error;
+    io.stderr(`error: ${error.message}\n\n${USAGE}\n`);
+    return EXIT_CODES.usage;
+  }
+  if (config.help) {
+    io.stdout(`${USAGE}\n`);
+    return 0;
+  }
+  if (config.version) {
+    io.stdout(`nullrivet ${packageJson.version}\n`);
+    return 0;
+  }
+
+  const sink = config.json
+    ? createJsonSink(io.stdout)
+    : createPlainSink({ stdout: io.stdout, stderr: io.stderr, color: io.color });
+  const fail = (message: string, code: number = EXIT_CODES.usage): number => {
+    sink.notice('error', message);
+    sink.finish();
+    return code;
+  };
+
+  const prompt =
+    io.readStdin === null ? config.prompt : composePrompt(config.prompt, await io.readStdin());
+  if (prompt.length === 0) {
+    return fail(
+      'no prompt given; pass the task as an argument or on stdin (interactive mode is not available yet)',
+    );
+  }
+
+  const cwd = resolve(io.cwd, config.cwd);
+  try {
+    if (!(await stat(cwd)).isDirectory()) return fail(`--cwd is not a directory: ${cwd}`);
+  } catch {
+    return fail(`--cwd does not exist: ${cwd}`);
+  }
+
+  if (config.model === undefined) {
+    return fail('no model selected; pass --model <family>/<model> or set NULLRIVET_MODEL');
+  }
+  const resolved = await resolveModel(config.model, {
+    env: io.env,
+    overrides: {
+      ...(config.contextWindow === undefined ? {} : { contextWindow: config.contextWindow }),
+      ...(config.maxOutput === undefined ? {} : { maxOutput: config.maxOutput }),
+    },
+    signal: io.signal,
+    ...(io.fetch === undefined ? {} : { fetch: io.fetch }),
+  }).catch((error: unknown) => {
+    if (io.signal.aborted) return null;
+    throw error;
+  });
+  if (resolved === null) return fail('aborted', EXIT_CODES.aborted);
+  if (!resolved.ok) return fail(resolved.error);
+  for (const warning of resolved.warnings) sink.notice('warning', warning);
+
+  const agent = await createAgent({
+    provider: resolved.provider,
+    tools: BUILTIN_TOOLS,
+    mode: config.mode,
+    cwd,
+    instructions: config.agentsMd ? new InstructionsLoader() : null,
+    ...(config.effort === undefined ? {} : { effort: config.effort }),
+    ...(config.maxSteps === undefined ? {} : { maxSteps: config.maxSteps }),
+  });
+  for (const warning of agent.bootWarnings) sink.notice('warning', warning);
+
+  const result = await agent.run(prompt, { signal: io.signal, onEvent: (e) => sink.event(e) });
+  sink.finish();
+  return EXIT_CODES[result.reason];
+};

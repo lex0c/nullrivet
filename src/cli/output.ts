@@ -1,0 +1,108 @@
+import type { AgentEvent } from '../agent/events.ts';
+import { stripAnsi } from '../sanitize/ansi.ts';
+
+export interface OutputSink {
+  event(event: AgentEvent): void;
+  // Diagnostics produced outside a turn, such as model resolution warnings.
+  notice(level: 'warning' | 'error', message: string): void;
+  finish(): void;
+}
+
+export const NDJSON_VERSION = 1;
+
+// stdout carries only NDJSON so it can be piped into another program; every line is one event.
+export const createJsonSink = (write: (line: string) => void): OutputSink => ({
+  event(event) {
+    write(`${JSON.stringify({ v: NDJSON_VERSION, ...event })}\n`);
+  },
+  notice(level, message) {
+    write(`${JSON.stringify({ v: NDJSON_VERSION, type: level, message })}\n`);
+  },
+  finish() {},
+});
+
+const oneLine = (value: string, max = 120): string => {
+  const flat = stripAnsi(value).replace(/\s+/g, ' ').trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+};
+
+export const describeToolCall = (name: string, args: Record<string, unknown>): string => {
+  const str = (key: string): string | undefined =>
+    typeof args[key] === 'string' ? (args[key] as string) : undefined;
+  switch (name) {
+    case 'bash':
+      return oneLine(str('command') ?? '');
+    case 'git':
+      return oneLine(
+        [str('subcommand'), str('ref'), str('base'), str('path')].filter(Boolean).join(' '),
+      );
+    default:
+      return oneLine(str('path') ?? '');
+  }
+};
+
+export interface PlainSinkOptions {
+  stdout: (text: string) => void;
+  stderr: (text: string) => void;
+  color: boolean;
+}
+
+// The answer goes to stdout and everything else (tool activity, warnings, errors) to stderr, so
+// `nullrivet "..." > answer.md` captures only the answer.
+export const createPlainSink = (options: PlainSinkOptions): OutputSink => {
+  const dim = (s: string): string => (options.color ? `\x1b[2m${s}\x1b[22m` : s);
+  const red = (s: string): string => (options.color ? `\x1b[31m${s}\x1b[39m` : s);
+  const yellow = (s: string): string => (options.color ? `\x1b[33m${s}\x1b[39m` : s);
+  let lineOpen = false;
+  const closeLine = (): void => {
+    if (lineOpen) {
+      options.stdout('\n');
+      lineOpen = false;
+    }
+  };
+  const diagnostic = (text: string): void => {
+    closeLine();
+    options.stderr(`${text}\n`);
+  };
+
+  return {
+    event(event) {
+      switch (event.type) {
+        case 'text:delta': {
+          const text = stripAnsi(event.text);
+          if (text.length === 0) return;
+          options.stdout(text);
+          lineOpen = !text.endsWith('\n');
+          return;
+        }
+        case 'tool:start':
+          diagnostic(dim(`› ${event.name} ${describeToolCall(event.name, event.args)}`));
+          return;
+        case 'tool:end':
+          if (event.isError) diagnostic(red(`  ✗ ${oneLine(event.content, 200)}`));
+          return;
+        case 'warning':
+          diagnostic(yellow(`warning: ${event.message}`));
+          return;
+        case 'error':
+          diagnostic(red(`error: ${event.message}`));
+          return;
+        case 'agent:end':
+          if (event.reason === 'budget' && event.message !== undefined) {
+            diagnostic(yellow(`stopped: ${event.message}`));
+          } else if (event.reason === 'aborted') {
+            diagnostic(yellow('aborted'));
+          }
+          return;
+        default:
+          return;
+      }
+    },
+    notice(level, message) {
+      diagnostic(level === 'error' ? red(`error: ${message}`) : yellow(`warning: ${message}`));
+    },
+    finish() {
+      closeLine();
+    },
+  };
+};

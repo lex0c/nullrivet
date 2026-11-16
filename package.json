@@ -5,7 +5,11 @@
   "description": "Ephemeral AI agent for the terminal",
   "license": "Apache-2.0",
   "type": "module",
+  "bin": {
+    "nullrivet": "src/main.ts"
+  },
   "scripts": {
+    "start": "bun run src/main.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
@@ -16,6 +20,9 @@
   "engines": {
     "bun": ">=1.1.30"
   },
+  "dependencies": {
+    "openai": "~6.34.0"
+  },
   "devDependencies": {
     "@biomejs/biome": "^2.6.8",
     "@types/bun": "~1.3.14",
@@ -23,8 +30,5 @@
   },
   "trustedDependencies": [
     "@biomejs/biome"
-  ],
-  "dependencies": {
-    "openai": "~6.34.0"
-  }
+  ]
 }
