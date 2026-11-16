@@ -8,6 +8,7 @@ import type {
 } from '../providers/types.ts';
 import { contentBlocks } from '../providers/types.ts';
 import { FENCE, fenced } from '../sanitize/fence.ts';
+import type { ConversationSnapshot } from './snapshot.ts';
 
 export const INTERRUPTED_RESULT = '[interrupted: the tool call did not complete]';
 
@@ -171,6 +172,19 @@ export class Conversation {
   }
 
   // Replaces the history with its compacted form. The measurement no longer describes it.
+  // A copy of the state, enough to continue the conversation later.
+  snapshot(): ConversationSnapshot {
+    return structuredClone({ messages: this.history, summary: this.summaryState });
+  }
+
+  // Replaces the state with one taken earlier, checked by parseConversationSnapshot when it comes
+  // from outside the process. The size measurement starts over.
+  restore(snapshot: ConversationSnapshot): void {
+    this.history = structuredClone(snapshot.messages);
+    this.summaryState = structuredClone(snapshot.summary);
+    this.anchor = null;
+  }
+
   replaceAfterCompaction(history: ProviderMessage[], summary: SummaryState): void {
     this.history = history;
     this.summaryState = summary;

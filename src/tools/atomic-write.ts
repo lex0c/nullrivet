@@ -110,7 +110,13 @@ const fsyncDirectory = (dir: string): void => {
 
 // Writes `content` as UTF-8 and returns the number of bytes written. Missing parent directories
 // are created. An existing target keeps its permission bits, so an executable stays executable.
-export const atomicWrite = (absPath: string, content: string): number => {
+// `mode` sets the file's permissions from the moment it is created; without it, an existing
+// target keeps its mode and a new file gets the default one.
+export const atomicWrite = (
+  absPath: string,
+  content: string,
+  options: { mode?: number } = {},
+): number => {
   const target = resolveWriteTarget(absPath);
   const buf = Buffer.from(content, 'utf8');
   const dir = dirname(target);
@@ -122,13 +128,17 @@ export const atomicWrite = (absPath: string, content: string): number => {
   let fd: number | undefined;
   try {
     // `wx` fails if the path exists, so an unexpected file at the temp path is never overwritten.
-    const openedFd = openSync(tmp, 'wx');
+    const openedFd = openSync(tmp, 'wx', options.mode ?? 0o666);
     fd = openedFd;
     writeAll((off) => writeSync(openedFd, buf, off), buf.length, tmp);
-    try {
-      fchmodSync(openedFd, statSync(target).mode & 0o777);
-    } catch {
-      // The target does not exist yet; the new file keeps the default mode.
+    if (options.mode !== undefined) {
+      fchmodSync(openedFd, options.mode);
+    } else {
+      try {
+        fchmodSync(openedFd, statSync(target).mode & 0o777);
+      } catch {
+        // The target does not exist yet; the new file keeps the default mode.
+      }
     }
     fsyncSync(openedFd);
     closeSync(openedFd);
