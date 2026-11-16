@@ -32,7 +32,7 @@ export const USAGE = `Usage: nullrivet [options] [prompt...]
 Runs one task and exits. Text piped on stdin is appended to the prompt.
 
 Options:
-  -m, --model <id>            Model as <family>/<model>, e.g. openrouter/deepseek/deepseek-v4-flash
+  -m, --model <id>            Model as <family>/<model>, e.g. anthropic/claude-sonnet-5-5
   -e, --effort <level>        Reasoning effort: ${EFFORT_LEVELS.join(', ')}
   -p, --permission <mode>     auto (default) or readonly
   -C, --cwd <dir>             Starting directory (does not restrict file access)
@@ -46,7 +46,8 @@ Options:
 
 Environment:
   NULLRIVET_MODEL, NULLRIVET_EFFORT, NULLRIVET_PERMISSION, NULLRIVET_MAX_STEPS
-  OPENROUTER_API_KEY          Credentials for openrouter/* models`;
+  ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY, OLLAMA_API_KEY
+                              Credentials of each provider family`;
 
 const positiveInteger = (value: string | undefined, name: string): number | undefined => {
   if (value === undefined || value === '') return undefined;

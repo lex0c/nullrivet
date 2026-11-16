@@ -300,11 +300,57 @@ describe('resolveModel for the direct provider families', () => {
     }
   });
 
-  test('a model outside the Anthropic or OpenAI catalog gets defaults with a warning', async () => {
-    const r = expectOk(await resolveWith('anthropic/claude-future', { ANTHROPIC_API_KEY: 'k' }));
+  test('a model outside the OpenAI catalog gets defaults with a warning', async () => {
+    const r = expectOk(await resolveWith('openai/gpt-future', { OPENAI_API_KEY: 'k' }));
     expect(r.source).toBe('defaults');
     expect(r.warnings[0]).toContain('no discovery endpoint');
-    expect(r.provider.id).toBe('anthropic/claude-future');
+    expect(r.provider.id).toBe('openai/gpt-future');
+  });
+
+  test('a model outside the Anthropic catalog is resolved from the model endpoint', async () => {
+    const requests: { url: string; key: string | null }[] = [];
+    const fetchStub = async (url: string, init?: RequestInit): Promise<Response> => {
+      requests.push({ url, key: new Headers(init?.headers).get('x-api-key') });
+      return new Response(
+        JSON.stringify({
+          id: 'claude-next',
+          max_input_tokens: 1_000_000,
+          max_tokens: 128_000,
+          capabilities: {
+            effort: { supported: true, xhigh: { supported: true } },
+            thinking: { types: { adaptive: { supported: true }, disabled: { supported: false } } },
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    };
+    const r = expectOk(
+      await resolveWith(
+        'anthropic/claude-next',
+        { ANTHROPIC_API_KEY: 'sk-ant' },
+        { fetch: fetchStub },
+      ),
+    );
+    expect(r.source).toBe('discovery');
+    expect(r.provider.capabilities).toEqual({
+      context_window: 1_000_000,
+      output_max_tokens: 32_768,
+      supports_sampling: false,
+      supports_adaptive_thinking: true,
+      supports_reasoning_effort: true,
+      supports_effort_xhigh: true,
+    });
+    expect(requests).toEqual([
+      { url: 'https://api.anthropic.com/v1/models/claude-next', key: 'sk-ant' },
+    ]);
+  });
+
+  test('an Anthropic model the endpoint does not know is an error', async () => {
+    const notFound = async (): Promise<Response> => new Response('{}', { status: 404 });
+    const error = expectError(
+      await resolveWith('anthropic/claude-typo', { ANTHROPIC_API_KEY: 'k' }, { fetch: notFound }),
+    );
+    expect(error).toContain('has no model "claude-typo"');
   });
 
   test('adapter warnings are returned to the caller', async () => {

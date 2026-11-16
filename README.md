@@ -8,7 +8,8 @@ conversation lives only in memory: nullrivet writes no files of its own, and whe
 nothing of the session remains except the changes the tools made on purpose.
 
 > **Status:** early development. The interactive session and the one-shot mode work end to end,
-> and long conversations are compacted automatically; OpenRouter is the only provider so far.
+> long conversations are compacted automatically, and Anthropic, OpenAI, Ollama and OpenRouter
+> models are supported.
 
 - **Ephemeral.** No database, history, logs, caches or configuration files. See
   [What nullrivet does not store](#what-nullrivet-does-not-store).
@@ -25,7 +26,8 @@ nothing of the session remains except the changes the tools made on purpose.
 - [Bun](https://bun.sh) 1.1.30 or newer
 - Linux (macOS is untested)
 - `bash` and `git` on `PATH`; `rg` (ripgrep) is recommended, since the agent searches through bash
-- An [OpenRouter](https://openrouter.ai) API key
+- An API key for one of the supported providers (Anthropic, OpenAI, OpenRouter, Ollama Cloud), or
+  a local [Ollama](https://ollama.com) server
 
 ## Installation
 
@@ -47,7 +49,7 @@ in.
 ## Quick start
 
 ```bash
-export OPENROUTER_API_KEY=sk-or-...
+export OPENROUTER_API_KEY=sk-or-...   # or ANTHROPIC_API_KEY, OPENAI_API_KEY, OLLAMA_API_KEY
 export NULLRIVET_MODEL=openrouter/nvidia/nemotron-3-ultra-550b-a55b:free
 
 # Start an interactive session in the current directory
@@ -105,12 +107,15 @@ Flags take precedence over environment variables, which take precedence over the
 
 | Variable | Description |
 |---|---|
+| `ANTHROPIC_API_KEY` | Credentials for `anthropic/*` models. |
+| `OPENAI_API_KEY` | Credentials for `openai/*` models. |
 | `OPENROUTER_API_KEY` | Credentials for `openrouter/*` models. |
+| `OLLAMA_API_KEY` | Credentials for Ollama Cloud models (a local Ollama server needs none). |
 | `NULLRIVET_MODEL` | Default model id. |
 | `NULLRIVET_EFFORT` | Default reasoning effort. |
 | `NULLRIVET_PERMISSION` | Default execution mode. |
 | `NULLRIVET_MAX_STEPS` | Default step limit. |
-| `NULLRIVET_OPENROUTER_BASE_URL` | OpenRouter endpoint (default `https://openrouter.ai/api/v1`). |
+| `NULLRIVET_<FAMILY>_BASE_URL` | Endpoint of a provider family, e.g. `NULLRIVET_OPENAI_BASE_URL`. |
 
 Provider-specific settings are listed in [docs/MODELS.md](docs/MODELS.md).
 
@@ -181,14 +186,16 @@ and stays in the input; to send text that starts with `/` as a prompt, begin it 
 
 ## Models
 
-A model id is `<family>/<model>`. OpenRouter model names contain slashes themselves, so the family
-is everything before the first `/`: `openrouter/deepseek/deepseek-v4-flash`.
+A model id is `<family>/<model>`, for example `anthropic/claude-sonnet-5-5`, `openai/gpt-5.4`,
+`ollama/qwen3-coder:480b` or `openrouter/deepseek/deepseek-v4-flash`. OpenRouter model names
+contain slashes themselves, so the family is everything before the first `/`.
 
 There is no catalog file. A model is resolved, in order, from:
 
 1. **the compiled catalog**, which holds curated capabilities for a few models;
-2. **discovery**, which asks the provider's public model listing for the context window, output
-   limit and tool support, and keeps the answer in memory for the session;
+2. **discovery**, which asks the provider about the model (context window, output limit, tool and
+   reasoning support) and keeps the answer in memory for the session; Anthropic, OpenRouter and
+   Ollama support it;
 3. **conservative defaults** (32,768-token window, 8,192 output tokens), with a warning.
 
 Models without tool calling are rejected. Free OpenRouter models (`:free`) are used like any

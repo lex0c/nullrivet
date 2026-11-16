@@ -7,14 +7,16 @@ text before the first `/`; the rest is the model name sent to the provider. Open
 a vendor prefix of their own:
 
 ```
+anthropic/claude-sonnet-5-5
+openai/gpt-5.4
+ollama/qwen3-coder:480b
 openrouter/deepseek/deepseek-v4-flash
-openrouter/cohere/north-mini-code:free
 ```
 
 | Family | Status |
 |---|---|
-| `openrouter` | Supported. |
-| `anthropic`, `openai`, `ollama`, `google`, `xai` | Planned; selecting them reports that the family is not supported yet. |
+| `anthropic`, `openai`, `ollama`, `openrouter` | Supported. |
+| `google`, `xai` | Planned; selecting them reports that the family is not supported yet. |
 
 ## Resolution
 
@@ -23,15 +25,20 @@ output limit, reasoning and sampling support) are resolved in this order:
 
 1. **Compiled catalog.** Curated entries built into nullrivet. When the id is in the catalog, the
    entry is used as is and nothing else is consulted.
-2. **Discovery.** For ids missing from the catalog, nullrivet reads the provider's public model
-   listing (`GET /models` on OpenRouter, no API key needed), with a 5 s timeout. The result is kept
-   in memory for the rest of the process.
+2. **Discovery.** For ids missing from the catalog, nullrivet asks the provider about the model,
+   with a 5 s timeout, and keeps the answer in memory for the rest of the process:
+   - Anthropic: `GET /v1/models/{model}` (with the API key);
+   - OpenRouter: `GET /models`, the public listing (no key needed);
+   - Ollama: `POST /api/show` on the server that serves the model;
+   - OpenAI has no endpoint with this information, so only catalog models get exact values.
 3. **Defaults.** When discovery is unavailable or fails, the model is accepted with a warning and
    conservative values: a 32,768-token window, 8,192 output tokens, no reasoning, and no sampling
    parameters.
 
-A model the listing shows without tool calling is rejected, since the agent depends on it. An id
-missing from a valid listing is an error rather than a fallback to defaults, so typos fail early.
+A model the provider reports without tool calling is rejected, since the agent depends on it. A
+model the provider says it does not have is an error rather than a fallback to defaults, so typos
+fail early. Discovered output limits are capped at 32,768 tokens, like the catalog's, because a
+larger limit only shrinks the room left for context.
 
 `--context-window` and `--max-output` override the limits of whichever source was used.
 
@@ -59,7 +66,28 @@ The OpenRouter catalog lives in `src/providers/openrouter/capabilities.ts`. Its 
 the window served by the default-routed provider, which can be smaller than the model's headline
 maximum.
 
-### Discovery mapping (OpenRouter)
+### Discovery mapping
+
+**Anthropic**
+
+| Model field | Capability |
+|---|---|
+| `max_input_tokens` | `context_window` |
+| `max_tokens` | `output_max_tokens` |
+| `capabilities.thinking.types.adaptive` | `supports_adaptive_thinking` |
+| `capabilities.thinking.types.enabled` (without adaptive) | `supports_reasoning` (manual budget) |
+| `capabilities.effort`, `capabilities.effort.xhigh` | `supports_reasoning_effort`, `supports_effort_xhigh` |
+| — | `supports_sampling: false`, because several thinking models cannot turn thinking off |
+
+**Ollama**
+
+| `/api/show` field | Capability |
+|---|---|
+| `model_info.<arch>.context_length` | `context_window` |
+| `thinking` in `capabilities` | `supports_reasoning` |
+| `tools` missing from `capabilities` | model rejected (servers that do not report capabilities are trusted) |
+
+**OpenRouter**
 
 | Listing field | Capability |
 |---|---|
@@ -82,11 +110,64 @@ always fit in the window. See [ARCHITECTURE.md](ARCHITECTURE.md#context-manageme
 
 `--effort` (`low`, `medium`, `high`, `xhigh`, `max`) is translated per model:
 
-- models with `supports_reasoning_effort` receive the level, with `max` mapped to `xhigh`;
-- models with only `supports_reasoning` have reasoning switched on;
+- models with `supports_reasoning_effort` receive the level in the provider's own parameter
+  (Anthropic `output_config.effort`, OpenAI and OpenRouter `reasoning.effort`); OpenAI's top level
+  is `xhigh`, so `max` maps to it, and Anthropic models without `xhigh` get `high`;
+- models with only `supports_reasoning` have reasoning switched on (Anthropic models with a manual
+  budget get one sized from the level; Ollama `gpt-oss` gets low/medium/high);
 - other models ignore it.
 
-Without `--effort`, no reasoning parameter is sent and the provider's default applies.
+Without `--effort`, no effort is sent and the provider's default applies. Anthropic models with
+adaptive thinking think by default.
+
+## Anthropic
+
+| Variable | Description |
+|---|---|
+| `ANTHROPIC_API_KEY` | API key. Required. |
+| `NULLRIVET_ANTHROPIC_BASE_URL` | Endpoint (default `https://api.anthropic.com`). |
+| `NULLRIVET_ANTHROPIC_CACHE_TTL` | `1h` selects the one-hour prompt cache; anything else keeps the default five minutes. |
+| `NULLRIVET_ANTHROPIC_THINKING` | `0` turns off adaptive thinking on models that allow it (default on). |
+| `NULLRIVET_ANTHROPIC_REASONING_REPLAY` | Send signed thinking back on tool follow-ups (default on, adaptive models only). |
+
+- **Prompt caching** places cache breakpoints after the system prompt, after the tool definitions
+  and on the latest message, so each request reuses the prefix of the previous one.
+- **Thinking** blocks are replayed unmodified on tool follow-ups, which the API requires when
+  thinking precedes a tool call. They are dropped from the part of the conversation that is
+  compacted.
+- `ANTHROPIC_AUTH_TOKEN` is never read: only the API key above is sent.
+
+## OpenAI
+
+| Variable | Description |
+|---|---|
+| `OPENAI_API_KEY` | API key. Required. |
+| `NULLRIVET_OPENAI_BASE_URL` | Endpoint (default `https://api.openai.com/v1`); also works with compatible servers. |
+| `NULLRIVET_OPENAI_PROMPT_CACHE_RETENTION` | `in_memory` opts out of the 24-hour prompt cache on models that allow it. |
+| `NULLRIVET_OPENAI_REASONING_REPLAY` | Send encrypted reasoning items back on tool follow-ups (default on). |
+| `NULLRIVET_OPENAI_INCLUDE_USAGE` | `0` stops requesting usage in streams, for compatible servers that reject it. |
+
+- Models that accept a reasoning effort use the Responses API (with `store: false`, so nothing is
+  kept on OpenAI's side); the others use Chat Completions.
+- A prompt cache key derived from the system prompt and the tools keeps requests on warm caches.
+- `OPENAI_ORG_ID` and `OPENAI_PROJECT_ID` are never read or sent.
+
+## Ollama
+
+| Variable | Description |
+|---|---|
+| `OLLAMA_API_KEY` | Key for Ollama Cloud (`https://ollama.com`). Not needed for a local server. |
+| `NULLRIVET_OLLAMA_BASE_URL` | Server for every Ollama model, overriding the defaults below. |
+| `NULLRIVET_OLLAMA_NUM_CTX` | Context window to request from a local server (default 32,768). |
+| `NULLRIVET_OLLAMA_KEEP_ALIVE` | How long the server keeps the model loaded. |
+| `NULLRIVET_OLLAMA_REASONING_REPLAY` | Send the model's thinking back on tool follow-ups (default on). |
+
+- Catalog models marked as cloud models are served from `https://ollama.com`; every other model
+  from `http://localhost:11434`. The key is only ever sent to `https://ollama.com`.
+- A local server is asked for at most 32,768 tokens of context unless `NULLRIVET_OLLAMA_NUM_CTX` is
+  set, to protect the memory of the machine; the reported window is reduced to match.
+- Some Ollama versions truncate a prompt that exceeds the window instead of rejecting it, so the
+  compaction trigger is the main protection there.
 
 ## OpenRouter
 

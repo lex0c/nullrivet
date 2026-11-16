@@ -45,7 +45,8 @@ src/
     catalog.ts             compiled catalog and per-family adapters
     discovery.ts           in-memory lookup of unknown models
     errors.ts              AbortError, ProviderRequestError, canonical error codes
-    openrouter/            OpenRouter adapter (request, message conversion, stream normalizer)
+    anthropic/, openai/,   adapters: request building, message conversion, stream normalizers
+    ollama/, openrouter/
   tools/
     types.ts, policy.ts    tool contract and execution modes
     bash.ts, git.ts        command tools
@@ -244,5 +245,5 @@ rendering, input handling and interrupt behavior are described in [TUI.md](TUI.m
 
 ## Not implemented yet
 
-- Providers other than OpenRouter.
+- Google and xAI providers.
 - Subagents.

@@ -5,6 +5,8 @@ import type { ProviderCapabilities } from './types.ts';
 export const DISCOVERY_TIMEOUT_MS = 5_000;
 // Used when the source reports no completion limit for the model.
 export const DISCOVERED_OUTPUT_FALLBACK = 8_192;
+// Agentic answers rarely need more, and a larger limit only shrinks the room left for context.
+export const DISCOVERED_OUTPUT_CAP = 32_768;
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -148,6 +150,7 @@ const toOpenRouterCapabilities = (model: string, entry: ListedModel): DiscoveryR
     context_window: entry.contextLength,
     output_max_tokens: Math.min(
       entry.maxCompletionTokens ?? DISCOVERED_OUTPUT_FALLBACK,
+      DISCOVERED_OUTPUT_CAP,
       entry.contextLength,
     ),
   };
@@ -293,4 +296,83 @@ export const discoverOllamaModel = async (
     cache.set(url, new Map([...(cached ?? []), [model, entry]]));
   }
   return toOllamaCapabilities(model, entry);
+};
+
+const anthropicCache = new Map<string, ProviderCapabilities>();
+
+const isTrue = (value: unknown, ...path: string[]): boolean => {
+  let current = value;
+  for (const key of path) {
+    if (!isRecord(current)) return false;
+    current = current[key];
+  }
+  return current === true;
+};
+
+// Anthropic's model endpoint reports the window, the output limit and which effort levels and
+// thinking modes a model accepts, so models newer than the catalog resolve with exact values.
+// Answers are cached in memory per endpoint and model.
+export const discoverAnthropicModel = async (
+  model: string,
+  options: DiscoveryOptions,
+): Promise<DiscoveryResult> => {
+  if (options.signal?.aborted === true) throw new AbortError();
+  const baseUrl = options.baseUrl.replace(/\/+$/, '');
+  const cacheKey = `${baseUrl}\0${model}`;
+  const cached = anthropicCache.get(cacheKey);
+  if (cached !== undefined) return { ok: true, capabilities: cached };
+  if (options.apiKey === undefined) {
+    return {
+      ok: false,
+      kind: 'unavailable',
+      error: 'the Anthropic model endpoint requires an API key',
+    };
+  }
+  const url = `${baseUrl}/v1/models/${encodeURIComponent(model)}`;
+  const fetched = await fetchJson(
+    {
+      method: 'GET',
+      url,
+      headers: { 'x-api-key': options.apiKey, 'anthropic-version': '2023-06-01' },
+    },
+    options.fetch ?? fetch,
+    options.signal,
+    options.timeoutMs ?? DISCOVERY_TIMEOUT_MS,
+  );
+  if (!fetched.ok) {
+    if (fetched.status === 404) {
+      return { ok: false, kind: 'not_found', error: `Anthropic has no model "${model}"` };
+    }
+    return { ok: false, kind: 'unavailable', error: fetched.error };
+  }
+  const payload = fetched.payload;
+  const window = isRecord(payload) ? positiveInt(payload.max_input_tokens) : undefined;
+  if (!isRecord(payload) || window === undefined) {
+    return {
+      ok: false,
+      kind: 'unavailable',
+      error: `GET ${displayUrl(url)} returned no valid max_input_tokens`,
+    };
+  }
+  const features = payload.capabilities;
+  const capabilities: ProviderCapabilities = {
+    context_window: window,
+    output_max_tokens: Math.min(
+      positiveInt(payload.max_tokens) ?? DISCOVERED_OUTPUT_FALLBACK,
+      DISCOVERED_OUTPUT_CAP,
+      window,
+    ),
+    // Thinking models reject sampling parameters and several cannot turn thinking off, so the
+    // only request that would send them (the conversation summary) does not.
+    supports_sampling: false,
+  };
+  if (isTrue(features, 'thinking', 'types', 'adaptive', 'supported')) {
+    capabilities.supports_adaptive_thinking = true;
+  } else if (isTrue(features, 'thinking', 'types', 'enabled', 'supported')) {
+    capabilities.supports_reasoning = true;
+  }
+  if (isTrue(features, 'effort', 'supported')) capabilities.supports_reasoning_effort = true;
+  if (isTrue(features, 'effort', 'xhigh', 'supported')) capabilities.supports_effort_xhigh = true;
+  anthropicCache.set(cacheKey, capabilities);
+  return { ok: true, capabilities };
 };

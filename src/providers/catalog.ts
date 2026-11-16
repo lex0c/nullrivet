@@ -3,6 +3,7 @@ import { createAnthropicProvider, DEFAULT_ANTHROPIC_BASE_URL } from './anthropic
 import {
   type DiscoveryOptions,
   type DiscoveryResult,
+  discoverAnthropicModel,
   discoverOllamaModel,
   discoverOpenRouterModel,
 } from './discovery.ts';
@@ -81,6 +82,7 @@ export const FAMILY_ADAPTERS: Partial<Record<ProviderFamily, FamilyAdapter>> = {
     baseUrlEnv: 'NULLRIVET_ANTHROPIC_BASE_URL',
     defaultBaseUrl: DEFAULT_ANTHROPIC_BASE_URL,
     create: createAnthropicProvider,
+    discover: discoverAnthropicModel,
   },
   openai: {
     apiKeyEnv: 'OPENAI_API_KEY',
