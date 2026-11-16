@@ -77,6 +77,13 @@ does not settle it. Any remaining text is settled when a tool call starts or the
   protocol form (CSI u) is recognized as well. Terminals that report neither send `Shift+Enter`
   as `Enter`; `Alt+Enter` and `\` followed by `Enter` insert a newline everywhere.
 - While a task runs, the next prompt can be typed, but it is sent only once the task ends.
+- Submitted prompts and commands form a history (`src/cli/prompt-history.ts`), at most 500
+  entries, without blank entries or a repeat of the latest one. `↑` on the first line of the input
+  recalls the newest entry and keeps the text being typed as a draft; while browsing, `↑` and `↓`
+  walk the history wherever the cursor is, even when a recalled command opens the command list,
+  and `↓` past the newest entry restores the draft. Editing a recalled entry ends browsing.
+  `/clear` keeps the history. It lives in memory and, when a session file is attached, in that
+  file.
 - `Shift+Tab` switches the execution mode between `auto` and `readonly`, also while a task runs:
   the executor reads the mode before every tool call, so the switch applies from the next one. Each
   switch prints a line in the scrollback, the only record of which mode the tool calls around it

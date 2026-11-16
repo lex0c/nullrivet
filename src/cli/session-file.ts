@@ -9,6 +9,7 @@ import { atomicWrite } from '../tools/atomic-write.ts';
 import { isNotFoundError } from '../tools/file-io.ts';
 import { type ExecutionMode, isExecutionMode } from '../tools/policy.ts';
 import { EFFORT_LEVELS } from './args.ts';
+import { PROMPT_HISTORY_LIMIT, type PromptHistory } from './prompt-history.ts';
 
 // A session file holds a conversation so it can be continued after nullrivet exits. Nothing is
 // written unless the user names a file. The file holds prompts and tool output, which can include
@@ -32,6 +33,8 @@ export interface SessionData {
   mode: ExecutionMode;
   cwd: string;
   conversation: ConversationSnapshot;
+  // Texts submitted in the interactive session, oldest first, for recalling them.
+  history: string[];
 }
 
 type Parsed = { ok: true; data: SessionData } | { ok: false; error: string };
@@ -70,6 +73,10 @@ export const parseSessionFile = (text: string): Parsed => {
   if (effort !== undefined && !EFFORT_LEVELS.includes(effort as ProviderEffort)) {
     return { ok: false, error: `effort must be one of ${EFFORT_LEVELS.join(', ')}` };
   }
+  const history = value.history ?? [];
+  if (!Array.isArray(history) || !history.every((item) => typeof item === 'string')) {
+    return { ok: false, error: 'history must be an array of strings' };
+  }
   const conversation = parseConversationSnapshot(value.conversation);
   if (!conversation.ok) return { ok: false, error: conversation.error };
   return {
@@ -82,6 +89,7 @@ export const parseSessionFile = (text: string): Parsed => {
       mode,
       cwd,
       conversation: conversation.snapshot,
+      history: history.slice(-PROMPT_HISTORY_LIMIT),
     },
   };
 };
@@ -110,6 +118,7 @@ export interface SessionState {
   // Read while the state is serialized, before the save waits for anything, so the conversation
   // written is the one at the time of the call.
   conversation: Readonly<ConversationSnapshot>;
+  history: readonly string[];
 }
 
 export interface SessionLimits {
@@ -194,6 +203,7 @@ export class SessionFile {
       mode: state.mode,
       cwd: state.cwd,
       conversation: state.conversation,
+      history: state.history,
     })}\n`;
     if (Buffer.byteLength(text, 'utf8') > this.maxBytes) {
       throw new Error(
@@ -245,6 +255,7 @@ export class SessionLink {
     private readonly agent: Agent,
     private readonly cwd: string,
     private readonly warn: (message: string) => void,
+    private readonly history: PromptHistory,
   ) {}
 
   get path(): string | null {
@@ -288,7 +299,7 @@ export class SessionLink {
 
   private key(): string {
     const a = this.agent;
-    return `${a.conversation.revision}\0${a.provider.id}\0${a.effort ?? ''}\0${a.mode}`;
+    return `${a.conversation.revision}\0${this.history.revision}\0${a.provider.id}\0${a.effort ?? ''}\0${a.mode}`;
   }
 
   private state(): SessionState {
@@ -302,6 +313,7 @@ export class SessionLink {
         summary: this.agent.conversation.summary(),
         requestMode: this.agent.conversation.requestMode,
       },
+      history: [...this.history.entries()],
     };
   }
 

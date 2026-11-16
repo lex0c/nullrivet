@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type Agent, createAgent } from '../../src/agent/agent.ts';
+import { PromptHistory } from '../../src/cli/prompt-history.ts';
 import { SessionLink } from '../../src/cli/session-file.ts';
 import { parseSlash, runSlash, type SlashContext, suggestCommands } from '../../src/cli/slash.ts';
 import type { ResolveResult } from '../../src/providers/resolve.ts';
@@ -47,7 +48,12 @@ const harness = async (resolve?: (id: string) => ResolveResult, cwd = '/tmp'): P
     compact: async () => {
       h.compacted += 1;
     },
-    session: new SessionLink(agent, cwd, (text) => h.notices.push({ level: 'warning', text })),
+    session: new SessionLink(
+      agent,
+      cwd,
+      (text) => h.notices.push({ level: 'warning', text }),
+      new PromptHistory(),
+    ),
     cwd,
   };
   return h;

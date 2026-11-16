@@ -30,6 +30,7 @@ src/
     repl.ts                interactive session controller
     slash.ts               slash commands
     session-file.ts        session files: loading, validation, atomic saves, attaching
+    prompt-history.ts      prompts recalled with the arrow keys
     output.ts              plain and NDJSON event sinks for one-shot runs
   agent/
     agent.ts               createAgent(): the public API of the core
@@ -372,6 +373,9 @@ The CLI edge does the rest:
   effort are used when the invocation does not choose them; the mode only produces a warning,
   because permissions come from the invocation alone. `AGENTS.md` files are not stored, since
   they are added when each request is built, so a continued session reads them again from disk.
+- **Prompt history.** The file also holds the prompt history of the interactive session, with the
+  prompt of each one-shot run added, so a continued session recalls them. A new entry alone is
+  enough to save the file again.
 
 ## Events
 

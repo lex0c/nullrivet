@@ -164,7 +164,8 @@ the tokens spent. The older part of a long conversation is summarized automatica
 | `Ctrl+C` on a non-empty prompt | Clear the prompt. |
 | `Ctrl+C` twice on an empty prompt | Exit (code 130). |
 | `Ctrl+D` on an empty prompt | Exit (code 0). |
-| `Tab`, `↑`/`↓` | Complete and choose in the command list. |
+| `↑`/`↓` | Recall earlier prompts and commands: `↑` from the first line of the input, then `↑`/`↓` walk the history; `↓` past the newest brings back what you were typing. |
+| `Tab`, `↑`/`↓` with the command list open | Complete and choose a command. |
 
 ### Commands
 
@@ -283,6 +284,8 @@ nullrivet --session ci.json "Fix the first failure"   # same conversation, next 
   session read-only.
 - `/session <file>` saves to a new file from then on, and the previous file keeps the conversation
   so far; `/session off` stops saving; `/session` shows the state. `/clear` stops saving too.
+- The file also keeps the prompt history, one-shot prompts included, so `↑` recalls them when the
+  session continues.
 - A file changed by something else while nullrivet runs is no longer written, with a warning.
 
 The file holds your prompts and the tools' output, which can include secrets, and is created

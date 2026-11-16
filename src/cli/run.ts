@@ -10,6 +10,7 @@ import { type ModelOverrides, resolveModel } from '../providers/resolve.ts';
 import { BUILTIN_TOOLS } from '../tools/index.ts';
 import { parseCli, USAGE, UsageError } from './args.ts';
 import { createJsonSink, createPlainSink } from './output.ts';
+import { PromptHistory } from './prompt-history.ts';
 import { runRepl } from './repl.ts';
 import { type SessionData, SessionFile, SessionLink } from './session-file.ts';
 
@@ -156,6 +157,7 @@ export const runCli = async (io: CliIO): Promise<number> => {
     }
   }
 
+  const history = new PromptHistory(resumed?.history ?? []);
   if (interactive && io.terminal !== null) {
     return runRepl({
       agent,
@@ -165,6 +167,7 @@ export const runCli = async (io: CliIO): Promise<number> => {
       warnings,
       sessionFile: session?.file ?? null,
       resumedMessages: resumed === null ? null : resumed.conversation.messages.length,
+      history,
       signal: io.signal,
       stdin: io.terminal.stdin,
       stdout: io.terminal.stdout,
@@ -174,7 +177,12 @@ export const runCli = async (io: CliIO): Promise<number> => {
 
   for (const warning of warnings) sink.notice('warning', warning);
   if (session !== null) {
-    new SessionLink(agent, cwd, (message) => sink.notice('warning', message)).attach(session.file);
+    // The prompt of a one-shot run joins the history, so it can be recalled when the session is
+    // continued interactively.
+    history.add(config.prompt);
+    new SessionLink(agent, cwd, (message) => sink.notice('warning', message), history).attach(
+      session.file,
+    );
   }
   const result = await agent.run(prompt, {
     signal: io.signal,

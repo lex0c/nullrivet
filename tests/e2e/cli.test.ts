@@ -371,6 +371,47 @@ describe('terminal', () => {
   );
 
   test.skipIf(Bun.which('python3') === null)(
+    'a prompt of a saved session is recalled with ↑ and sent again',
+    async () => {
+      server.handle(() => ({ text: 'ok' }));
+      const cwd = tempDir();
+      const first = startCli(['--session', 's.json', 'the first prompt'], {
+        env: cliEnv(server),
+        cwd,
+      });
+      expect((await first.finished).code).toBe(0);
+      const child = Bun.spawn(inTerminal(cliCommand(['--session', 's.json'])), {
+        env: { ...cliEnv(server), TERM: 'xterm-256color' },
+        cwd,
+        stdin: 'pipe',
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      await Bun.sleep(1_500);
+      child.stdin.write('\x1b[A');
+      child.stdin.flush();
+      await Bun.sleep(300);
+      child.stdin.write('\r');
+      child.stdin.flush();
+      await Bun.sleep(1_500);
+      child.stdin.write('/exit\r');
+      child.stdin.flush();
+      const [, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+      expect(code).toBe(0);
+      expect(server.requests).toHaveLength(2);
+      const prompts = (server.requests[1]?.messages ?? []).filter(
+        (m) => m.role === 'user' && m.content.includes('the first prompt'),
+      );
+      expect(prompts).toHaveLength(2);
+      expect(JSON.parse(readFileSync(join(cwd, 's.json'), 'utf8')).history).toEqual([
+        'the first prompt',
+        '/exit',
+      ]);
+    },
+    30_000,
+  );
+
+  test.skipIf(Bun.which('python3') === null)(
     'leaving the interactive session in the middle of a turn still saves the session',
     async () => {
       // The command ignores SIGTERM, so after the first Ctrl+C the turn keeps running for the

@@ -25,6 +25,7 @@ import {
   enableRawMode,
 } from '../tui/term.ts';
 import { composeLive } from '../tui/view.ts';
+import type { PromptHistory } from './prompt-history.ts';
 import { type SessionFile, SessionLink } from './session-file.ts';
 import {
   describeModeChange,
@@ -50,6 +51,8 @@ export interface ReplOptions {
   // The session file the conversation is saved to, if any, and how many messages it brought back.
   sessionFile: SessionFile | null;
   resumedMessages: number | null;
+  // Seeded from the session file, if any; the session adds what is submitted.
+  history: PromptHistory;
   // Aborted when the process receives SIGINT or SIGTERM from outside the terminal.
   signal: AbortSignal;
   stdin: NodeJS.ReadStream;
@@ -122,10 +125,16 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
 
     // Warnings about the session file go to the interface while it is open, and to stderr once
     // the terminal has been restored (the last save happens on the way out).
-    const session = new SessionLink(agent, options.cwd, (message) => {
-      if (closed) process.stderr.write(`nullrivet: warning: ${message}\n`);
-      else notice('warning', message);
-    });
+    const history = options.history;
+    const session = new SessionLink(
+      agent,
+      options.cwd,
+      (message) => {
+        if (closed) process.stderr.write(`nullrivet: warning: ${message}\n`);
+        else notice('warning', message);
+      },
+      history,
+    );
     if (options.sessionFile !== null) session.attach(options.sessionFile);
 
     const syncStatus = (): void =>
@@ -294,6 +303,7 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
           );
           return;
         }
+        history.add(raw.trimEnd());
         dispatch({ type: 'submit', text });
         commandRunning = true;
         try {
@@ -308,6 +318,7 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
         notice('warning', 'A task is running. Wait for it to finish or press Esc to interrupt it.');
         return;
       }
+      history.add(raw.trimEnd());
       dispatch({ type: 'submit', text });
       startTurn(text);
     };
@@ -332,6 +343,7 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       const chosen = menu.items[menu.selected];
       if (chosen === undefined) return false;
       if (key.name === 'tab') {
+        history.stopBrowsing();
         const value = `/${chosen.name} `;
         setInput({ value, cursor: value.length });
         return true;
@@ -343,6 +355,23 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       return false;
     };
 
+    // ↑ on the first line of the input recalls the previous entry; once browsing, ↑ and ↓ walk
+    // the history wherever the cursor is, and ↓ past the newest entry brings back the draft.
+    const recall = (key: KeyEvent): boolean => {
+      if (key.kind !== 'key' || key.ctrl || key.alt || key.shift) return false;
+      const input = state.input;
+      const onFirstLine = !input.value.slice(0, input.cursor).includes('\n');
+      let text: string | null = null;
+      if (key.name === 'up' && (history.browsing || onFirstLine)) {
+        text = history.previous(input.value);
+      } else if (key.name === 'down' && history.browsing) {
+        text = history.next();
+      }
+      if (text === null) return false;
+      setInput({ value: text, cursor: text.length });
+      return true;
+    };
+
     const onKey = (key: KeyEvent): void => {
       if (isCtrlC(key)) {
         if (turn !== null) {
@@ -351,6 +380,7 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
           if (turn.signal.aborted) finish(130);
           else interrupt();
         } else if (state.input.value.length > 0) {
+          history.stopBrowsing();
           setInput({ value: '', cursor: 0 });
         } else if (state.exitArmedAt !== null) {
           finish(130);
@@ -361,7 +391,10 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
         }
         return;
       }
+      // A recalled command opens the command list, which would otherwise take ↑ and ↓ over.
+      if (history.browsing && recall(key)) return;
       if (handlePopoverKey(key)) return;
+      if (recall(key)) return;
       if (isShiftTab(key)) {
         // Also while a task runs: the executor reads the mode before every tool call, so the
         // switch applies from the next one, as with /permission. The notice records the switch
@@ -386,6 +419,7 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
         if (turn === null) finish(0);
         return;
       }
+      if (result.next.value !== state.input.value) history.stopBrowsing();
       if (result.next !== state.input) setInput(result.next);
     };
 

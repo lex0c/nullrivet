@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createAgent } from '../../src/agent/agent.ts';
 import { Conversation } from '../../src/agent/conversation.ts';
+import { PromptHistory } from '../../src/cli/prompt-history.ts';
 import {
   parseSessionFile,
   SESSION_FORMAT,
@@ -41,6 +42,7 @@ const state = (text = 'hello'): SessionState => {
     mode: 'readonly',
     cwd: '/work',
     conversation: c.snapshot(),
+    history: [text],
   };
 };
 
@@ -63,8 +65,32 @@ describe('SessionFile', () => {
       effort: 'medium',
       mode: 'readonly',
       cwd: '/work',
+      history: ['hello'],
     });
     expect(reopened.data?.conversation).toEqual(state().conversation);
+  });
+
+  test('the prompt history is optional, checked, and kept to its limit when loaded', () => {
+    const base = JSON.parse(
+      JSON.stringify({
+        format: SESSION_FORMAT,
+        version: 1,
+        createdAt: 'a',
+        updatedAt: 'b',
+        ...state(),
+      }),
+    );
+    const withHistory = (history: unknown) => {
+      const { history: _, ...rest } = base;
+      return parseSessionFile(JSON.stringify(history === undefined ? rest : { ...rest, history }));
+    };
+    const absent = withHistory(undefined);
+    expect(absent.ok && absent.data.history).toEqual([]);
+    const invalid = withHistory(['ok', 3]);
+    expect(invalid.ok ? 'ok' : invalid.error).toContain('history must be an array of strings');
+    const long = withHistory(Array.from({ length: 600 }, (_, i) => `p${i}`));
+    expect(long.ok && long.data.history.length).toBe(500);
+    expect(long.ok && long.data.history.at(-1)).toBe('p599');
   });
 
   test('later saves replace the content and keep the creation time', async () => {
@@ -163,7 +189,7 @@ describe('SessionLink', () => {
   test('saves through the agent checkpoint while attached', async () => {
     const agent = await agentWith();
     const path = join(tempDir(), 's.json');
-    const link = new SessionLink(agent, '/tmp', () => undefined);
+    const link = new SessionLink(agent, '/tmp', () => undefined, new PromptHistory());
     link.attach((await openOk(path)).file);
     agent.conversation.appendUser('remember me');
     await agent.checkpoint?.();
@@ -176,7 +202,12 @@ describe('SessionLink', () => {
     const agent = await agentWith();
     const path = join(tempDir(), 's.json');
     const warnings: string[] = [];
-    const link = new SessionLink(agent, '/tmp', (message) => warnings.push(message));
+    const link = new SessionLink(
+      agent,
+      '/tmp',
+      (message) => warnings.push(message),
+      new PromptHistory(),
+    );
     link.attach((await openOk(path)).file);
     await link.save();
     writeFileSync(path, 'replaced');
@@ -190,10 +221,22 @@ describe('SessionLink', () => {
     expect(readFileSync(path, 'utf8')).toBe('replaced');
   });
 
+  test('a new history entry alone is saved', async () => {
+    const agent = await agentWith();
+    const path = join(tempDir(), 's.json');
+    const history = new PromptHistory();
+    const link = new SessionLink(agent, '/tmp', () => undefined, history);
+    link.attach((await openOk(path)).file);
+    await link.save();
+    history.add('/stats');
+    await link.save();
+    expect(JSON.parse(readFileSync(path, 'utf8')).history).toEqual(['/stats']);
+  });
+
   test('a state that has not changed is not written again', async () => {
     const agent = await agentWith();
     const path = join(tempDir(), 's.json');
-    const link = new SessionLink(agent, '/tmp', () => undefined);
+    const link = new SessionLink(agent, '/tmp', () => undefined, new PromptHistory());
     link.attach((await openOk(path)).file);
     agent.conversation.appendUser('once');
     await link.save();
@@ -209,7 +252,12 @@ describe('SessionLink', () => {
     const agent = await agentWith();
     const path = join(tempDir(), 's.json');
     const warnings: string[] = [];
-    const link = new SessionLink(agent, '/tmp', (message) => warnings.push(message));
+    const link = new SessionLink(
+      agent,
+      '/tmp',
+      (message) => warnings.push(message),
+      new PromptHistory(),
+    );
     const opened = await SessionFile.open(path, { maxBytes: 4_000 });
     if (!opened.ok) throw new Error(opened.error);
     link.attach(opened.file);
@@ -226,7 +274,7 @@ describe('SessionLink', () => {
   test('switching to a file that cannot be written keeps the current one', async () => {
     const agent = await agentWith();
     const dir = tempDir();
-    const link = new SessionLink(agent, '/tmp', () => undefined);
+    const link = new SessionLink(agent, '/tmp', () => undefined, new PromptHistory());
     link.attach((await openOk(join(dir, 'a.json'))).file);
     agent.conversation.appendUser('first');
     await link.save();
