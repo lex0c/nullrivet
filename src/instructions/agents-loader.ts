@@ -90,12 +90,7 @@ export class InstructionsLoader {
   // state is built separately and adopted only when discovery completes, so a failure leaves
   // the current state intact.
   async reload(paths: readonly string[]): Promise<DiscoveryResult> {
-    const fresh = new InstructionsLoader({
-      maxFileBytes: this.maxFileBytes,
-      maxTotalBytes: this.maxTotalBytes,
-      maxDepth: this.maxDepth,
-      home: this.home,
-    });
+    const fresh = this.fork();
     const result = await fresh.discover(paths);
     this.reset();
     for (const [path, file] of fresh.loaded) this.loaded.set(path, file);

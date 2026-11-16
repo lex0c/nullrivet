@@ -18,9 +18,9 @@ const GITLINK_MODE = '160000';
 
 export const LISTING_TRUNCATED_NOTE = `the directory has more than ${MAX_LISTED_FILES} files and only part of it was searched; narrow 'path'`;
 
-// Outside a git repository there are no ignore rules to apply; these directories hold metadata or
-// dependencies and would dominate any search.
-const SKIPPED_DIRECTORIES = new Set(['.git', 'node_modules']);
+// Outside a git repository there are no ignore rules to apply; dependencies would dominate any
+// search. Hidden directories, .git among them, are skipped separately.
+const SKIPPED_DIRECTORIES = new Set(['node_modules']);
 
 export interface FileList {
   // Relative to the listed root, with '/' separators.
@@ -29,8 +29,10 @@ export interface FileList {
 }
 
 // Inside a git repository the list comes from git, so files ignored by git are left out; ignore
-// rules are too intricate to reimplement. A root that git ignores entirely (dependencies, build
-// output) yields nothing there and is walked instead.
+// rules are too intricate to reimplement. A root that git itself ignores (dependencies, build
+// output) is walked instead, since searching it was asked for by name. A root that is not ignored
+// keeps git's list even when it is empty: a directory holding only ignored files (a local .env)
+// must not have them listed.
 export const listFiles = (root: string, signal: AbortSignal): Promise<FileList> =>
   listTree(root, signal, MAX_LISTED_FILES, 0);
 
@@ -41,7 +43,9 @@ const listTree = async (
   nesting: number,
 ): Promise<FileList> => {
   const fromGit = await listGitFiles(root, signal, budget, nesting);
-  if (fromGit !== null && fromGit.files.length > 0) return fromGit;
+  if (fromGit !== null && (fromGit.files.length > 0 || !(await isIgnoredByGit(root, signal)))) {
+    return fromGit;
+  }
   return walkFiles(root, signal, budget);
 };
 
@@ -129,8 +133,27 @@ const listGitFiles = async (
   return { files: list, truncated };
 };
 
+// Whether git ignores the directory itself. Runs with the same hardening as the listing.
+const isIgnoredByGit = async (root: string, signal: AbortSignal): Promise<boolean> => {
+  try {
+    const run = await runProcess({
+      file: 'git',
+      args: ['--no-pager', ...configArgs(HARDENING_CONFIG), 'check-ignore', '-q', '--', '.'],
+      cwd: root,
+      env: gitEnv(),
+      timeoutMs: GIT_TIMEOUT_MS,
+      signal,
+    });
+    return run.termination === 'exited' && run.exitCode === 0;
+  } catch {
+    return false;
+  }
+};
+
 // Symbolic links are listed but not followed, which keeps a link cycle from looping. Directories
-// that cannot be read are skipped.
+// that cannot be read are skipped. Without ignore rules, hidden entries are skipped too, as
+// ripgrep does: they hold tool state and credentials (.env, .ssh, .aws). The root itself is
+// walked even when hidden, since it was asked for by name.
 const walkFiles = async (root: string, signal: AbortSignal, budget: number): Promise<FileList> => {
   const files: string[] = [];
   const pending: string[] = [''];
@@ -147,6 +170,7 @@ const walkFiles = async (root: string, signal: AbortSignal, budget: number): Pro
       continue;
     }
     for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue;
       const path = relativeDir === '' ? entry.name : `${relativeDir}/${entry.name}`;
       if (entry.isDirectory()) {
         if (!SKIPPED_DIRECTORIES.has(entry.name)) pending.push(path);

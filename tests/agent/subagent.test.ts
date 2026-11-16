@@ -1,7 +1,9 @@
 import { describe, expect, test } from 'bun:test';
+import { mkdir } from 'node:fs/promises';
 import { type Agent, createAgent } from '../../src/agent/agent.ts';
 import type { AgentEvent } from '../../src/agent/events.ts';
 import type { GenerateRequest, StreamEvent } from '../../src/providers/types.ts';
+import { FENCE } from '../../src/sanitize/fence.ts';
 import type { Tool, ToolEffect } from '../../src/tools/types.ts';
 import { createMockProvider, textTurn, toolTurn } from '../helpers/mock-provider.ts';
 
@@ -101,9 +103,10 @@ describe('delegate', () => {
 
     const child = h.provider.calls.find((c) => isChild(c.req))?.req;
     expect(child?.messages).toHaveLength(1);
-    expect(firstText(child as GenerateRequest)).toBe(
-      'objective d1\n\nContext from the delegating agent:\nlook in src',
-    );
+    expect(child?.messages[0]?.content).toEqual([
+      { type: 'text', text: 'objective d1' },
+      { type: 'text', text: `<input fence="${FENCE}">\nlook in src\n</input fence="${FENCE}">` },
+    ]);
     expect(JSON.stringify(child?.messages)).not.toContain('secret parent prompt');
     expect(toolNames(child)).toEqual(['read_file']);
 
@@ -235,5 +238,104 @@ describe('delegate', () => {
     expect(Buffer.byteLength(result?.content ?? '', 'utf8')).toBeLessThan(17 * 1024);
     expect(result?.content).toContain('start');
     expect(result?.content).toEndWith('end');
+  });
+
+  test('a subagent at its step limit is asked for its report on the last step', async () => {
+    let parentCalls = 0;
+    const h = await harness((req) => {
+      if (isChild(req)) {
+        const last = JSON.stringify(req.messages.at(-1));
+        return last.includes('This is your last step')
+          ? textTurn('Result: partial findings')
+          : toolTurn([{ id: `c${req.messages.length}`, name: 'read_file', args: {} }]);
+      }
+      parentCalls++;
+      return parentCalls === 1 ? toolTurn([delegateCall('d1', {})]) : textTurn('done');
+    });
+    await h.agent.run('go', { onEvent: h.onEvent });
+    const [result] = toolResults(h.provider.calls.at(-1)?.req);
+    expect(result?.content).toStartWith('[subagent completed, 40 steps');
+    expect(result?.content).toEndWith('Result: partial findings');
+    const steps = h.events.flatMap((e) => (e.type === 'subagent:progress' ? [e.step] : []));
+    expect(steps.slice(0, 3)).toEqual([1, 2, 3]);
+  });
+
+  test('the reason a subagent failed reaches the summary shown to the user', async () => {
+    let parentCalls = 0;
+    const h = await harness((req) => {
+      if (isChild(req)) throw Object.assign(new Error('invalid api key'), { status: 401 });
+      parentCalls++;
+      return parentCalls === 1 ? toolTurn([delegateCall('d1', {})]) : textTurn('done');
+    });
+    await h.agent.run('go', { onEvent: h.onEvent });
+    const end = h.events.find((e) => e.type === 'tool:end' && e.name === 'delegate');
+    expect(end?.type === 'tool:end' && end.isError).toBe(true);
+    const summary = end?.type === 'tool:end' ? String(end.meta?.summary) : '';
+    expect(summary).toStartWith('subagent failed');
+    expect(summary).toContain('invalid api key');
+  });
+
+  test('files changed by a subagent are reported relative to the session directory', async () => {
+    const tools = [fakeTool('read_file', 'read'), fakeTool('write_file', 'write')];
+    let childCalls = 0;
+    let parentCalls = 0;
+    const h = await harness((req) => {
+      if (isChild(req)) {
+        childCalls++;
+        return childCalls === 1
+          ? toolTurn([{ id: 'c1', name: 'write_file', args: { path: 'src/index.ts' } }])
+          : textTurn('done');
+      }
+      parentCalls++;
+      return parentCalls === 1
+        ? toolTurn([delegateCall('d1', { mode: 'auto', cwd: '/tmp/../tmp/pkg-api' })])
+        : textTurn('done');
+    }, tools);
+    await mkdir('/tmp/pkg-api', { recursive: true });
+    await h.agent.run('go', { onEvent: h.onEvent });
+    const [result] = toolResults(h.provider.calls.at(-1)?.req);
+    expect(result?.content).toContain('modified: pkg-api/src/index.ts');
+  });
+
+  test('a delegate cwd that cannot be used is reported with its real cause', async () => {
+    let parentCalls = 0;
+    const h = await harness((req) => {
+      if (isChild(req)) return textTurn('never');
+      parentCalls++;
+      return parentCalls === 1
+        ? toolTurn([
+            delegateCall('d1', { cwd: '/proc/self/status' }),
+            delegateCall('d2', { cwd: '/nope/x' }),
+          ])
+        : textTurn('done');
+    });
+    await h.agent.run('go', { onEvent: h.onEvent });
+    const results = toolResults(h.provider.calls.at(-1)?.req);
+    expect(results[0]?.content).toContain('[fs.not_directory]');
+    expect(results[1]?.content).toContain('[fs.not_found]');
+  });
+});
+
+describe('the main system prompt', () => {
+  test('explains delegation only when the tool is offered', async () => {
+    const run = async (delegation: boolean) => {
+      const provider = createMockProvider([textTurn('ok')]);
+      const agent = await createAgent({
+        provider,
+        tools: [],
+        mode: 'auto',
+        cwd: '/tmp',
+        instructions: null,
+        delegation,
+      });
+      await agent.run('go');
+      return provider.calls[0]?.req;
+    };
+    const on = await run(true);
+    const off = await run(false);
+    expect(on?.system).toContain('# Delegation');
+    expect(toolNames(on)).toEqual(['delegate']);
+    expect(off?.system).not.toContain('# Delegation');
+    expect(toolNames(off)).toEqual([]);
   });
 });

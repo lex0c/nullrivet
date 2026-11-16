@@ -89,10 +89,14 @@ Searches file contents line by line with a regular expression.
 - **Inside a git repository**, the list comes from `git ls-files`, so files ignored by git are
   left out and untracked files are included. Submodules and repositories nested in the tree are
   listed in turn. git runs with the same hardening as the `git` tool, because listing untracked
-  files otherwise runs the repository's fsmonitor program.
-- **Outside a repository**, or in a directory git ignores entirely (`node_modules/lib`, `dist`),
-  the directory is walked, skipping `.git` and `node_modules`. Symbolic links are listed but not
-  followed.
+  files otherwise runs the repository's fsmonitor program. A directory that holds only ignored
+  files (such as a `config/` with a local key file) gives an empty list: its files are not listed.
+- **In a directory git ignores** (`node_modules/lib`, `dist`), checked with `git check-ignore`,
+  the directory is walked, since it was asked for by name.
+- **Outside a repository**, the directory is walked too. There are no ignore rules there, so
+  `node_modules` and hidden entries (`.git`, `.env`, `.ssh`, `.aws`) are skipped, as ripgrep
+  does; a hidden directory is still searched when it is the `path` given. Symbolic links are
+  listed but not followed.
 - At most 200,000 files are listed; past that, the result says only part of the tree was searched.
 
 ## write_file
@@ -226,7 +230,7 @@ Hands a self-contained task to a subagent and returns its report.
 |---|---|
 | `title` | Short label shown to the user (cut at 80 characters). |
 | `objective` | The task, complete on its own: the subagent cannot see the conversation. |
-| `context` | Facts the subagent needs: paths, decisions, constraints. |
+| `context` | Reference material: paths, findings, excerpts. It reaches the subagent as data, fenced like piped stdin, because it may hold text copied from files; requirements belong in `objective`. |
 | `mode` | `readonly` (default) or `auto`. |
 | `cwd` | Starting directory of the subagent (default: the starting directory). |
 
@@ -237,11 +241,13 @@ Hands a self-contained task to a subagent and returns its report.
 - **Concurrency.** Adjacent `delegate` calls in one response run at the same time: up to three
   `readonly` subagents at once, and `auto` subagents one after another. Results keep the order of
   the calls.
-- **Limits.** 40 steps per subagent. The report is reduced to 16 KiB (about 4,096 tokens),
-  keeping its start and end. There is no time limit of its own: the session's `--timeout`, the
+- **Limits.** 40 steps per subagent. Before the last one, a runtime note asks the subagent to
+  write its report without calling more tools, so a subagent that runs out of steps still reports
+  what it found. The report is reduced to 16 KiB (about 4,096 tokens), keeping its start and end. There is no time limit of its own: the session's `--timeout`, the
   stall watchdog and interrupts apply.
 - **Result.** A status line written by the runtime (`completed`, `failed`, `cancelled` or
   `budget`, steps, tool errors, tokens, and files changed through `edit_file` and `write_file`),
-  followed by the subagent's final reply. A failed or cancelled subagent is an error result.
+  followed by the subagent's final reply. When the subagent stopped early, the status line says
+  why. A failed or cancelled subagent is an error result.
 - **Depth.** A subagent cannot delegate.
 

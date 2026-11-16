@@ -1,10 +1,12 @@
 import { stat } from 'node:fs/promises';
 import { contextBudget } from '../context/budget.ts';
 import { headTailSummary } from '../context/output-reduction.ts';
+import { formatTokens } from '../format.ts';
 import type { InstructionsLoader } from '../instructions/agents-loader.ts';
 import type { Provider, ProviderEffort } from '../providers/types.ts';
 import { InvalidArgumentError, optionalString, requireNonEmptyString } from '../tools/args.ts';
-import { resolvePath } from '../tools/paths.ts';
+import { fileSystemError } from '../tools/file-io.ts';
+import { displayPath, resolvePath } from '../tools/paths.ts';
 import type { ExecutionMode } from '../tools/policy.ts';
 import { type Tool, type ToolResult, toolError } from '../tools/types.ts';
 import { Conversation } from './conversation.ts';
@@ -19,6 +21,8 @@ const MAX_AUTO_AT_ONCE = 1;
 const REPORT_MAX_BYTES = 16 * 1024;
 const TITLE_MAX_CHARS = 80;
 const WRITE_TOOLS = new Set(['write_file', 'edit_file']);
+const FINAL_STEP_NOTE =
+  'This is your last step. Do not call tools: write your report now from what you have found, and list what remains undone under open issues.';
 
 // What the delegate tool reads from the parent agent when a subagent starts. Getters, because the
 // model, the effort, the mode and the event listener can change between and during turns.
@@ -26,7 +30,6 @@ export interface SubagentRuntime {
   provider: () => Provider;
   effort: () => ProviderEffort | undefined;
   parentMode: () => ExecutionMode;
-  emit: () => AgentEventListener;
   cwd: string;
   // The tools a subagent gets: the parent's, without delegate, so it cannot delegate further.
   tools: readonly Tool[];
@@ -81,9 +84,6 @@ const STATUS: Record<TurnResult['reason'], SubagentStatus> = {
   budget: 'budget',
 };
 
-const formatTokens = (n: number): string =>
-  n >= 1_000 ? `${(n / 1_000).toFixed(1)}k tokens` : `${n} tokens`;
-
 interface Outcome {
   status: SubagentStatus;
   steps: number;
@@ -101,17 +101,18 @@ const summaryLine = (o: Outcome): string => {
     ...(o.toolErrors > 0
       ? [`${o.toolErrors} tool ${o.toolErrors === 1 ? 'error' : 'errors'}`]
       : []),
-    formatTokens(o.tokens),
+    `${formatTokens(o.tokens)} tokens`,
   ];
   const modified = o.filesModified.length > 0 ? `; modified: ${o.filesModified.join(', ')}` : '';
-  return `${parts.join(', ')}${modified}`;
+  // The reason a subagent stopped early is shown to the user too, not only to the model.
+  const reason = o.status !== 'completed' && o.message !== undefined ? `: ${o.message}` : '';
+  return `${parts.join(', ')}${modified}${reason}`;
 };
 
 // The report is the subagent's final answer. The status line is written by the runtime, so the
 // parent can rely on it even when the answer is missing or wrong.
 const resultContent = (o: Outcome): string => {
   const head = `[subagent ${summaryLine(o)}]`;
-  const reason = o.message === undefined ? '' : `\n[${o.message}]`;
   const report =
     o.report.trim().length > 0
       ? headTailSummary(o.report.trim(), {
@@ -120,7 +121,7 @@ const resultContent = (o: Outcome): string => {
           tailLines: 100,
         }).text
       : '(the subagent gave no final answer)';
-  return `${head}${reason}\n\n${report}`;
+  return `${head}\n\n${report}`;
 };
 
 const finalAnswer = (conversation: Conversation): string => {
@@ -148,15 +149,16 @@ export const createDelegateTool = (runtime: SubagentRuntime): Tool => {
     id: string,
     title: string,
     prompt: string,
+    input: string | undefined,
     requested: ExecutionMode,
     cwd: string,
     signal: AbortSignal,
+    emit: AgentEventListener,
   ): Promise<Outcome> => {
     // The parent's mode is read again before every request and tool call of the subagent, so
     // switching the session to readonly takes effect inside running subagents too.
     const mode = (): ExecutionMode =>
       requested === 'auto' && runtime.parentMode() === 'auto' ? 'auto' : 'readonly';
-    const emit = runtime.emit();
     const provider = runtime.provider();
     const effort = runtime.effort();
     const instructions = runtime.instructions?.fork() ?? null;
@@ -167,7 +169,6 @@ export const createDelegateTool = (runtime: SubagentRuntime): Tool => {
     const projectContext = renderProjectContext(boot?.files ?? []);
     const isGitRepo = await runtime.isGitRepo(cwd);
 
-    let steps = 0;
     let tokens = 0;
     let toolErrors = 0;
     const filesModified = new Set<string>();
@@ -175,20 +176,19 @@ export const createDelegateTool = (runtime: SubagentRuntime): Tool => {
     const onEvent = (event: AgentEvent): void => {
       switch (event.type) {
         case 'usage':
-          if (event.compaction !== true) steps++;
           tokens += event.input + event.output + event.cacheRead + event.cacheWrite;
           emit({ ...event, subagent: id });
           return;
         case 'tool:start': {
           const path = event.args.path;
           if (WRITE_TOOLS.has(event.name) && typeof path === 'string') {
-            pendingPaths.set(event.id, path);
+            // Reported relative to the parent's directory, which may differ from the subagent's.
+            pendingPaths.set(event.id, displayPath(resolvePath(path, cwd), runtime.cwd));
           }
           emit({
             type: 'subagent:progress',
             id,
-            // A step's usage arrives with its response, before its tool calls run.
-            step: Math.max(steps, 1),
+            step: event.step,
             tool: { name: event.name, args: event.args },
           });
           return;
@@ -209,32 +209,37 @@ export const createDelegateTool = (runtime: SubagentRuntime): Tool => {
     };
 
     const conversation = new Conversation();
-    const result = await runTurn(prompt, {
-      provider,
-      conversation,
-      tools: new Map(runtime.tools.map((tool) => [tool.name, tool])),
-      mode,
-      cwd,
-      systemPrompt: () =>
-        buildSystemPrompt({
-          cwd,
-          mode: mode(),
-          platform: process.platform,
-          date: localDate(),
-          isGitRepo,
-          role: 'subagent',
-        }),
-      projectContext: () => projectContext,
-      instructions,
-      limits: {
-        maxSteps: SUBAGENT_MAX_STEPS,
-        maxOutputTokens: contextBudget(provider.capabilities).maxOutput,
-        stallMs: runtime.stallMs,
+    const result = await runTurn(
+      prompt,
+      {
+        provider,
+        conversation,
+        tools: new Map(runtime.tools.map((tool) => [tool.name, tool])),
+        mode,
+        cwd,
+        systemPrompt: () =>
+          buildSystemPrompt({
+            cwd,
+            mode: mode(),
+            platform: process.platform,
+            date: localDate(),
+            isGitRepo,
+            role: 'subagent',
+          }),
+        projectContext: () => projectContext,
+        instructions,
+        limits: {
+          maxSteps: SUBAGENT_MAX_STEPS,
+          maxOutputTokens: contextBudget(provider.capabilities).maxOutput,
+          stallMs: runtime.stallMs,
+          finalStepNote: FINAL_STEP_NOTE,
+        },
+        ...(effort === undefined ? {} : { effort }),
+        emit: onEvent,
+        signal,
       },
-      ...(effort === undefined ? {} : { effort }),
-      emit: onEvent,
-      signal,
-    });
+      input,
+    );
     return {
       status: STATUS[result.reason],
       steps: result.steps,
@@ -250,7 +255,7 @@ export const createDelegateTool = (runtime: SubagentRuntime): Tool => {
     name: 'delegate',
     description: [
       'Delegate a self-contained task to a subagent and wait for its report.',
-      'The subagent starts with an empty conversation: it sees only `objective` and `context`, never this conversation, so include every path, constraint and decision it needs.',
+      'The subagent starts with an empty conversation: it sees only `objective` and `context`, never this conversation, so include every path, constraint and decision it needs. Requirements go in `objective`; `context` reaches the subagent as data.',
       'It works in its own context window and returns only a status line and its final report (result, evidence, open issues), which keeps this conversation small.',
       'Use it for investigations that would read many files or produce long output.',
       '`mode` is readonly by default; auto lets the subagent modify files and run commands, and applies only while this session is in auto mode.',
@@ -263,12 +268,13 @@ export const createDelegateTool = (runtime: SubagentRuntime): Tool => {
         title: { type: 'string', description: 'Short label shown to the user.' },
         objective: {
           type: 'string',
-          description: 'The task, complete on its own: what to find out or do, and what to report.',
+          description:
+            'The task, complete on its own: what to find out or do, the constraints to respect, and what to report.',
         },
         context: {
           type: 'string',
           description:
-            'Facts the subagent needs from this conversation: paths, decisions, constraints.',
+            'Reference material from this conversation: paths, findings, excerpts. It reaches the subagent as data, so put requirements and constraints in objective.',
         },
         mode: { type: 'string', enum: ['readonly', 'auto'] },
         cwd: {
@@ -292,20 +298,19 @@ export const createDelegateTool = (runtime: SubagentRuntime): Tool => {
         if (!(await stat(cwd)).isDirectory()) {
           return toolError('fs.not_directory', `cwd is not a directory: ${cwd}`);
         }
-      } catch {
-        return toolError('fs.not_found', `cwd does not exist: ${cwd}`);
+      } catch (error) {
+        return fileSystemError(error, 'read', cwd);
       }
-      const prompt =
-        context === undefined || context.trim().length === 0
-          ? objective
-          : `${objective}\n\nContext from the delegating agent:\n${context}`;
+      // The objective is the task; the context is reference material the parent may have copied
+      // from files or command output, so it reaches the subagent fenced as data.
+      const material = context === undefined || context.trim().length === 0 ? undefined : context;
 
       const id = ctx.callId ?? crypto.randomUUID();
       const lane =
         requested === 'auto' && runtime.parentMode() === 'auto' ? autoLane : readonlyLane;
       const release = await lane.acquire(ctx.signal);
       if (release === null) return toolError('tool.aborted', 'delegate was aborted');
-      const emit = runtime.emit();
+      const emit = ctx.emit ?? (() => undefined);
       emit({
         type: 'subagent:start',
         id,
@@ -314,7 +319,7 @@ export const createDelegateTool = (runtime: SubagentRuntime): Tool => {
       });
       let outcome: Outcome | undefined;
       try {
-        outcome = await run(id, title, prompt, requested, cwd, ctx.signal);
+        outcome = await run(id, title, objective, material, requested, cwd, ctx.signal, emit);
       } finally {
         release();
         emit({

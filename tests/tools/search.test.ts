@@ -80,6 +80,29 @@ describe('listFiles', () => {
     expect(files.sort()).toEqual(['.gitmodules', 't.txt', 'tools/x/n.txt', 'vendor/lib/l.txt']);
   });
 
+  test("a directory that git does not ignore keeps git's list, even when it is empty", async () => {
+    const root = temp.create('search-only-ignored');
+    write(root, '.gitignore', '*.key\n');
+    write(root, 'config/prod.key', 'API_KEY=secret');
+    write(root, 'src/a.ts', 'code');
+    sh('git init -q -b main && git add .gitignore src && git commit -qm init', root);
+    const { files } = await listFiles(join(root, 'config'), new AbortController().signal);
+    expect(files).toEqual([]);
+    const found = await run(grepTool, { pattern: 'API_KEY', path: 'config' }, root);
+    expect(found.content).toBe('[grep: no matches in 0 files]');
+  });
+
+  test('outside a repository, hidden entries are skipped unless asked for by name', async () => {
+    const root = temp.create('search-hidden');
+    write(root, 'notes.txt', 'x');
+    write(root, '.env', 'KEY=1');
+    write(root, '.ssh/id_rsa', 'key');
+    write(root, '.config/tool/settings.json', '{}');
+    expect((await listFiles(root, new AbortController().signal)).files).toEqual(['notes.txt']);
+    const hidden = await listFiles(join(root, '.config'), new AbortController().signal);
+    expect(hidden.files).toEqual(['tool/settings.json']);
+  });
+
   test('outside a repository, .git and node_modules are skipped', async () => {
     const root = temp.create('search-plain');
     write(root, 'a/b/c.txt', 'x');

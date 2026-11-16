@@ -20,12 +20,12 @@ const MIN_TRUSTED_USAGE_RATIO = 0.5;
 export const AGENT_NOTE_OPEN = '<agent-note>';
 export const agentNote = (text: string): string => `${AGENT_NOTE_OPEN}${text}</agent-note>`;
 
-// Text the user supplied as material for a prompt (piped on stdin), kept in its own block after
-// the prompt and fenced as data. The fence value is known only to this process, so a block that
-// starts with it was made here.
-const PIPED_INPUT_TAG = 'stdin';
-const PIPED_INPUT_OPEN = `<${PIPED_INPUT_TAG} fence="${FENCE}">`;
-export const isPipedInput = (text: string): boolean => text.startsWith(PIPED_INPUT_OPEN);
+// Material supplied with a prompt (text piped on stdin, or the context a delegating agent passes
+// to a subagent), kept in its own block after the prompt and fenced as data. The fence value is
+// known only to this process, so a block that starts with it was made here.
+const INPUT_TAG = 'input';
+const INPUT_OPEN = `<${INPUT_TAG} fence="${FENCE}">`;
+export const isAttachedInput = (text: string): boolean => text.startsWith(INPUT_OPEN);
 
 export const interruptedResult = (toolUse: ProviderToolUseBlock): ProviderToolResultBlock => ({
   type: 'tool_result',
@@ -104,7 +104,7 @@ export class Conversation {
     const repairs = this.unansweredToolUses().map(interruptedResult);
     const added: ProviderContentBlock[] = [{ type: 'text', text }];
     if (input !== undefined && input.length > 0) {
-      added.push({ type: 'text', text: fenced(PIPED_INPUT_TAG, input) });
+      added.push({ type: 'text', text: fenced(INPUT_TAG, input) });
     }
     const last = this.history.at(-1);
     if (last?.role === 'user') {

@@ -50,6 +50,9 @@ export interface LoopLimits {
   stallMs: number;
   // Base delay before repeating a step that failed with a transient stream error.
   streamRetryDelayMs?: number;
+  // Added as a runtime note before the last step, so a turn that runs out of steps can still end
+  // with an answer instead of a tool call.
+  finalStepNote?: string;
 }
 
 export interface TurnDependencies {
@@ -203,6 +206,7 @@ const runProviderStep = async (
 const executeToolCalls = async (
   calls: readonly CollectedToolUse[],
   deps: TurnDependencies,
+  step: number,
 ): Promise<ProviderToolResultBlock[]> => {
   const { emit, signal } = deps;
   const results: ProviderToolResultBlock[] = [];
@@ -228,12 +232,13 @@ const executeToolCalls = async (
   };
   const runCall = async (call: CollectedToolUse): Promise<ProviderToolResultBlock> => {
     if (signal.aborted) return interruptedResult({ type: 'tool_use', ...call });
-    emit({ type: 'tool:start', id: call.id, name: call.name, args: call.input });
+    emit({ type: 'tool:start', id: call.id, name: call.name, args: call.input, step });
     const result = await executeToolCall(call, {
       tools: deps.tools,
       mode: deps.mode(),
       cwd: deps.cwd,
       signal,
+      emit,
       newInstructions: unseenBeforeWrite,
     });
     let content = result.content;
@@ -365,6 +370,9 @@ export const runTurn = async (
   while (steps < limits.maxSteps) {
     if (signal.aborted) return end('aborted');
     steps += 1;
+    if (steps === limits.maxSteps && steps > 1 && limits.finalStepNote !== undefined) {
+      conversation.appendUser(agentNote(limits.finalStepNote));
+    }
     const shape = promptShape(deps);
     const budget = contextBudget(deps.provider.capabilities);
     let estimate = conversation.estimateTokens(shape);
@@ -508,7 +516,7 @@ export const runTurn = async (
       return end('done');
     }
 
-    conversation.appendToolResults(await executeToolCalls(collected.tool_uses, deps));
+    conversation.appendToolResults(await executeToolCalls(collected.tool_uses, deps, steps));
     if (invalidCalls.length > 0) {
       emit({ type: 'warning', message: `invalid tool call: ${describeErrors(invalidCalls)}` });
       conversation.appendUser(invalidToolCallFeedback(invalidCalls));

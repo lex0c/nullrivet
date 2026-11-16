@@ -88,8 +88,6 @@ export const isInsideGitRepo = async (cwd: string): Promise<boolean> => {
 
 export const createAgent = async (options: AgentOptions): Promise<Agent> => {
   const conversation = new Conversation();
-  // Listener of the turn in progress, read by subagents started during it.
-  let currentEmit: AgentEventListener = () => undefined;
   const delegate =
     options.delegation === false
       ? []
@@ -98,7 +96,6 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
             provider: () => agent.provider,
             effort: () => agent.effort,
             parentMode: () => agent.mode,
-            emit: () => currentEmit,
             cwd: options.cwd,
             tools: options.tools,
             instructions: options.instructions,
@@ -124,6 +121,7 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
       platform: process.platform,
       date: localDate(),
       isGitRepo,
+      delegation: delegate.length > 0,
     });
   // Rendered when the instructions are loaded, not for every request.
   let projectContextText = renderProjectContext(bootInstructions);
@@ -200,7 +198,6 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
           ? undefined
           : setTimeout(() => deadline.abort(new TimeLimitReached(timeLimitMs ?? 0)), timeLimitMs);
       const signal = deadline === null ? external : AbortSignal.any([external, deadline.signal]);
-      currentEmit = runOptions.onEvent ?? (() => undefined);
       try {
         const limits: LoopLimits = {
           maxSteps: options.maxSteps ?? DEFAULT_MAX_STEPS,

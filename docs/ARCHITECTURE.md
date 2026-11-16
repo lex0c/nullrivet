@@ -169,7 +169,7 @@ When the estimate exceeds the trigger before a request (or on `/compact`):
    starts at a prompt when possible, or at an assistant message, never at tool results, which
    would lose the calls they answer. The latest exchange always stays.
 2. **Summary.** The older part is encoded as a JSON transcript, one entry per block: user text,
-   piped input, assistant text, tool call, tool result or runtime note (long text and large
+   attached input, assistant text, tool call, tool result or runtime note (long text and large
    arguments shortened). It is sent to the current model with the previous summary, asking for an
    updated one with fixed sections: goal, constraints, next steps, progress, errors, decisions,
    anchors (file:line, symbols, commands) and rejected approaches. Each compaction updates the
@@ -179,7 +179,10 @@ When the estimate exceeds the trigger before a request (or on `/compact`):
 3. **Deterministic sections.** The user's requests (verbatim, shortened when very long) and the
    files read and modified are derived by code and accumulated across compactions; a poor or
    failed summary cannot lose or invent them. Files are tracked from the `read_file`, `edit_file`
-   and `write_file` calls; files read or changed through `bash` are not listed.
+   and `write_file` calls; files read or changed through `bash` are not listed. A section the
+   updated summary leaves out entirely is carried over from the previous summary, marked as such,
+   so an omitted heading does not erase what earlier compactions recorded; a section kept as
+   "(none)" is the model's decision.
 4. **Assembly.** The summary becomes the first block of the first user message, followed by the
    kept tail. If the result is still above the target, tool results in the tail are shortened,
    except errors and the latest results.
@@ -265,14 +268,14 @@ is never placed where it would carry the authority of the rules or of the user.
   not followed and are reported to the user. Credentials found along the way are not printed or
   sent, and local data is not sent to external services, unless the user's request requires it.
 - **Fences.** Text embedded in a user turn is wrapped in a tag whose opening and closing carry a
-  value drawn at random when the process starts (`<stdin fence="…">` … `</stdin fence="…">`). The
+  value drawn at random when the process starts (`<input fence="…">` … `</input fence="…">`). The
   text cannot know the value, so it cannot end the block early. The value is fixed for the
   process, so prompts stay identical across requests for prompt caching.
 - **Summaries.** The summarizer receives the transcript as JSON, so a file or command output
-  cannot pose as a user message or end the transcript. Piped input gets its own role. The goal and
-  the constraints come from user entries only; instructions found in piped input or tool results
+  cannot pose as a user message or end the transcript. Attached input (piped stdin, a subagent's context) gets its own role. The goal and
+  the constraints come from user entries only; instructions found in attached input or tool results
   are recorded only as attributed observations. The verbatim list of the user's requests leaves
-  piped input out.
+  attached input out.
 - **Enforcement is in code.** The rules make injection less likely to succeed; they do not stop
   it. What a successful injection can do is bounded by the code: the execution mode is checked
   before every tool call, commands run without the agent's API keys, and the `git` tool and the
@@ -285,7 +288,8 @@ A subagent is a second run of the same loop (`runTurn`) inside the same process,
 run tests, and only its report comes back.
 
 - **Spawn, not fork.** The subagent gets a new `Conversation` with nothing from the parent: its
-  first message is the delegate call's objective and context. It has its own `InstructionsLoader`
+  first message is the delegate call's objective, followed by its context fenced as data, since
+  the parent may have copied that text from files. It has its own `InstructionsLoader`
   (a fork of the parent's settings with nothing loaded), so the `AGENTS.md` files of its starting
   directory reach it even when the parent already has them.
 - **Same model and tools.** It uses the parent's current model and effort, and the parent's tools
@@ -300,8 +304,9 @@ run tests, and only its report comes back.
   signal: an interrupt or the time limit stops it, and its commands' process groups are
   terminated like the parent's.
 - **Result.** A status line built by the runtime from what it observed (status, steps, tool
-  errors, tokens, files changed through `edit_file` and `write_file`), then the subagent's last
-  answer, reduced to 16 KiB. It enters the parent's conversation as one tool result, which is data
+  errors, tokens, files changed through `edit_file` and `write_file` relative to the session
+  directory, and why it stopped early), then the subagent's last answer, reduced to 16 KiB. Before
+  its last step, a runtime note asks for the report without more tool calls. It enters the parent's conversation as one tool result, which is data
   like any other.
 - **Events.** The subagent's own events are not forwarded: text from two agents would mix. The
   tool emits `subagent:start`, `subagent:progress` (step and current tool) and `subagent:end` with

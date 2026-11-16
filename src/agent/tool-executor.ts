@@ -3,6 +3,7 @@ import { stripAnsi } from '../sanitize/ansi.ts';
 import { InvalidArgumentError } from '../tools/args.ts';
 import { type ExecutionMode, isToolAllowed } from '../tools/policy.ts';
 import { type Tool, type ToolResult, toolError } from '../tools/types.ts';
+import type { AgentEventListener } from './events.ts';
 
 export interface ToolCall {
   id: string;
@@ -15,6 +16,7 @@ export interface ToolExecutionContext {
   mode: ExecutionMode;
   cwd: string;
   signal: AbortSignal;
+  emit?: AgentEventListener;
   // Returns what the model must read before a write to the paths: AGENTS.md files that govern
   // them and that it has not seen yet, or where in the current response they were attached. Null
   // when there are none.
@@ -60,6 +62,7 @@ export const executeToolCall = async (
       cwd: context.cwd,
       signal: context.signal,
       callId: call.id,
+      ...(context.emit === undefined ? {} : { emit: context.emit }),
     });
     return { ...result, content: stripAnsi(result.content) };
   } catch (error) {

@@ -61,7 +61,7 @@ describe('reduce', () => {
     const { state, permanent } = run([
       ev({ type: 'agent:start' }),
       ev({ type: 'text:delta', text: 'Let me check.' }),
-      ev({ type: 'tool:start', id: 't1', name: 'bash', args: { command: 'ls' } }, 100),
+      ev({ type: 'tool:start', id: 't1', name: 'bash', args: { command: 'ls' }, step: 1 }, 100),
     ]);
     expect(permanent).toEqual([{ kind: 'assistant', markdown: 'Let me check.' }]);
     expect(state.turn?.tools.map((t) => t.id)).toEqual(['t1']);
@@ -191,7 +191,7 @@ describe('subagents', () => {
   test('progress shows on the delegate card, and their usage does not move the context gauge', () => {
     const { state } = run([
       ev({ type: 'agent:start' }),
-      ev({ type: 'tool:start', id: 'd1', name: 'delegate', args: { title: 'scan' } }, 5),
+      ev({ type: 'tool:start', id: 'd1', name: 'delegate', args: { title: 'scan' }, step: 1 }, 5),
       ev({ type: 'subagent:start', id: 'd1', title: 'scan', mode: 'readonly' }, 6),
       ev(
         {

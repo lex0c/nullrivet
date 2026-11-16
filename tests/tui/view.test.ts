@@ -1,9 +1,10 @@
 import { describe, expect, test } from 'bun:test';
+import { formatTokens } from '../../src/format.ts';
 import { stripAnsi } from '../../src/sanitize/ansi.ts';
 import { formatPermanent } from '../../src/tui/permanent.ts';
 import { createInitialState, type TuiState } from '../../src/tui/state.ts';
 import type { Capabilities } from '../../src/tui/term.ts';
-import { composeLive, formatTokens } from '../../src/tui/view.ts';
+import { composeLive } from '../../src/tui/view.ts';
 
 const caps = (cols: number): Capabilities => ({
   isTTY: true,

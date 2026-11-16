@@ -1,3 +1,4 @@
+import { formatTokens } from '../format.ts';
 import { stripAnsi } from '../sanitize/ansi.ts';
 import { shortenCwd } from './render/cwd.ts';
 import { formatChipDuration } from './render/duration.ts';
@@ -22,12 +23,6 @@ const SPINNER_FRAME_MS = 80;
 export const spinner = (caps: Capabilities, now: number): string => {
   const frames = caps.unicode ? SPINNER_FRAMES : ASCII_SPINNER_FRAMES;
   return frames[Math.floor(now / SPINNER_FRAME_MS) % frames.length] ?? '*';
-};
-
-export const formatTokens = (n: number): string => {
-  if (n < 1_000) return String(n);
-  if (n < 1_000_000) return `${(n / 1_000).toFixed(n < 10_000 ? 1 : 0)}k`;
-  return `${(n / 1_000_000).toFixed(1)}M`;
 };
 
 const rule = (caps: Capabilities): string =>

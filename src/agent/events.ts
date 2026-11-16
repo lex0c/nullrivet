@@ -15,7 +15,8 @@ export type AgentEvent =
   | { type: 'agent:end'; reason: AgentEndReason; message?: string }
   | { type: 'text:delta'; text: string }
   | { type: 'thinking:delta'; text: string }
-  | { type: 'tool:start'; id: string; name: string; args: Record<string, unknown> }
+  // `step` counts the model requests of the turn that produced a response, retries excluded.
+  | { type: 'tool:start'; id: string; name: string; args: Record<string, unknown>; step: number }
   | {
       type: 'tool:end';
       id: string;

@@ -94,7 +94,7 @@ describe('piped input', () => {
     await agent.run('review this', { input: 'the diff' });
     expect(provider.calls[0]?.req.messages[0]?.content).toEqual([
       { type: 'text', text: 'review this' },
-      { type: 'text', text: `<stdin fence="${FENCE}">\nthe diff\n</stdin fence="${FENCE}">` },
+      { type: 'text', text: `<input fence="${FENCE}">\nthe diff\n</input fence="${FENCE}">` },
     ]);
   });
 });

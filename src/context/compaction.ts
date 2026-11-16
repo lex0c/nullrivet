@@ -1,4 +1,4 @@
-import { AGENT_NOTE_OPEN, isPipedInput, type SummaryState } from '../agent/conversation.ts';
+import { AGENT_NOTE_OPEN, isAttachedInput, type SummaryState } from '../agent/conversation.ts';
 import { contentBlocks, type ProviderMessage, type ProviderTextBlock } from '../providers/types.ts';
 import { estimateMessagesTokens } from './tokens.ts';
 
@@ -128,12 +128,12 @@ const mergeRecent = (previous: readonly string[], added: readonly string[]): str
 };
 
 // Requests typed by the user stay verbatim because they are short and are the strongest signal
-// of intent. Notes the agent added on its own and text piped in as material are not requests.
+// of intent. Notes the agent added on its own and material attached to a prompt are not requests.
 export const userRequestsIn = (span: readonly ProviderMessage[]): string[] =>
   span
     .filter((m) => m.role === 'user')
     .flatMap(textBlocks)
-    .filter((t) => !isPipedInput(t))
+    .filter((t) => !isAttachedInput(t))
     .map((t) => t.trim())
     .filter((t) => t.length > 0 && !t.startsWith(AGENT_NOTE_OPEN))
     .map((t) => clipMiddle(t, REQUEST_MAX_CHARS));
@@ -164,7 +164,7 @@ export const updateDeterministic = (
 // One entry of the transcript sent to the summarizer. Entries are encoded as JSON one by one, so
 // text inside a file or a command output cannot pose as another entry or end the transcript.
 export type TranscriptEntry =
-  | { role: 'user' | 'piped_input' | 'assistant' | 'runtime_note'; text: string }
+  | { role: 'user' | 'input' | 'assistant' | 'runtime_note'; text: string }
   | { role: 'tool_call'; tool: string; arguments: string }
   | { role: 'tool_result'; tool?: string; error?: true; content: string };
 
@@ -190,8 +190,8 @@ export const transcriptEntries = (message: ProviderMessage): TranscriptEntry[] =
           ? 'assistant'
           : block.text.startsWith(AGENT_NOTE_OPEN)
             ? 'runtime_note'
-            : isPipedInput(block.text)
-              ? 'piped_input'
+            : isAttachedInput(block.text)
+              ? 'input'
               : 'user';
       entries.push({ role, text: block.text });
     } else if (block.type === 'tool_use') {
@@ -260,12 +260,54 @@ export const transcriptChunks = (
   return chunks;
 };
 
+type SummarySection = (typeof SUMMARY_SECTIONS)[number];
+
+const CARRIED_MARK = 'from the previous summary';
+
+// A section heading at the start of a line, which may carry Markdown decoration (`**GOAL:**`,
+// `## GOAL`, `- GOAL`) and the mark of a carried-over section.
+const headingOf = (section: SummarySection): RegExp =>
+  new RegExp(`^[ \\t>#*_-]*${section}\\b(?: \\(${CARRIED_MARK}\\))?[^\\S\\n]*[*_]*:?[*_]*`, 'm');
+
 // A summary without the expected sections is treated as a failure (a refusal, an answer to the
 // transcript instead of a summary).
-// Headings may carry Markdown decoration (`**GOAL:**`, `## GOAL`, `- GOAL`).
 export const isUsableSummary = (text: string): boolean =>
-  SUMMARY_SECTIONS.filter((section) => new RegExp(`^[ \\t>#*_-]*${section}\\b`, 'm').test(text))
-    .length >= 3;
+  SUMMARY_SECTIONS.filter((section) => headingOf(section).test(text)).length >= 3;
+
+// The text under each section heading found in a summary, up to the next heading.
+export const summarySections = (text: string): Map<SummarySection, string> => {
+  const found: { section: SummarySection; start: number; bodyStart: number }[] = [];
+  for (const section of SUMMARY_SECTIONS) {
+    const match = headingOf(section).exec(text);
+    if (match !== null) {
+      found.push({ section, start: match.index, bodyStart: match.index + match[0].length });
+    }
+  }
+  found.sort((a, b) => a.start - b.start);
+  const sections = new Map<SummarySection, string>();
+  for (const [i, entry] of found.entries()) {
+    const end = found[i + 1]?.start ?? text.length;
+    sections.set(entry.section, text.slice(entry.bodyStart, end).trim());
+  }
+  return sections;
+};
+
+const hasContent = (body: string | undefined): body is string =>
+  body !== undefined && !/^\(?none\)?\.?$/i.test(body) && body.length > 0;
+
+// The summary is cumulative: each update must keep what earlier ones recorded. A section the
+// update left out entirely (a format slip, not a decision) is carried over from the previous
+// summary, marked as such. A section the update kept, even as "(none)", is its decision.
+export const withOmittedSections = (updated: string, previous: string): string => {
+  if (previous.trim().length === 0) return updated;
+  const now = summarySections(updated);
+  const before = summarySections(previous);
+  const carried = SUMMARY_SECTIONS.flatMap((section) => {
+    const body = before.get(section);
+    return now.has(section) || !hasContent(body) ? [] : [`${section} (${CARRIED_MARK}):\n${body}`];
+  });
+  return carried.length === 0 ? updated : `${updated.trimEnd()}\n\n${carried.join('\n\n')}`;
+};
 
 const list = (items: readonly string[]): string =>
   items.length === 0 ? '(none)' : items.join(', ');

@@ -73,8 +73,8 @@ nullrivet [options] [prompt...]
 
 Without a prompt, in a terminal, nullrivet starts an [interactive session](#interactive-session).
 With a prompt, it runs one task and exits. The prompt is the concatenation of the positional
-arguments. Text piped on stdin is appended to it inside a `<stdin>` block, or becomes the prompt
-when no argument is given:
+arguments. Text piped on stdin is sent after the prompt as material it refers to, in a fenced
+block that the agent treats as data, or becomes the prompt when no argument is given:
 
 ```bash
 git diff | nullrivet "Review this change for bugs"
@@ -280,7 +280,7 @@ nullrivet --json --permission readonly "List the TODOs in src" | jq -c 'select(.
 | `agent:start` | — |
 | `text:delta` | `text` |
 | `thinking:delta` | `text` |
-| `tool:start` | `id`, `name`, `args` |
+| `tool:start` | `id`, `name`, `args`, `step` (the model request of the turn that made the call) |
 | `tool:end` | `id`, `name`, `content`, `isError`, `meta` |
 | `usage` | `input`, `output`, `cacheRead`, `cacheWrite` (tokens of one model request); `compaction: true` for a summary request; `subagent` (the delegate call id) for a subagent's request |
 | `context:compact:start` | `reason` (`auto`, `manual`, `overflow`) |

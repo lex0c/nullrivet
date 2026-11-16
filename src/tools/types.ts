@@ -1,3 +1,4 @@
+import type { AgentEventListener } from '../agent/events.ts';
 import type { ProviderToolInputSchema } from '../providers/types.ts';
 
 // `read` tools have no side effects and are the only ones exposed in readonly mode.
@@ -8,6 +9,8 @@ export interface ToolContext {
   signal: AbortSignal;
   // Id of the tool call being executed, when it comes from the model.
   callId?: string;
+  // Listener of the turn the call belongs to, for tools that report progress of their own.
+  emit?: AgentEventListener;
 }
 
 export interface ToolResult {

@@ -102,6 +102,19 @@ describe('compactConversation', () => {
     expect(head.match(/\[compacted_history\]/g)).toHaveLength(1);
   });
 
+  test('a section the second summary omits keeps what the first one recorded', async () => {
+    const conversation = filled();
+    await run(conversation, summaries());
+    for (let i = 6; i < 10; i++) {
+      conversation.appendUser(`request ${i} ${'p'.repeat(500)}`);
+      conversation.appendAssistant([{ type: 'text', text: `answer ${i} ${'a'.repeat(8_000)}` }]);
+    }
+    await run(conversation, summaries('GOAL:\nfix the parser\nNEXT:\nmore tests\nERRORS:\n(none)'));
+    expect(conversation.summary()?.llmSummary).toContain(
+      'DECISIONS (from the previous summary):\nkeep API',
+    );
+  });
+
   test('passes the focus requested with /compact', async () => {
     const { provider } = await run(filled(), summaries(), { instructions: 'the parser' });
     const request = provider.calls[0]?.req.messages[0]?.content;

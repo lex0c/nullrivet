@@ -1,6 +1,7 @@
 import { homedir } from 'node:os';
 import type { Agent } from '../agent/agent.ts';
 import { errorMessage } from '../errors.ts';
+import { formatTokens } from '../format.ts';
 import type { ResolveResult } from '../providers/resolve.ts';
 import { applyKey, type InputState } from '../tui/input-editor.ts';
 import { createKeyParser, type KeyEvent } from '../tui/keys.ts';
@@ -23,7 +24,7 @@ import {
   enableModifyOtherKeys,
   enableRawMode,
 } from '../tui/term.ts';
-import { composeLive, formatTokens } from '../tui/view.ts';
+import { composeLive } from '../tui/view.ts';
 import { findCommand, parseSlash, runSlash, type SlashContext, suggestCommands } from './slash.ts';
 
 // A lone ESC byte is ambiguous until no continuation arrives: it is either the Escape key or the
