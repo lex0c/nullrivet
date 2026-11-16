@@ -23,7 +23,7 @@ nothing of the session remains except the changes the tools made on purpose.
 
 ## Requirements
 
-- [Bun](https://bun.sh) 1.1.30 or newer
+- [Bun](https://bun.sh) 1.4.4 or newer (the version CI runs on)
 - Linux (macOS is untested)
 - `bash` and `git` on `PATH`
 - An API key for one of the supported providers (Anthropic, OpenAI, OpenRouter, Ollama Cloud), or
