@@ -9,6 +9,17 @@ import { type Tool, type ToolResult, toolError } from './types.ts';
 
 const SEARCH_TIMEOUT_MS = 60_000;
 
+// From source, the worker module sits next to this file. In a compiled binary, import.meta.url
+// names the executable, and the build embeds the worker entry point under the executable's virtual
+// root by its path relative to src/. The URL is absolute in both cases: a relative specifier that
+// is not embedded would be looked up in the working directory, where a repository could place a
+// file of that name.
+const COMPILED_ROOT = 'file:///$bunfs/';
+const workerUrl = (): URL =>
+  import.meta.url.startsWith(COMPILED_ROOT)
+    ? new URL('./tools/grep-worker.ts', import.meta.url)
+    : new URL('./grep-worker.ts', import.meta.url);
+
 const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const compilePattern = (pattern: string, literal: boolean, ignoreCase: boolean): RegExp => {
@@ -33,7 +44,7 @@ const runSearch = (request: SearchRequest, signal: AbortSignal): Promise<SearchO
       resolve('aborted');
       return;
     }
-    const worker = new Worker(new URL('./grep-worker.ts', import.meta.url));
+    const worker = new Worker(workerUrl());
     let settled = false;
     const settle = (outcome: SearchOutcome): void => {
       if (settled) return;

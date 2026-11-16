@@ -1,4 +1,4 @@
-#!/usr/bin/env -S bun --no-env-file
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
 import { runCli } from './cli/run.ts';
 import { BoundedCapture } from './context/bounded-capture.ts';
 import { killAllProcessGroups } from './tools/process.ts';

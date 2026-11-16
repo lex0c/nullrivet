@@ -23,28 +23,50 @@ nothing of the session remains except the changes the tools made on purpose.
 
 ## Requirements
 
-- [Bun](https://bun.sh) 1.4.4 or newer (the version CI runs on)
 - Linux (macOS is untested)
 - `bash` and `git` on `PATH`
+- To run from source only: [Bun](https://bun.sh) 1.4.4 or newer (the version CI runs on)
 - An API key for one of the supported providers (Anthropic, OpenAI, OpenRouter, Ollama Cloud), or
   a local [Ollama](https://ollama.com) server
 
 ## Installation
 
-nullrivet runs from source:
+Download the executable for your platform from the
+[latest release](https://github.com/lex0c/nullrivet/releases/latest):
+
+| Platform | File |
+|---|---|
+| Linux x64 | `nullrivet-linux-x64` |
+| Linux arm64 | `nullrivet-linux-arm64` |
+| macOS, Apple silicon (untested) | `nullrivet-darwin-arm64` |
+| macOS, Intel (untested) | `nullrivet-darwin-x64` |
+
+```bash
+curl -fsSLO https://github.com/lex0c/nullrivet/releases/latest/download/nullrivet-linux-x64
+curl -fsSLO https://github.com/lex0c/nullrivet/releases/latest/download/SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
+chmod +x nullrivet-linux-x64
+mv nullrivet-linux-x64 ~/.local/bin/nullrivet
+```
+
+The executable includes the Bun runtime, so nothing else needs to be installed. It does not load
+`.env` or `bunfig.toml` from the directory it runs in, so running nullrivet inside a project never
+picks up that project's settings or runs its code. Credentials come from the environment you start
+it in.
+
+### From source
 
 ```bash
 git clone https://github.com/lex0c/nullrivet.git
 cd nullrivet
 bun install
+bun run build                      # dist/nullrivet, for this machine
 
-# Optional: put the executable on PATH
+# Or run the sources directly
 ln -s "$PWD/src/main.ts" ~/.local/bin/nullrivet
 ```
 
-The executable starts Bun with automatic `.env` loading disabled, so running nullrivet inside a
-project never picks up that project's `.env`. Credentials come from the environment you start it
-in.
+`src/main.ts` starts Bun with `--no-env-file` and `--config=/dev/null` for the same reason.
 
 ## Quick start
 
@@ -312,6 +334,7 @@ bun test             # tests
 bun run typecheck    # tsc --noEmit
 bun run lint         # Biome
 bun run check        # all of the above
+bun run build        # standalone executable in dist/
 bun run start --model <id> "<prompt>"
 ```
 
