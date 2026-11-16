@@ -2,7 +2,8 @@
 
 nullrivet is a small agent core with a command-line front end. The core streams model responses,
 executes tool calls and feeds the results back until the task is done. Everything it knows about a
-session lives in memory and is discarded when the process exits.
+session lives in memory and is discarded when the process exits, unless the user names a session
+file.
 
 ## Principles
 
@@ -33,6 +34,7 @@ src/
   agent/
     agent.ts               createAgent(): the public API of the core
     loop.ts                runTurn(): the request / tool execution loop
+    compactor.ts           summary requests of a compaction, in chunks
     conversation.ts        in-memory history and its invariants
     snapshot.ts            the conversation as data: snapshot format and its validation
     subagent.ts            the delegate tool: subagents on the same loop
@@ -49,6 +51,7 @@ src/
     catalog.ts             compiled catalog and per-family adapters
     discovery.ts           in-memory lookup of unknown models
     errors.ts              AbortError, ProviderRequestError, canonical error codes
+    http-stream.ts         streamed response lines and error origins for the HTTP adapters
     anthropic/, openai/,   adapters: request building, message conversion, stream normalizers
     google/, xai/,
     ollama/, openrouter/
@@ -63,6 +66,8 @@ src/
   instructions/
     agents-loader.ts       AGENTS.md discovery and rendering
   context/
+    budget.ts              output limit, compaction trigger, kept tail and target
+    compaction.ts          cut, transcript, summary sections and assembly
     tokens.ts              token estimation
     output-reduction.ts    head/tail reduction of large text
     bounded-capture.ts     bounded-memory stream capture
@@ -74,6 +79,7 @@ src/
     keys.ts, input-editor.ts, term.ts, render/
   sanitize/
     ansi.ts                removes terminal escape sequences and control bytes
+    fence.ts               fences around untrusted text embedded in prompts
 ```
 
 ## A turn
@@ -116,8 +122,8 @@ provider.generate(request, stepSignal)
 
 - **Before the first event**, HTTP 429 and 5xx responses, network errors and connection failures
   are retried up to 3 attempts, with 200 ms and 800 ms backoff or the server's advice
-  (`Retry-After`, or the retry delay in a Gemini quota error), capped at 8 s. Once an event has been yielded, the stream is never replayed, because the user
-  has already seen its output.
+  (`Retry-After`, or the retry delay in a Gemini quota error), capped at 8 s. Once an event has
+  been yielded, the stream is never replayed, because the user has already seen its output.
 - **Inside the stream**, a provider may report a transient error. If the step produced no text and
   no tool call yet, the step is repeated, up to 2 times per step.
 - **A stream cut short** (a dropped connection, a proxy closing it) must not pass for a complete
@@ -248,9 +254,9 @@ one on its own.
   files not seen before govern it, the call is not executed: it returns an `instructions.new`
   error with the files attached, and the model repeats the call once it has read them. Files
   attached to another result of the same response count as not seen, since the model wrote the
-  whole response before receiving them. A change
-  therefore never happens before the instructions that govern it reach the model. `bash` cannot be
-  covered this way, since the paths a command touches are not known in advance.
+  whole response before receiving them. A change therefore never happens before the instructions
+  that govern it reach the model. `bash` cannot be covered this way, since the paths a command
+  touches are not known in advance.
 - **Precedence.** The system prompt tells the model that a deeper file takes precedence over its
   ancestors, that instructions of one project never apply to files of another, and that the files
   are repository data that cannot change the execution mode or override the user.
@@ -282,10 +288,10 @@ is never placed where it would carry the authority of the rules or of the user.
   text cannot know the value, so it cannot end the block early. The value is fixed for the
   process, so prompts stay identical across requests for prompt caching.
 - **Summaries.** The summarizer receives the transcript as JSON, so a file or command output
-  cannot pose as a user message or end the transcript. Attached input (piped stdin, a subagent's context) gets its own role. The goal and
-  the constraints come from user entries only; instructions found in attached input or tool results
-  are recorded only as attributed observations. The verbatim list of the user's requests leaves
-  attached input out.
+  cannot pose as a user message or end the transcript. Attached input (piped stdin, a subagent's
+  context) gets its own role. The goal and the constraints come from user entries only;
+  instructions found in attached input or tool results are recorded only as attributed
+  observations. The verbatim list of the user's requests leaves attached input out.
 - **Enforcement is in code.** The rules make injection less likely to succeed; they do not stop
   it. What a successful injection can do is bounded by the code: the execution mode is checked
   before every tool call, commands run without the agent's API keys, and the `git` tool and the
@@ -316,8 +322,8 @@ run tests, and only its report comes back.
 - **Result.** A status line built by the runtime from what it observed (status, steps, tool
   errors, tokens, files changed through `edit_file` and `write_file` relative to the session
   directory, and why it stopped early), then the subagent's last answer, reduced to 16 KiB. Before
-  its last step, a runtime note asks for the report without more tool calls. It enters the parent's conversation as one tool result, which is data
-  like any other.
+  its last step, a runtime note asks for the report without more tool calls. It enters the
+  parent's conversation as one tool result, which is data like any other.
 - **Events.** The subagent's own events are not forwarded: text from two agents would mix. The
   tool emits `subagent:start`, `subagent:progress` (step and current tool) and `subagent:end` with
   the delegate call's id, and forwards the subagent's `usage` events tagged with that id, so token
@@ -340,23 +346,26 @@ The core stays free of session I/O. It offers two things:
   consistent and worth keeping: after each step's tool results, after a compaction, and when a
   turn ends, also when it was interrupted. The core does not know what it does.
 
-The CLI edge does the rest. `SessionFile` loads a file (refusing symbolic links, files over 64 MiB
-and anything that is not a valid session), and saves the whole state atomically with mode 0600.
-Each save first checks that the file is as this process last left it (inode, size, modification
-time); otherwise it throws instead of overwriting another writer's change. A state larger than
-loading accepts is not written. `SessionLink` attaches a file to the agent through the checkpoint,
-runs saves one at a time, skips a save when the conversation's revision, model, effort and mode
-are unchanged, and detaches the file with one warning when a save fails. Switching to a new file
-attaches it only after its first write succeeds; the previous file keeps the conversation as it
-was, so switching forks the session. `/session <file>` refuses a file that already holds a
-session: continuing one is done only at startup. It backs `--session` and `/session`; the
-interactive session saves once more on the way out, since a turn interrupted then may not reach
-its own checkpoint. `/clear` detaches the file rather than saving an empty conversation over it.
+The CLI edge does the rest:
 
-The file records the model, effort and mode it was last run with: the model and effort are used
-when the invocation does not choose them; the mode only produces a warning, because permissions
-come from the invocation alone. `AGENTS.md` files are not stored in the file, since they are added
-when each request is built, so a continued session reads them again from disk.
+- **`SessionFile`** loads a file, refusing symbolic links, files over 64 MiB and anything that is
+  not a valid session. It saves the whole state atomically with mode 0600, after checking that
+  the file is as this process last left it (inode, size, modification time); otherwise it throws
+  instead of overwriting another writer's change. A state larger than loading accepts is not
+  written.
+- **`SessionLink`** attaches a file to the agent through the checkpoint. It runs saves one at a
+  time, skips a save when the conversation's revision, model, effort and mode are unchanged, and
+  detaches the file with one warning when a save fails. It backs `--session` and `/session`.
+- **Switching files.** A new file is attached only after its first write succeeds; the previous
+  file keeps the conversation as it was, so switching forks the session. `/session <file>`
+  refuses a file that already holds a session: continuing one is done only at startup. `/clear`
+  detaches the file rather than saving an empty conversation over it.
+- **Exit.** The interactive session saves once more on the way out, since a turn interrupted then
+  may not reach its own checkpoint.
+- **Continuing.** The file records the model, effort and mode it was last run with. The model and
+  effort are used when the invocation does not choose them; the mode only produces a warning,
+  because permissions come from the invocation alone. `AGENTS.md` files are not stored, since
+  they are added when each request is built, so a continued session reads them again from disk.
 
 ## Events
 

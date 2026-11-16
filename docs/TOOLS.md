@@ -212,9 +212,8 @@ refuse to run.
 `status` would also refresh and rewrite the index; `GIT_OPTIONAL_LOCKS=0` prevents that, so the
 tool writes nothing to `.git`.
 
-The test suite runs every subcommand against a repository configured with hooks that create a
-marker file. It also checks that plain git does create the marker in that repository, and that
-the tool never does.
+Tests run every subcommand against a repository whose hooks create a marker file, and check that
+plain git creates it and the tool does not.
 
 ### Output and limits
 
@@ -243,8 +242,9 @@ Hands a self-contained task to a subagent and returns its report.
   the calls.
 - **Limits.** 40 steps per subagent. Before the last one, a runtime note asks the subagent to
   write its report without calling more tools, so a subagent that runs out of steps still reports
-  what it found. The report is reduced to 16 KiB (about 4,096 tokens), keeping its start and end. There is no time limit of its own: the session's `--timeout`, the
-  stall watchdog and interrupts apply.
+  what it found. The report is reduced to 16 KiB (about 4,096 tokens), keeping its start and end.
+  There is no time limit of its own: the session's `--timeout`, the stall watchdog and interrupts
+  apply.
 - **Result.** A status line written by the runtime (`completed`, `failed`, `cancelled` or
   `budget`, steps, tool errors, tokens, and files changed through `edit_file` and `write_file`),
   followed by the subagent's final reply. When the subagent stopped early, the status line says

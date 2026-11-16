@@ -20,7 +20,7 @@ const exists = async (abs: string): Promise<boolean> => {
 export const globTool: Tool = {
   name: 'glob',
   description:
-    'Find files by path pattern. Returns the files under `path` (default: the working directory) that match `pattern`, sorted, one per line. A pattern without "/" matches file names at any depth ("*.ts", "README*"); a pattern with "/" matches the path relative to `path` ("src/**/*.test.ts"). Supports *, **, ?, [abc] and {a,b}. Inside a git repository, files ignored by git are left out; elsewhere, .git and node_modules directories are skipped. Returns at most 500 paths.',
+    'Find files by path pattern. Returns the files under `path` (default: the working directory) that match `pattern`, sorted, one per line. A pattern without "/" matches file names at any depth ("*.ts", "README*"); a pattern with "/" matches the path relative to `path` ("src/**/*.test.ts"). Supports *, **, ?, [abc] and {a,b}. Inside a git repository, files ignored by git are left out; elsewhere, hidden entries and node_modules are skipped. Returns at most 500 paths.',
   inputSchema: {
     type: 'object',
     properties: {

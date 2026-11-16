@@ -65,7 +65,7 @@ const runSearch = (request: SearchRequest, signal: AbortSignal): Promise<SearchO
 export const grepTool: Tool = {
   name: 'grep',
   description:
-    'Search file contents with a regular expression (JavaScript syntax), line by line. Returns the matching lines as "path:line: text", with 1-based line numbers. `path` is a file or a directory (default: the working directory); `glob` limits a directory search to matching files, with the same rules as the glob tool. Inside a git repository, files ignored by git are skipped; binary files and files over 10 MiB are always skipped. Set `literal` to search for the text as is. Lines are cut at 500 characters. Returns at most 200 matches.',
+    'Search file contents with a regular expression (JavaScript syntax), line by line. Returns the matching lines as "path:line: text", with 1-based line numbers. `path` is a file or a directory (default: the working directory); `glob` limits a directory search to matching files, with the same rules as the glob tool. Inside a git repository, files ignored by git are skipped; elsewhere, hidden entries and node_modules are skipped; binary files and files over 10 MiB are always skipped. Set `literal` to search for the text as is. Lines are cut at 500 characters. Returns at most 200 matches.',
   inputSchema: {
     type: 'object',
     properties: {
