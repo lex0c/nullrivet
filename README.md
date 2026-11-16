@@ -1,19 +1,13 @@
 # Nullrivet
 
-Ephemeral AI agent for the terminal.
+Ephemeral AI agent for the terminal. It carries out programming tasks, and security work in
+environments you are authorized to test, by reading and editing files, running commands and
+inspecting git repositories.
 
-nullrivet carries out programming tasks, and security work in environments you are authorized to
-test, by reading and editing files, running commands and inspecting git repositories. The
-conversation lives only in memory: nullrivet writes no files of its own, and when the process exits,
-nothing of the session remains except the changes the tools made on purpose.
-
-> **Status:** early development. The interactive session and the one-shot mode work end to end,
-> long conversations are compacted automatically, and Anthropic, OpenAI, Google (Gemini), xAI
-> (Grok), Ollama and OpenRouter models are supported.
-
-- **Ephemeral.** No database, history, logs, caches or configuration files. A conversation is
-  saved only to a file you name with `--session`. See
-  [What nullrivet does not store](#what-nullrivet-does-not-store).
+- **Ephemeral.** The conversation lives in memory. nullrivet writes no database, history, logs,
+  caches or configuration; a conversation is saved only to a file you name with
+  [`--session`](#sessions). Commands the agent runs and the model provider may keep their own
+  records.
 - **Two execution modes.** `auto` runs every tool without confirmation; `readonly` exposes only
   read tools and is enforced by the executor, not just by the prompt.
 - **Not confined to a directory.** `--cwd` is only the starting point. Tools can reach any path the
@@ -26,9 +20,8 @@ nothing of the session remains except the changes the tools made on purpose.
 
 - Linux or macOS
 - `bash` and `git` on `PATH`
-- To run from source only: [Bun](https://bun.sh) 1.4.4 or newer (the version CI runs on)
-- An API key for one of the supported providers (Anthropic, OpenAI, OpenRouter, Ollama Cloud), or
-  a local [Ollama](https://ollama.com) server
+- An API key for a [supported provider](#models), or a local [Ollama](https://ollama.com) server
+- [Bun](https://bun.sh) 1.4.4 or newer, to run from source
 
 ## Installation
 
@@ -42,8 +35,6 @@ Download the executable for your platform from the
 | macOS, Apple silicon | `nullrivet-darwin-arm64` |
 | macOS, Intel | `nullrivet-darwin-x64` |
 
-Each executable is tested on its own platform before a release is published.
-
 ```bash
 curl -fsSLO https://github.com/lex0c/nullrivet/releases/latest/download/nullrivet-linux-x64
 curl -fsSLO https://github.com/lex0c/nullrivet/releases/latest/download/SHA256SUMS
@@ -52,24 +43,19 @@ chmod +x nullrivet-linux-x64
 mv nullrivet-linux-x64 ~/.local/bin/nullrivet
 ```
 
-The executable includes the Bun runtime, so nothing else needs to be installed. It does not load
-`.env` or `bunfig.toml` from the directory it runs in, so running nullrivet inside a project never
-picks up that project's settings or runs its code. Credentials come from the environment you start
-it in.
-
-### From source
+From source:
 
 ```bash
 git clone https://github.com/lex0c/nullrivet.git
 cd nullrivet
 bun install
 bun run build                      # dist/nullrivet, for this machine
-
-# Or run the sources directly
-ln -s "$PWD/src/main.ts" ~/.local/bin/nullrivet
+ln -s "$PWD/src/main.ts" ~/.local/bin/nullrivet   # or run the sources directly
 ```
 
-`src/main.ts` starts Bun with `--no-env-file` and `--config=/dev/null` for the same reason.
+The executable includes the Bun runtime. Neither it nor the sources load `.env` or `bunfig.toml`
+from the directory nullrivet runs in, so a project cannot configure it or run code in it.
+Credentials come from the environment.
 
 ## Quick start
 
@@ -87,9 +73,6 @@ nullrivet --permission readonly "Summarize the last commits and what changed"
 nullrivet "The test suite is failing. Find the cause, fix it, and make sure the tests pass."
 ```
 
-From the repository, `bun run start [options] [prompt]` does the same and also loads the
-repository's own `.env`, which is convenient during development.
-
 ## Usage
 
 ```
@@ -97,17 +80,16 @@ nullrivet [options] [prompt...]
 ```
 
 Without a prompt, in a terminal, nullrivet starts an [interactive session](#interactive-session).
-With a prompt, it runs one task and exits. The prompt is the concatenation of the positional
-arguments. Text piped on stdin is sent after the prompt as material it refers to, in a fenced
-block that the agent treats as data, or becomes the prompt when no argument is given:
+With a prompt, it runs one task and exits. Piped stdin is attached to the prompt as data, or
+becomes the prompt when no argument is given:
 
 ```bash
 git diff | nullrivet "Review this change for bugs"
 journalctl -u app --since today | nullrivet "Why does the service restart?"
 ```
 
-Large stdin input is reduced to its first and last lines. When stdin is not a terminal, nullrivet
-reads it until end of file, so programs that start nullrivet without piping anything should pass
+Large input is reduced to its first and last lines. When stdin is not a terminal, nullrivet reads
+it until end of file, so programs that start nullrivet without piping anything should pass
 `</dev/null`.
 
 ### Options
@@ -121,7 +103,7 @@ reads it until end of file, so programs that start nullrivet without piping anyt
 | `--json` | Emit agent events as NDJSON on stdout. |
 | `--no-agents` | Do not load `AGENTS.md` files. |
 | `--max-steps <n>` | Maximum number of model requests for the task (default 200). |
-| `--timeout <time>` | Time limit for the task: `90s`, `30m`, `2h`, or seconds without a unit, at most `596h`. When it passes, the task is stopped like an interrupt and ends at a limit (exit code 3). No limit by default. |
+| `--timeout <time>` | Time limit for the task: `90s`, `30m`, `2h`, or seconds without a unit, at most `596h`. Exit code 3 when reached. No limit by default. |
 | `--session <file>` | Save the conversation to this file and continue it if the file already holds one. See [Sessions](#sessions). |
 | `--context-window <n>` | Override the model's context window, in tokens. |
 | `--max-output <n>` | Override the model's output token limit. |
@@ -159,43 +141,29 @@ Provider-specific settings are listed in [docs/MODELS.md](docs/MODELS.md).
 | `3` | A limit was reached: step limit, time limit, output limit, or the conversation no longer fits the context window. |
 | `130` | Interrupted. |
 
-### Interrupting
-
-In one-shot mode, the first `Ctrl+C` aborts the task: the running command and every process it
-started are terminated, and nullrivet exits with code 130. A second `Ctrl+C` exits immediately.
-In an interactive session, see [Keys](#keys).
+In one-shot mode, `Ctrl+C` aborts the task, terminates every process it started and exits with
+code 130; a second `Ctrl+C` exits immediately.
 
 ## Interactive session
 
-`nullrivet` with no prompt opens a session in the terminal. The conversation is kept in memory
-between prompts until `/clear` or until you exit; to keep it beyond that, save it to a file (see
-[Sessions](#sessions)). Finished output (your prompts, answers, tool
-results) goes to the terminal's normal scrollback; only the task in progress, the input box and
-the status line are redrawn at the bottom. Answers are rendered as Markdown while they stream.
-
-The status line shows the execution mode, the model, how much of the context window the last
-request used, and the tokens used in the session. When the conversation grows past about 70% of
-the window, its older part is summarized and the recent part kept verbatim; your requests and the
-files touched are always kept. See
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#context-management).
+`nullrivet` without a prompt keeps one conversation between prompts until `/clear` or exit; to
+keep it longer, see [Sessions](#sessions). Finished output stays in the terminal's scrollback, and
+the status line shows the execution mode, the model, the share of the context window in use and
+the tokens spent. The older part of a long conversation is summarized automatically
+([context management](docs/ARCHITECTURE.md#context-management)). The interface is described in
+[docs/TUI.md](docs/TUI.md).
 
 ### Keys
 
 | Key | Action |
 |---|---|
 | `Enter` | Send the prompt (or run the selected command). |
-| `Shift+Enter`, `Alt+Enter`, `\` then `Enter` | Insert a newline. |
+| `Shift+Enter`, `Alt+Enter`, `\` then `Enter` | Insert a newline (`Shift+Enter` only in terminals that report it). |
 | `Esc` or `Ctrl+C` while a task runs | Interrupt the task; running commands are terminated. A second `Ctrl+C` exits if the task does not stop. |
 | `Ctrl+C` on a non-empty prompt | Clear the prompt. |
 | `Ctrl+C` twice on an empty prompt | Exit (code 130). |
 | `Ctrl+D` on an empty prompt | Exit (code 0). |
 | `Tab`, `↑`/`↓` | Complete and choose in the command list. |
-
-`Shift+Enter` needs a terminal that reports it separately from `Enter` (xterm, kitty, WezTerm,
-iTerm2 and others with the extended keyboard protocol enabled). Where it does not, use
-`Alt+Enter` or `\` followed by `Enter`.
-
-While a task runs you can type the next prompt, but it can only be sent once the task ends.
 
 ### Commands
 
@@ -212,31 +180,19 @@ While a task runs you can type the next prompt, but it can only be sent once the
 | `/session [file\|off]` | Show the session file, start saving to a new file, or stop saving. See [Sessions](#sessions). |
 | `/exit` | Exit. |
 
-`/model`, `/compact`, `/clear` and `/session` cannot be used while a task runs. An unknown command is not sent anywhere
-and stays in the input; to send text that starts with `/` as a prompt, begin it with a space. How the interface works is described in
-[docs/TUI.md](docs/TUI.md).
+`/model`, `/compact`, `/clear` and `/session` cannot be used while a task runs. An unknown command
+is not sent; to send a prompt that starts with `/`, begin it with a space.
 
 ## Models
 
-A model id is `<family>/<model>`, for example `anthropic/claude-sonnet-5-5`, `openai/gpt-5.4`,
-`google/gemini-3.5-flash`, `xai/grok-4.5`, `ollama/qwen3-coder:480b` or
-`openrouter/deepseek/deepseek-v4-flash`. OpenRouter model names contain slashes themselves, so the
-family is everything before the first `/`.
+A model id is `<family>/<model>`: `anthropic/claude-sonnet-5-5`, `openai/gpt-5.4`,
+`google/gemini-3.5-flash`, `xai/grok-4.5`, `ollama/qwen3-coder:480b`,
+`openrouter/deepseek/deepseek-v4-flash`. The family is everything before the first `/`.
 
-There is no catalog file. A model is resolved, in order, from:
-
-1. **the compiled catalog**, which holds curated capabilities for a few models;
-2. **discovery**, which asks the provider about the model (context window, output limit, tool and
-   reasoning support) and keeps the answer in memory for the session; Anthropic, OpenRouter and
-   Ollama support it;
-3. **conservative defaults** (32,768-token window, 8,192 output tokens), with a warning.
-
-Models without tool calling are rejected. Free OpenRouter models (`:free`) are used like any
-other model. OpenRouter can withdraw a free route at any time and applies stricter rate limits to
-free routes, and some free endpoints may record prompts; each model's page on OpenRouter states
-its data policy.
-
-Details: [docs/MODELS.md](docs/MODELS.md).
+Capabilities come from a compiled catalog, from the provider (Anthropic, OpenRouter, Ollama) or,
+with a warning, from conservative defaults. Models without tool calling are rejected. OpenRouter
+`:free` models are used like any other; their routes can be withdrawn, are rate-limited more
+strictly, and some record prompts. Details: [docs/MODELS.md](docs/MODELS.md).
 
 ## Execution modes
 
@@ -245,13 +201,10 @@ Details: [docs/MODELS.md](docs/MODELS.md).
 | `auto` (default) | `read_file`, `glob`, `grep`, `git`, `edit_file`, `write_file`, `bash`, `delegate` | None beyond operating system permissions. |
 | `readonly` | `read_file`, `glob`, `grep`, `git`, `delegate` | The other tools are neither offered nor executed, even if the model calls them. Subagents run in `readonly` too. |
 
-`auto` is **not a sandbox**. Commands run with your privileges and take effect immediately, and
-content the agent reads (files, command output, `AGENTS.md`) can contain prompt injection. Run
-nullrivet as an unprivileged user, and in a container or VM for risky work. How instructions and
-untrusted data are kept apart: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#trust-boundaries).
-
-`readonly` prevents changes made through nullrivet's tools. It does not prevent reading sensitive
-files.
+`auto` is **not a sandbox**: commands run with your privileges, and anything the agent reads (files,
+command output, `AGENTS.md`) can carry prompt injection. Run nullrivet as an unprivileged user, and
+in a container or VM for risky work ([trust boundaries](docs/ARCHITECTURE.md#trust-boundaries)).
+`readonly` prevents changes made through nullrivet's tools, not the reading of sensitive files.
 
 ## Tools
 
@@ -266,34 +219,20 @@ files.
 | `bash` | exec | Run a shell command non-interactively, with a timeout and output limits. |
 | `delegate` | read | Hand a self-contained task to a subagent and receive only its report. |
 
-Building, testing and git operations that change state go through `bash`. Details,
-limits and safety measures: [docs/TOOLS.md](docs/TOOLS.md).
-
-### Subagents
-
-With `delegate`, the agent hands a self-contained task (an investigation that would read many
-files, for example) to a subagent. The subagent starts with an empty conversation, works with the
-same model and tools, and returns only its report, so the main conversation grows by the report
-and not by the work behind it. Several delegations in one response run at the same time, up to
-three `readonly` ones at once. A subagent's mode never exceeds the session's: in `readonly`, or
-after switching to it with `/permission`, subagents cannot change anything. Interrupting the task
-stops its subagents and their commands. How it works:
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#subagents).
+Building, testing and git operations that change state go through `bash`. A subagent starts with
+an empty conversation and the same model and tools, never runs in a mode above the session's, and
+only its report enters the conversation. Details: [docs/TOOLS.md](docs/TOOLS.md),
+[subagents](docs/ARCHITECTURE.md#subagents).
 
 ## Project instructions
 
-nullrivet reads existing `AGENTS.md` files as project instructions. The files that apply to a path
-are the ones in its directory and its ancestors, up to the root of the git repository. Files that
-govern the starting directory are sent at the start of the conversation; files found later, when the agent
-touches another directory or project, are attached to the tool result where they first apply. A
-file edit or write in a directory governed by files not seen yet is held back until the agent has
-read them. A
-deeper file takes precedence over its ancestors, and instructions of one project never apply to
-files of another.
-
-`AGENTS.md` content is treated as repository data: it cannot change the execution mode or override
-your requests. nullrivet never creates or edits `AGENTS.md` on its own. `--no-agents` disables
-loading. Rules and limits: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#project-instructions).
+The `AGENTS.md` files in a path's directory and its ancestors, up to the git repository root,
+apply to it; a deeper file takes precedence, and one project's files never apply to another. Each
+file reaches the model when it first applies, and always before an `edit_file` or `write_file` it
+governs. Its content is
+repository data: it cannot change the execution mode or override your requests. nullrivet never
+edits `AGENTS.md` on its own; `--no-agents` disables loading. Details:
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#project-instructions).
 
 ## Output
 
@@ -328,8 +267,7 @@ credentials, are reported as an `error` event as well. Invalid options are repor
 
 ## Sessions
 
-By default nothing outlives the process. To continue a conversation later, save it to a file you
-name:
+Nothing outlives the process unless you name a session file:
 
 ```bash
 nullrivet --session work.json                # interactive; continues work.json if it exists
@@ -337,69 +275,40 @@ nullrivet --session ci.json "Run the tests and list the failures"
 nullrivet --session ci.json "Fix the first failure"   # same conversation, next step
 ```
 
-- The file is written after each step of the agent, after each compaction, when a task ends and
-  when you leave the interactive session, so a crash or a killed process loses at most the step
-  in progress. Writes are atomic: the file holds either the previous state or the new one. Model,
-  effort and mode changes made with `/model`, `/effort` and `/permission` are saved too.
-- Continuing a session uses the model it was last run with, unless `--model` or `NULLRIVET_MODEL`
-  chooses another. Effort works the same way. The execution mode is never taken from the file:
-  pass `--permission readonly` again to keep a session read-only, and a warning says so when a
-  read-only session continues in `auto`.
-- `AGENTS.md` files are read again from disk; subagents are not saved.
-- In the interactive session, `/session <file>` starts saving to a new file at any point. If a
-  file was already in use, it keeps the conversation as it was until then, so switching files
-  forks the session. `/session off` stops saving and keeps the file; `/session` shows its state.
-  `/session` never overwrites a file that already holds a session, and `/clear` stops saving
-  rather than erasing the file: it keeps the cleared conversation.
-- If the file is changed by something else while nullrivet runs (another nullrivet, an editor),
-  nullrivet stops saving to it and warns, rather than overwriting that change.
+- The file is written atomically after each step, compaction and task, and when you leave the
+  interactive session; a crash loses at most the step in progress.
+- Continuing uses the session's last model and effort unless the invocation sets them. The
+  execution mode always comes from the invocation: pass `--permission readonly` again to keep a
+  session read-only.
+- `/session <file>` saves to a new file from then on, and the previous file keeps the conversation
+  so far; `/session off` stops saving; `/session` shows the state. `/clear` stops saving too.
+- A file changed by something else while nullrivet runs is no longer written, with a warning.
 
-The file holds your prompts and the output of the tools, which can include secrets read from
-files. It is created readable by you only (mode 0600); keep it out of repositories. Its history is
-loaded with the authority of your own messages, so only continue sessions you created: a file that
-is not exactly a nullrivet session file, or whose history breaks the rules the agent keeps
-(alternating roles, every tool call answered), is refused and left untouched. Symbolic links and
-files over 64 MiB are refused too; a session that grows past that size stops being saved, with a
-warning, and its file keeps the last state that can be continued.
-
-## What nullrivet does not store
-
-Without `--session`, nullrivet creates no `.nullrivet` directory, database, history, log, cache or
-configuration file, and it does not record prompts, messages, tool calls or token usage anywhere.
-Restarting it never restores a previous session. With `--session` or `/session`, the conversation
-is written to the file you named, and nowhere else.
-
-This covers nullrivet itself. Commands the agent runs, the shell, the operating system and the
-model provider may keep their own records, and the changes the tools make are, of course, kept.
+The file holds your prompts and the tools' output, which can include secrets, and is created
+readable by you only (mode 0600); keep it out of repositories. Its history carries the authority
+of your own messages, so continue only sessions you created; invalid files are refused and left
+untouched. Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#sessions).
 
 ## Development
 
 ```bash
 bun install
-bun test             # tests
+bun test             # unit and end-to-end tests
 bun run typecheck    # tsc --noEmit
 bun run lint         # Biome
 bun run check        # all of the above
 bun run build        # standalone executable in dist/
-bun run start --model <id> "<prompt>"
+bun run start --model <id> "<prompt>"   # the sources, with the repository's .env
 ```
 
-The end-to-end tests in `tests/e2e` run the CLI as a separate process against a local stand-in for
-the Ollama API: output delivery, interrupts and the time limit (no command left running),
-`readonly` refusals, compaction, piped input, a hostile `.env`/`bunfig.toml`, and the interactive
-session in a terminal. `NULLRIVET_EXECUTABLE=dist/nullrivet bun test tests/e2e` runs them against
-a compiled executable, as CI does.
-
-Evaluations against real models (code tasks, a readonly investigation, a local security lab, a
-long-horizon task that forces compaction, and subagents) are in `evals/`:
-`bun --env-file=.env evals/run.ts --model <id>`. See [docs/EVALS.md](docs/EVALS.md).
-
-The architecture is described in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+The end-to-end tests run the CLI against a local stand-in for the Ollama API;
+`NULLRIVET_EXECUTABLE=dist/nullrivet bun test tests/e2e` runs them against the compiled executable,
+as CI does. Evaluations against real models: [docs/EVALS.md](docs/EVALS.md).
 
 ## Documentation
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): modules, the agent loop, retries, context limits,
-  project instructions, events.
+  project instructions, trust boundaries, subagents, sessions, events.
 - [docs/TOOLS.md](docs/TOOLS.md): each tool's parameters, limits and safety measures.
 - [docs/MODELS.md](docs/MODELS.md): model resolution, the catalog, discovery and provider settings.
 - [docs/TUI.md](docs/TUI.md): the interactive interface: rendering, streaming Markdown, keys.

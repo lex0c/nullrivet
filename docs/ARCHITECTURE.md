@@ -231,7 +231,8 @@ See [TOOLS.md](TOOLS.md) for each tool.
 
 ## Project instructions
 
-`AGENTS.md` files are loaded read-only and cached only in memory.
+`AGENTS.md` files are loaded read-only and cached only in memory; nullrivet never creates or edits
+one on its own.
 
 - **Which files apply to a path.** Starting from the path's directory (or the nearest existing
   ancestor, for a file not created yet), with symlinks resolved, nullrivet walks up the ancestors
@@ -346,11 +347,16 @@ time); otherwise it throws instead of overwriting another writer's change. A sta
 loading accepts is not written. `SessionLink` attaches a file to the agent through the checkpoint,
 runs saves one at a time, skips a save when the conversation's revision, model, effort and mode
 are unchanged, and detaches the file with one warning when a save fails. Switching to a new file
-attaches it only after its first write succeeds. It backs `--session` and `/session`; the
+attaches it only after its first write succeeds; the previous file keeps the conversation as it
+was, so switching forks the session. `/session <file>` refuses a file that already holds a
+session: continuing one is done only at startup. It backs `--session` and `/session`; the
 interactive session saves once more on the way out, since a turn interrupted then may not reach
-its own checkpoint. `/clear` detaches the file rather than saving an empty conversation over it. The file records the model, effort and mode it was last run with:
-the model and effort are used when the invocation does not choose them; the mode only produces a
-warning, because permissions come from the invocation alone.
+its own checkpoint. `/clear` detaches the file rather than saving an empty conversation over it.
+
+The file records the model, effort and mode it was last run with: the model and effort are used
+when the invocation does not choose them; the mode only produces a warning, because permissions
+come from the invocation alone. `AGENTS.md` files are not stored in the file, since they are added
+when each request is built, so a continued session reads them again from disk.
 
 ## Events
 

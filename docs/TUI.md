@@ -74,7 +74,9 @@ does not settle it. Any remaining text is settled when a tool call starts or the
   anything inserted into the prompt.
 - On xterm-compatible terminals the session enables the extended key reporting mode
   (`modifyOtherKeys`) so `Shift+Enter` arrives distinctly from `Enter`. The kitty keyboard
-  protocol form (CSI u) is recognized as well.
+  protocol form (CSI u) is recognized as well. Terminals that report neither send `Shift+Enter`
+  as `Enter`; `Alt+Enter` and `\` followed by `Enter` insert a newline everywhere.
+- While a task runs, the next prompt can be typed, but it is sent only once the task ends.
 - The editor (`src/tui/input-editor.ts`) is a pure function from the input state and a key to the
   next input state, plus signals for submit, interrupt and end of file.
 
