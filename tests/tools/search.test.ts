@@ -63,6 +63,23 @@ describe('listFiles', () => {
     expect(files).toEqual(['app.js']);
   });
 
+  test('submodules and nested repositories are listed too', async () => {
+    const root = temp.create('search-nested');
+    const lib = join(root, 'lib');
+    const main = join(root, 'main');
+    write(lib, 'l.txt', 'library');
+    sh('git init -q -b main && git add . && git commit -qm lib', lib);
+    write(main, 't.txt', 'top');
+    sh(
+      `git init -q -b main && git add . && git commit -qm top && git -c protocol.file.allow=always submodule add -q ${lib} vendor/lib && git commit -qm sub`,
+      main,
+    );
+    write(main, 'tools/x/n.txt', 'nested');
+    sh('git init -q -b main', join(main, 'tools/x'));
+    const { files } = await listFiles(main, new AbortController().signal);
+    expect(files.sort()).toEqual(['.gitmodules', 't.txt', 'tools/x/n.txt', 'vendor/lib/l.txt']);
+  });
+
   test('outside a repository, .git and node_modules are skipped', async () => {
     const root = temp.create('search-plain');
     write(root, 'a/b/c.txt', 'x');
@@ -85,6 +102,11 @@ describe('compileGlob', () => {
     const match = compileGlob('src/*.ts', 'pattern');
     expect(match('src/a.ts')).toBe(true);
     expect(match('src/deep/a.ts')).toBe(false);
+  });
+
+  test('a leading ./ is ignored', () => {
+    expect(compileGlob('./src/*.ts', 'pattern')('src/a.ts')).toBe(true);
+    expect(() => compileGlob('./', 'pattern')).toThrow(InvalidArgumentError);
   });
 
   test('patterns that leave the search root are refused', () => {
@@ -175,7 +197,29 @@ describe('grep', () => {
     write(root, 'a.txt', 'hit\n'.repeat(300));
     const result = await run(grepTool, { pattern: 'hit' }, root);
     expect(result.content.split('\n').filter((l) => l.startsWith('a.txt:'))).toHaveLength(200);
-    expect(result.content).toContain('stopped at 200 matches');
+    expect(result.content).toContain('more than 200 matches');
+  });
+
+  test('exactly as many matches as the limit is not reported as cut', async () => {
+    const root = temp.create('search-exact');
+    write(root, 'a.txt', 'hit\n'.repeat(200));
+    const result = await run(grepTool, { pattern: 'hit' }, root);
+    expect(result.content.split('\n')).toHaveLength(200);
+    expect(result.content).not.toContain('[grep:');
+  });
+
+  test('a pattern with catastrophic backtracking can be interrupted', async () => {
+    const root = temp.create('search-redos');
+    write(root, 'a.txt', `${'a'.repeat(64)}b\n`);
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 100);
+    const started = performance.now();
+    const result = await grepTool.execute(
+      { pattern: '(a+)+$' },
+      { cwd: root, signal: controller.signal },
+    );
+    expect(errorCode(result)).toBe('tool.aborted');
+    expect(performance.now() - started).toBeLessThan(2_000);
   });
 
   test('reports no matches and missing paths', async () => {

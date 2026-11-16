@@ -179,12 +179,25 @@ const executeToolCalls = async (
 ): Promise<ProviderToolResultBlock[]> => {
   const { emit, signal } = deps;
   const results: ProviderToolResultBlock[] = [];
+  // Instructions attached to a result of this batch reach the model only with the next request,
+  // so calls later in the batch were written without them.
+  const attachedInBatch = new Set<string>();
   const discover = async (paths: readonly string[]): Promise<string | null> => {
     if (deps.instructions === null || paths.length === 0) return null;
     const discovered = await deps.instructions.discover(paths);
     for (const warning of discovered.warnings) emit({ type: 'warning', message: warning });
     if (discovered.files.length === 0) return null;
+    for (const file of discovered.files) attachedInBatch.add(file.path);
     return `${DISCOVERED_INSTRUCTIONS_HEADER}\n${renderInstructionFiles(discovered.files)}`;
+  };
+  const unseenBeforeWrite = async (paths: readonly string[]): Promise<string | null> => {
+    const fresh = await discover(paths);
+    if (fresh !== null || deps.instructions === null || attachedInBatch.size === 0) return fresh;
+    const pending = (await deps.instructions.governing(paths)).filter((p) =>
+      attachedInBatch.has(p),
+    );
+    if (pending.length === 0) return null;
+    return `The AGENTS.md files that govern this path are attached to an earlier tool result of this response: ${pending.join(', ')}`;
   };
   for (const call of calls) {
     if (signal.aborted) {
@@ -197,7 +210,7 @@ const executeToolCalls = async (
       mode: deps.mode(),
       cwd: deps.cwd,
       signal,
-      newInstructions: discover,
+      newInstructions: unseenBeforeWrite,
     });
     let content = result.content;
     const attached = await discover(result.touchedPaths ?? []);

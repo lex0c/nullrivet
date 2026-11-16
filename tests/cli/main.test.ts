@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { closeSync, constants, mkdtempSync, openSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const MAIN = join(import.meta.dir, '../../src/main.ts');
@@ -63,5 +65,40 @@ describe('process exit', () => {
       .join('');
     expect(text.length).toBe(CHUNKS * CHUNK_TEXT.length);
     expect(events.at(-1)?.type).toBe('agent:end');
+  }, 30_000);
+  test('an interrupt after the task ends exits while the output waits for its reader', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'nullrivet-main-'));
+    const fifo = join(dir, 'out');
+    Bun.spawnSync(['mkfifo', fifo]);
+    // The read end stays open and is never read, so the output stops once the FIFO is full.
+    const reader = openSync(fifo, constants.O_RDONLY | constants.O_NONBLOCK);
+    const writer = openSync(fifo, constants.O_WRONLY);
+    try {
+      const child = Bun.spawn(
+        ['bun', '--no-env-file', MAIN, '--json', '--model', 'ollama/qwen2.5-coder:7b', 'hello'],
+        {
+          env: {
+            PATH: process.env.PATH ?? '',
+            HOME: process.env.HOME ?? '',
+            NULLRIVET_OLLAMA_BASE_URL: `http://127.0.0.1:${server.port}`,
+          },
+          stdin: 'ignore',
+          stdout: writer,
+          stderr: 'ignore',
+        },
+      );
+      await Bun.sleep(1_500);
+      child.kill('SIGINT');
+      const exited = await Promise.race([
+        child.exited,
+        Bun.sleep(3_000).then(() => 'still running'),
+      ]);
+      if (exited === 'still running') child.kill('SIGKILL');
+      expect(exited).toBe(130);
+    } finally {
+      closeSync(writer);
+      closeSync(reader);
+      rmSync(dir, { recursive: true, force: true });
+    }
   }, 30_000);
 });

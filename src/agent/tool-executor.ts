@@ -15,8 +15,9 @@ export interface ToolExecutionContext {
   mode: ExecutionMode;
   cwd: string;
   signal: AbortSignal;
-  // Returns the rendered AGENTS.md instructions that govern the paths and were not shown to the
-  // model yet, or null when there are none.
+  // Returns what the model must read before a write to the paths: AGENTS.md files that govern
+  // them and that it has not seen yet, or where in the current response they were attached. Null
+  // when there are none.
   newInstructions?: (paths: readonly string[]) => Promise<string | null>;
 }
 

@@ -141,6 +141,20 @@ export class InstructionsLoader {
     return { files, warnings };
   }
 
+  // Paths of the loaded AGENTS.md files that govern the given paths. Nothing new is loaded.
+  async governing(paths: readonly string[]): Promise<string[]> {
+    const found = new Set<string>();
+    for (const path of paths) {
+      const start = await this.startDirectory(path);
+      if (start === null) continue;
+      for (const dir of await this.ancestors(start)) {
+        const candidate = await this.lookup(dir);
+        if (candidate !== null && this.loaded.has(candidate)) found.add(candidate);
+      }
+    }
+    return [...found];
+  }
+
   private async startDirectory(path: string): Promise<string | null> {
     let current = path;
     for (let depth = 0; depth <= this.maxDepth; depth++) {

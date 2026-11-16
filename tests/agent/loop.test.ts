@@ -550,5 +550,47 @@ describe('runTurn', () => {
       expect(second.content).toBe('written');
       expect(writes).toBe(1);
     });
+
+    test('a write later in the same response is held back too', async () => {
+      const other = join(root, 'other');
+      await mkdir(join(other, '.git'), { recursive: true });
+      await writeFile(join(other, 'AGENTS.md'), 'use tabs');
+      let writes = 0;
+      const writer: Tool = {
+        ...fakeTool('write_file', 'write', async () => {
+          writes++;
+          return { content: 'written', isError: false };
+        }),
+        targetPaths: (input) => [join(other, String(input.path))],
+      };
+      const reader = fakeTool('read_file', 'read', async (input) => ({
+        content: 'file text',
+        isError: false,
+        touchedPaths: [join(other, String(input.path))],
+      }));
+      const h = harness(
+        [
+          toolTurn([
+            { id: 't1', name: 'read_file', args: { path: 'a.ts' } },
+            { id: 't2', name: 'write_file', args: { path: 'a.ts' } },
+            { id: 't3', name: 'write_file', args: { path: 'b.ts' } },
+          ]),
+          toolTurn([{ id: 't4', name: 'write_file', args: { path: 'a.ts' } }]),
+          textTurn('ok'),
+        ],
+        { tools: [reader, writer], instructions: new InstructionsLoader({ home: root }) },
+      );
+      await runTurn('go', h.deps);
+      const batch = toolResults(h.provider.calls[1]?.req.messages.at(-1)) as {
+        content: string;
+        is_error?: boolean;
+      }[];
+      expect(batch[0]?.content).toContain('use tabs');
+      for (const held of [batch[1], batch[2]]) {
+        expect(held?.is_error).toBe(true);
+        expect(held?.content).toContain('attached to an earlier tool result of this response');
+      }
+      expect(writes).toBe(1);
+    });
   });
 });

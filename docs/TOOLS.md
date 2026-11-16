@@ -53,8 +53,9 @@ Finds files by path pattern.
 | `path` | Directory to search (default: the starting directory). |
 
 - A pattern without `/` matches file names at any depth (`*.ts`, `README*`), as in `.gitignore`. A
-  pattern with `/` matches the path relative to `path` (`src/**/*.test.ts`). Patterns that are
-  absolute or contain `..` are refused; set `path` to search another directory.
+  pattern with `/` matches the path relative to `path` (`src/**/*.test.ts`). A leading `./` is
+  ignored. Patterns that are absolute or contain `..` are refused; set `path` to search another
+  directory.
 - Results are sorted, one per line, relative to the starting directory when inside it and
   absolute otherwise, so they can be passed to `read_file` as is. At most 500 are returned, with
   a note giving the total.
@@ -75,15 +76,19 @@ Searches file contents line by line with a regular expression.
   characters.
 - At most 200 matches or 64 KiB are returned; a note says when the search stopped early.
 - Binary files and files over 10 MiB are skipped.
-- The search runs inside nullrivet and needs no external program.
+- The search runs inside nullrivet and needs no external program. Matching runs in a worker
+  thread, because the pattern comes from the model and a regular expression with catastrophic
+  backtracking never yields: an interrupt or the time limit terminates the worker, and a search
+  that takes longer than 60 seconds is stopped with a `grep.timeout` error.
 
 ### Which files are searched
 
 `glob` and `grep` list a directory the same way:
 
 - **Inside a git repository**, the list comes from `git ls-files`, so files ignored by git are
-  left out and untracked files are included. git runs with the same hardening as the `git` tool,
-  because listing untracked files otherwise runs the repository's fsmonitor program.
+  left out and untracked files are included. Submodules and repositories nested in the tree are
+  listed in turn. git runs with the same hardening as the `git` tool, because listing untracked
+  files otherwise runs the repository's fsmonitor program.
 - **Outside a repository**, or in a directory git ignores entirely (`node_modules/lib`, `dist`),
   the directory is walked, skipping `.git` and `node_modules`. Symbolic links are listed but not
   followed.

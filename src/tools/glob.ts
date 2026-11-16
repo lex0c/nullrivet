@@ -1,14 +1,12 @@
-import { lstat, stat } from 'node:fs/promises';
+import { lstat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { optionalString, requireNonEmptyString } from './args.ts';
-import { fileSystemError } from './file-io.ts';
-import { compileGlob, type FileList, listFiles, MAX_LISTED_FILES } from './file-walk.ts';
-import { displayPath, resolvePath } from './paths.ts';
+import { compileGlob, LISTING_TRUNCATED_NOTE, listDirectory } from './file-walk.ts';
+import { displayPath } from './paths.ts';
 import { type Tool, type ToolResult, toolError } from './types.ts';
 
 const MAX_RESULTS = 500;
-
-export const LISTING_TRUNCATED_NOTE = `the directory has more than ${MAX_LISTED_FILES} files and only part of it was searched; narrow 'path'`;
+const STAT_BATCH = 32;
 
 const exists = async (abs: string): Promise<boolean> => {
   try {
@@ -16,30 +14,6 @@ const exists = async (abs: string): Promise<boolean> => {
     return true;
   } catch {
     return false;
-  }
-};
-
-// Resolves `path` to a directory and lists its files, or explains why it cannot.
-export const listDirectory = async (
-  pathArg: string | undefined,
-  cwd: string,
-  signal: AbortSignal,
-): Promise<{ ok: true; root: string; list: FileList } | { ok: false; error: ToolResult }> => {
-  const root = resolvePath(pathArg ?? '.', cwd);
-  try {
-    if (!(await stat(root)).isDirectory()) {
-      return {
-        ok: false,
-        error: toolError(
-          'fs.not_directory',
-          `${root} is not a directory`,
-          'Set path to a directory.',
-        ),
-      };
-    }
-    return { ok: true, root, list: await listFiles(root, signal) };
-  } catch (error) {
-    return { ok: false, error: fileSystemError(error, 'read', root) };
   }
 };
 
@@ -73,11 +47,15 @@ export const globTool: Tool = {
 
     const matched = list.files.filter(matches).sort();
     const shown: string[] = [];
-    for (const relativePath of matched) {
-      if (shown.length >= MAX_RESULTS) break;
-      const abs = join(root, relativePath);
-      // Tracked files deleted from the working tree are still listed by git.
-      if (await exists(abs)) shown.push(displayPath(abs, ctx.cwd));
+    // Tracked files deleted from the working tree are still listed by git.
+    for (let i = 0; i < matched.length && shown.length < MAX_RESULTS; i += STAT_BATCH) {
+      const batch = matched.slice(i, i + STAT_BATCH).map((path) => join(root, path));
+      const present = await Promise.all(batch.map(exists));
+      for (const [index, abs] of batch.entries()) {
+        if (present[index] === true && shown.length < MAX_RESULTS) {
+          shown.push(displayPath(abs, ctx.cwd));
+        }
+      }
     }
 
     const notes: string[] = [];

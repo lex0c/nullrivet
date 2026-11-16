@@ -51,7 +51,7 @@ src/
     types.ts, policy.ts    tool contract and execution modes
     bash.ts, git.ts        command tools
     read-file.ts, write-file.ts, edit-file.ts, atomic-write.ts, file-io.ts
-    glob.ts, grep.ts       file search
+    glob.ts, grep.ts       file search; grep-search.ts runs in grep-worker.ts
     file-walk.ts           directory listing shared by glob and grep
     process.ts             process groups, timeouts, bounded capture
     args.ts, paths.ts, env.ts
@@ -222,7 +222,9 @@ See [TOOLS.md](TOOLS.md) for each tool.
   are attached to that tool result, ordered from the outermost directory to the innermost.
 - **Before a write.** `edit_file` and `write_file` declare their target path before they run. If
   files not seen before govern it, the call is not executed: it returns an `instructions.new`
-  error with the files attached, and the model repeats the call once it has read them. A change
+  error with the files attached, and the model repeats the call once it has read them. Files
+  attached to another result of the same response count as not seen, since the model wrote the
+  whole response before receiving them. A change
   therefore never happens before the instructions that govern it reach the model. `bash` cannot be
   covered this way, since the paths a command touches are not known in advance.
 - **Precedence.** The system prompt tells the model that a deeper file takes precedence over its

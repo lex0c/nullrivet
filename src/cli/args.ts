@@ -1,4 +1,5 @@
 import { parseArgs } from 'node:util';
+import { MAX_TIME_LIMIT_MS } from '../agent/agent.ts';
 import { errorMessage } from '../errors.ts';
 import type { ProviderEffort } from '../providers/types.ts';
 import { type ExecutionMode, isExecutionMode } from '../tools/policy.ts';
@@ -62,6 +63,9 @@ export const parseDuration = (value: string | undefined, name: string): number |
   const ms = amount * (DURATION_UNITS[match?.[2] || 's'] ?? Number.NaN);
   if (!Number.isSafeInteger(ms) || ms <= 0) {
     throw new UsageError(`${name} must be a duration such as 90s, 30m or 2h, got '${value}'`);
+  }
+  if (ms > MAX_TIME_LIMIT_MS) {
+    throw new UsageError(`${name} must be at most 596h, got '${value}'`);
   }
   return ms;
 };

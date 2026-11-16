@@ -5,11 +5,13 @@ import { killAllProcessGroups } from './tools/process.ts';
 
 const controller = new AbortController();
 let interrupts = 0;
+let finished = false;
 
 // The first interrupt aborts the running task and lets it end cleanly; a second one exits at once.
+// Once the task has finished, while the output waits for a slow reader, the first one exits.
 process.on('SIGINT', () => {
   interrupts += 1;
-  if (interrupts === 1) {
+  if (interrupts === 1 && !finished) {
     controller.abort();
     return;
   }
@@ -67,6 +69,7 @@ const endStream = (stream: NodeJS.WriteStream): Promise<void> =>
     stream.once('error', () => resolve());
     stream.end(() => resolve());
   });
+finished = true;
 await Promise.all([endStream(process.stdout), endStream(process.stderr)]);
 
 // Open sockets kept alive by the HTTP client would otherwise delay the exit.

@@ -49,6 +49,18 @@ describe('time limit', () => {
     expect(result.reason).toBe('aborted');
   });
 
+  test('a limit too large for a timer does not stop the task at once', async () => {
+    const agent = await createAgent({
+      provider: createMockProvider([textTurn('one')]),
+      tools: [],
+      mode: 'auto',
+      cwd: '/tmp',
+      instructions: null,
+      timeLimitMs: 3_000_000_000,
+    });
+    expect((await agent.run('first')).reason).toBe('done');
+  });
+
   test('the limit applies to each task separately', async () => {
     const agent = await createAgent({
       provider: createMockProvider([textTurn('one'), textTurn('two')]),

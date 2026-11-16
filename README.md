@@ -96,7 +96,7 @@ reads it until end of file, so programs that start nullrivet without piping anyt
 | `--json` | Emit agent events as NDJSON on stdout. |
 | `--no-agents` | Do not load `AGENTS.md` files. |
 | `--max-steps <n>` | Maximum number of model requests for the task (default 200). |
-| `--timeout <time>` | Time limit for the task: `90s`, `30m`, `2h`, or seconds without a unit. When it passes, the task is stopped like an interrupt and ends at a limit (exit code 3). No limit by default. |
+| `--timeout <time>` | Time limit for the task: `90s`, `30m`, `2h`, or seconds without a unit, at most `596h`. When it passes, the task is stopped like an interrupt and ends at a limit (exit code 3). No limit by default. |
 | `--context-window <n>` | Override the model's context window, in tokens. |
 | `--max-output <n>` | Override the model's output token limit. |
 | `-h, --help` | Show help. |

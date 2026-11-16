@@ -7,11 +7,12 @@ describe('parseDuration', () => {
     expect(parseDuration('30m', '--timeout')).toBe(1_800_000);
     expect(parseDuration('2h', '--timeout')).toBe(7_200_000);
     expect(parseDuration('45', '--timeout')).toBe(45_000);
+    expect(parseDuration('596h', '--timeout')).toBe(596 * 3_600_000);
     expect(parseDuration(undefined, '--timeout')).toBeUndefined();
   });
 
   test('refuses anything else', () => {
-    for (const value of ['0', '-5', '1.5h', '10d', 'soon', '5 m']) {
+    for (const value of ['0', '-5', '1.5h', '10d', 'soon', '5 m', '597h']) {
       expect(() => parseDuration(value, '--timeout')).toThrow(UsageError);
     }
   });

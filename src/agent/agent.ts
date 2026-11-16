@@ -19,6 +19,8 @@ import { buildSystemPrompt, localDate } from './system-prompt.ts';
 
 export const DEFAULT_MAX_STEPS = 200;
 export const DEFAULT_STALL_MS = 120_000;
+// Timers fire at once when the delay does not fit in a signed 32-bit integer (about 24.8 days).
+export const MAX_TIME_LIMIT_MS = 2_147_483_647;
 
 export interface AgentOptions {
   provider: Provider;
@@ -160,7 +162,10 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
       if (running) throw new Error('the agent is already running a turn');
       running = true;
       const external = runOptions.signal ?? new AbortController().signal;
-      const timeLimitMs = options.timeLimitMs;
+      const timeLimitMs =
+        options.timeLimitMs === undefined
+          ? undefined
+          : Math.min(options.timeLimitMs, MAX_TIME_LIMIT_MS);
       const deadline = timeLimitMs === undefined ? null : new AbortController();
       const timer =
         deadline === null
