@@ -1,0 +1,13 @@
+docs/nullrivet.md
+.env
+.env.local
+.env.*.local
+
+node_modules/
+dist/
+*.tsbuildinfo
+
+.DS_Store
+*.swp
+.idea/
+.vscode/
