@@ -240,6 +240,8 @@ nullrivet reads existing `AGENTS.md` files as project instructions. The files th
 are the ones in its directory and its ancestors, up to the root of the git repository. Files that
 govern the starting directory go into the system prompt; files found later, when the agent
 touches another directory or project, are attached to the tool result where they first apply. A
+file edit or write in a directory governed by files not seen yet is held back until the agent has
+read them. A
 deeper file takes precedence over its ancestors, and instructions of one project never apply to
 files of another.
 

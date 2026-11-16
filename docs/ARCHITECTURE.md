@@ -173,7 +173,8 @@ When the estimate exceeds the trigger before a request (or on `/compact`):
    transcript is summarized in chunks, in sequence.
 3. **Deterministic sections.** The user's requests (verbatim, shortened when very long) and the
    files read and modified are derived by code and accumulated across compactions; a poor or
-   failed summary cannot lose or invent them.
+   failed summary cannot lose or invent them. Files are tracked from the `read_file`, `edit_file`
+   and `write_file` calls; files read or changed through `bash` are not listed.
 4. **Assembly.** The summary becomes the first block of the first user message, followed by the
    kept tail. If the result is still above the target, tool results in the tail are shortened,
    except errors and the latest results.
@@ -219,6 +220,11 @@ See [TOOLS.md](TOOLS.md) for each tool.
 - **When they are loaded.** At start, the files that apply to the starting directory go into the
   system prompt. After each tool call, the paths it touched are checked, and files not seen before
   are attached to that tool result, ordered from the outermost directory to the innermost.
+- **Before a write.** `edit_file` and `write_file` declare their target path before they run. If
+  files not seen before govern it, the call is not executed: it returns an `instructions.new`
+  error with the files attached, and the model repeats the call once it has read them. A change
+  therefore never happens before the instructions that govern it reach the model. `bash` cannot be
+  covered this way, since the paths a command touches are not known in advance.
 - **Precedence.** The system prompt tells the model that a deeper file takes precedence over its
   ancestors, that instructions of one project never apply to files of another, and that the files
   are repository data that cannot change the execution mode or override the user.

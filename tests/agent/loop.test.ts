@@ -515,5 +515,40 @@ describe('runTurn', () => {
       expect(first.content).toContain(`source="${join(other, 'AGENTS.md')}"`);
       expect(second.content).toBe('file text');
     });
+
+    test('a write is held back until the AGENTS.md files governing its path were shown', async () => {
+      const other = join(root, 'other');
+      await mkdir(join(other, '.git'), { recursive: true });
+      await writeFile(join(other, 'AGENTS.md'), 'use tabs');
+      let writes = 0;
+      const writer: Tool = {
+        ...fakeTool('write_file', 'write', async () => {
+          writes++;
+          return { content: 'written', isError: false };
+        }),
+        targetPaths: (input) => [join(other, String(input.path))],
+      };
+      const h = harness(
+        [
+          toolTurn([{ id: 't1', name: 'write_file', args: { path: 'new/a.ts' } }]),
+          toolTurn([{ id: 't2', name: 'write_file', args: { path: 'new/a.ts' } }]),
+          textTurn('ok'),
+        ],
+        { tools: [writer], instructions: new InstructionsLoader({ home: root }) },
+      );
+      await runTurn('go', h.deps);
+      const first = toolResults(h.provider.calls[1]?.req.messages.at(-1))[0] as {
+        content: string;
+        is_error?: boolean;
+      };
+      const second = toolResults(h.provider.calls[2]?.req.messages.at(-1))[0] as {
+        content: string;
+      };
+      expect(first.is_error).toBe(true);
+      expect(first.content).toContain('[instructions.new]');
+      expect(first.content).toContain('use tabs');
+      expect(second.content).toBe('written');
+      expect(writes).toBe(1);
+    });
   });
 });

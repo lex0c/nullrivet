@@ -15,3 +15,7 @@ export const displayPath = (abs: string, cwd: string): string => {
   const rel = relative(cwd, abs);
   return rel === '' || rel === '..' || rel.startsWith('../') || isAbsolute(rel) ? abs : rel;
 };
+
+// The `path` argument of a file tool, when it is usable; invalid input is reported by the tool.
+export const pathArgument = (input: Record<string, unknown>, cwd: string): string[] =>
+  typeof input.path === 'string' && input.path.length > 0 ? [resolvePath(input.path, cwd)] : [];

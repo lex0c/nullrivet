@@ -165,6 +165,13 @@ const executeToolCalls = async (
 ): Promise<ProviderToolResultBlock[]> => {
   const { emit, signal } = deps;
   const results: ProviderToolResultBlock[] = [];
+  const discover = async (paths: readonly string[]): Promise<string | null> => {
+    if (deps.instructions === null || paths.length === 0) return null;
+    const discovered = await deps.instructions.discover(paths);
+    for (const warning of discovered.warnings) emit({ type: 'warning', message: warning });
+    if (discovered.files.length === 0) return null;
+    return `${DISCOVERED_INSTRUCTIONS_HEADER}\n${renderInstructionFiles(discovered.files)}`;
+  };
   for (const call of calls) {
     if (signal.aborted) {
       results.push(interruptedResult({ type: 'tool_use', ...call }));
@@ -176,15 +183,11 @@ const executeToolCalls = async (
       mode: deps.mode(),
       cwd: deps.cwd,
       signal,
+      newInstructions: discover,
     });
     let content = result.content;
-    if (deps.instructions !== null && result.touchedPaths !== undefined) {
-      const discovered = await deps.instructions.discover(result.touchedPaths);
-      for (const warning of discovered.warnings) emit({ type: 'warning', message: warning });
-      if (discovered.files.length > 0) {
-        content += `\n\n${DISCOVERED_INSTRUCTIONS_HEADER}\n${renderInstructionFiles(discovered.files)}`;
-      }
-    }
+    const attached = await discover(result.touchedPaths ?? []);
+    if (attached !== null) content += `\n\n${attached}`;
     emit({
       type: 'tool:end',
       id: call.id,

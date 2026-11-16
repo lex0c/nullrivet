@@ -9,7 +9,7 @@ import {
   MAX_FILE_BYTES,
   notRegularFileError,
 } from './file-io.ts';
-import { resolvePath } from './paths.ts';
+import { pathArgument, resolvePath } from './paths.ts';
 import { type Tool, type ToolResult, toolError } from './types.ts';
 
 export const writeFileTool: Tool = {
@@ -31,6 +31,7 @@ export const writeFileTool: Tool = {
     required: ['path', 'content'],
   },
   effect: 'write',
+  targetPaths: pathArgument,
   async execute(input, ctx): Promise<ToolResult> {
     const path = requireNonEmptyString(input, 'path');
     const content = requireString(input, 'content');

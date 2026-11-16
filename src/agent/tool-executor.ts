@@ -15,6 +15,9 @@ export interface ToolExecutionContext {
   mode: ExecutionMode;
   cwd: string;
   signal: AbortSignal;
+  // Returns the rendered AGENTS.md instructions that govern the paths and were not shown to the
+  // model yet, or null when there are none.
+  newInstructions?: (paths: readonly string[]) => Promise<string | null>;
 }
 
 // Every failure becomes a structured result for the model; nothing a tool does can throw past
@@ -39,6 +42,17 @@ export const executeToolCall = async (
       `tool '${call.name}' is not available in ${context.mode} mode`,
       'only read tools can be used in readonly mode',
     );
+  }
+  if (tool.targetPaths !== undefined && context.newInstructions !== undefined) {
+    const instructions = await context.newInstructions(tool.targetPaths(call.input, context.cwd));
+    if (instructions !== null) {
+      const refusal = toolError(
+        'instructions.new',
+        `${call.name} was not executed: AGENTS.md instructions that you had not seen apply to this path`,
+        'Read them and issue the call again, adjusted to follow them.',
+      );
+      return { ...refusal, content: `${refusal.content}\n\n${instructions}` };
+    }
   }
   try {
     const result = await tool.execute(call.input, { cwd: context.cwd, signal: context.signal });

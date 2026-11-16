@@ -7,7 +7,7 @@ import {
 } from './args.ts';
 import { atomicWrite } from './atomic-write.ts';
 import { fileSystemError, loadTextFileBytes, MAX_FILE_BYTES } from './file-io.ts';
-import { resolvePath } from './paths.ts';
+import { pathArgument, resolvePath } from './paths.ts';
 import { type Tool, type ToolResult, toolError } from './types.ts';
 
 interface EditOperation {
@@ -545,6 +545,7 @@ export const editFileTool: Tool = {
     required: ['path', 'edits'],
   },
   effect: 'write',
+  targetPaths: pathArgument,
   async execute(input, ctx): Promise<ToolResult> {
     const path = requireNonEmptyString(input, 'path');
     const edits = readEdits(input);
