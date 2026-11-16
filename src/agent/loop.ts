@@ -141,6 +141,9 @@ const CONTEXT_FULL = 'the conversation does not fit the context window, even aft
 // After an overflow the estimate proved too low, so the compaction keeps a shorter verbatim tail.
 const OVERFLOW_TAIL_FACTOR = 0.5;
 
+export const modeChangeNote = (from: ExecutionMode, to: ExecutionMode): string =>
+  `The user switched the execution mode from ${from} to ${to}. It applies from now on: what earlier messages say about working in ${from} mode no longer holds, and the system prompt describes ${to} mode.`;
+
 export const promptShape = (
   deps: Pick<TurnDependencies, 'provider' | 'mode' | 'tools' | 'systemPrompt' | 'projectContext'>,
 ): PromptShape => {
@@ -377,6 +380,15 @@ export const runTurn = async (
     if (steps === limits.maxSteps && steps > 1 && limits.finalStepNote !== undefined) {
       conversation.appendUser(agentNote(limits.finalStepNote));
     }
+    // The system prompt states the current mode, but answers given under the previous one stay
+    // in the history, and models tend to follow what they said before. A switch is therefore also
+    // announced where the model reads it last.
+    const mode = deps.mode();
+    const previousMode = conversation.requestMode;
+    if (previousMode !== null && previousMode !== mode) {
+      conversation.appendUser(agentNote(modeChangeNote(previousMode, mode)));
+    }
+    conversation.setRequestMode(mode);
     const shape = promptShape(deps);
     const budget = contextBudget(deps.provider.capabilities);
     let estimate = conversation.estimateTokens(shape);

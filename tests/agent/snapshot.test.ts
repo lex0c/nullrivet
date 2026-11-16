@@ -111,6 +111,17 @@ describe('conversation snapshot', () => {
     }
   });
 
+  test('the mode of the last request is kept, and absent from older files', () => {
+    const c = toolStep();
+    c.setRequestMode('readonly');
+    const parsed = parse(c.snapshot());
+    expect(parsed.ok && parsed.snapshot.requestMode).toBe('readonly');
+    const older = parse({ messages: [{ role: 'user', content: 'hi' }], summary: null });
+    expect(older.ok && older.snapshot.requestMode).toBeNull();
+    const invalid = parse({ ...c.snapshot(), requestMode: 'root' });
+    expect(invalid.ok ? 'ok' : invalid.error).toContain('requestMode');
+  });
+
   test('unknown block types, providers and malformed summaries are refused', () => {
     const user = (content: unknown) => ({ messages: [{ role: 'user', content }], summary: null });
     expect(parse(user([{ type: 'image', data: 'x' }])).ok).toBe(false);

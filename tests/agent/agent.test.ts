@@ -2,11 +2,17 @@ import { describe, expect, test } from 'bun:test';
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createAgent } from '../../src/agent/agent.ts';
+import { type Agent, createAgent } from '../../src/agent/agent.ts';
+import { Conversation } from '../../src/agent/conversation.ts';
 import type { AgentEvent } from '../../src/agent/events.ts';
 import { InstructionsLoader } from '../../src/instructions/agents-loader.ts';
 import { FENCE } from '../../src/sanitize/fence.ts';
-import { createMockProvider, textTurn, toolTurn } from '../helpers/mock-provider.ts';
+import {
+  createMockProvider,
+  type MockProvider,
+  textTurn,
+  toolTurn,
+} from '../helpers/mock-provider.ts';
 
 // A provider whose stream stays open until the request is cancelled.
 const silentProvider = () => {
@@ -191,5 +197,97 @@ describe('checkpoint', () => {
     setTimeout(() => controller.abort(), 10);
     await agent.run('go', { signal: controller.signal });
     expect(calls).toBe(1);
+  });
+});
+
+describe('mode switch', () => {
+  const lastMessage = (provider: MockProvider, call: number): string =>
+    JSON.stringify(provider.calls[call]?.req.messages.at(-1));
+  const notes = (provider: MockProvider): number[] =>
+    provider.calls.map(
+      (c) =>
+        JSON.stringify(c.req.messages).split('The user switched the execution mode').length - 1,
+    );
+
+  test('a switch between prompts is announced once, with the next prompt', async () => {
+    const provider = createMockProvider([textTurn('one'), textTurn('two'), textTurn('three')]);
+    const agent = await createAgent({
+      provider,
+      tools: [],
+      mode: 'readonly',
+      cwd: '/tmp',
+      instructions: null,
+    });
+    await agent.run('first');
+    agent.mode = 'auto';
+    await agent.run('second');
+    await agent.run('third');
+    expect(notes(provider)).toEqual([0, 1, 1]);
+    expect(lastMessage(provider, 1)).toContain('second');
+    expect(lastMessage(provider, 1)).toContain('from readonly to auto');
+  });
+
+  test('a switch during a task is announced with the next tool results', async () => {
+    const provider = createMockProvider([
+      toolTurn([{ id: 't1', name: 'echo', args: {} }]),
+      textTurn('done'),
+    ]);
+    let agent: Agent | undefined;
+    agent = await createAgent({
+      provider,
+      tools: [
+        {
+          name: 'echo',
+          description: 'echo',
+          inputSchema: { type: 'object' },
+          effect: 'read',
+          execute: async () => {
+            if (agent !== undefined) agent.mode = 'readonly';
+            return { content: 'ok', isError: false };
+          },
+        },
+      ],
+      mode: 'auto',
+      cwd: '/tmp',
+      instructions: null,
+    });
+    await agent.run('go');
+    expect(notes(provider)).toEqual([0, 1]);
+    expect(lastMessage(provider, 1)).toContain('tool_result');
+    expect(lastMessage(provider, 1)).toContain('from auto to readonly');
+  });
+
+  test('a cleared conversation starts without a note', async () => {
+    const provider = createMockProvider([textTurn('one'), textTurn('two')]);
+    const agent = await createAgent({
+      provider,
+      tools: [],
+      mode: 'readonly',
+      cwd: '/tmp',
+      instructions: null,
+    });
+    await agent.run('first');
+    agent.clear();
+    agent.mode = 'auto';
+    await agent.run('second');
+    expect(notes(provider)).toEqual([0, 0]);
+  });
+
+  test('a restored conversation produced in another mode is announced', async () => {
+    const earlier = new Conversation();
+    earlier.appendUser('create a file');
+    earlier.appendAssistant([{ type: 'text', text: 'I am in readonly mode and cannot.' }]);
+    earlier.setRequestMode('readonly');
+    const provider = createMockProvider([textTurn('done')]);
+    const agent = await createAgent({
+      provider,
+      tools: [],
+      mode: 'auto',
+      cwd: '/tmp',
+      instructions: null,
+    });
+    agent.conversation.restore(earlier.snapshot());
+    await agent.run('try again');
+    expect(lastMessage(provider, 0)).toContain('from readonly to auto');
   });
 });

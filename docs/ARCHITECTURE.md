@@ -226,6 +226,11 @@ A tool declares its effect: `read`, `write` or `exec`. In `readonly` mode only `
 offered to the model, and the executor refuses any other call before running it, so a call the
 model was not offered, or a mode change during a turn, cannot cause a side effect.
 
+The conversation records the mode of its last request. When the next request is made in another
+mode, an `<agent-note>` saying so is added to the last user message, after the prompt or the tool
+results. The system prompt already states the current mode, but answers given under the previous
+one stay in the history, and models tend to follow what they said before.
+
 The executor never lets a tool failure escape: unknown tools, invalid arguments and exceptions all
 become error results the model can read. Terminal escape sequences are removed from tool output.
 
@@ -334,8 +339,9 @@ run tests, and only its report comes back.
 
 The core stays free of session I/O. It offers two things:
 
-- **Snapshots.** `Conversation.snapshot()` returns the history and the compaction state as plain
-  data, and `restore()` puts them back. `parseConversationSnapshot()` checks data read from
+- **Snapshots.** `Conversation.snapshot()` returns the history, the compaction state and the mode
+  of the last request as plain data, and `restore()` puts them back, so a session continued in
+  another mode is announced like a switch. `parseConversationSnapshot()` checks data read from
   outside the process against the invariants the conversation keeps in memory: the history starts
   with the user, roles alternate, tool calls are in assistant messages and results in user
   messages, every call is answered by the next message (except calls of the last message, which

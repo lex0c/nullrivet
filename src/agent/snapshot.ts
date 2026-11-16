@@ -1,6 +1,7 @@
 import { SUMMARY_OPEN } from '../context/compaction.ts';
 import { isProviderFamily } from '../providers/resolve.ts';
 import type { ProviderContentBlock, ProviderMessage } from '../providers/types.ts';
+import { type ExecutionMode, isExecutionMode } from '../tools/policy.ts';
 import type { SummaryState } from './conversation.ts';
 
 // The state of a conversation, enough to continue it: the history as the agent keeps it and what
@@ -8,6 +9,9 @@ import type { SummaryState } from './conversation.ts';
 export interface ConversationSnapshot {
   messages: ProviderMessage[];
   summary: SummaryState | null;
+  // The execution mode the history was produced under, so a continuation in another mode is
+  // announced to the model.
+  requestMode: ExecutionMode | null;
 }
 
 export type SnapshotResult =
@@ -162,8 +166,18 @@ export const parseConversationSnapshot = (value: unknown): SnapshotResult => {
     if (!Array.isArray(value.messages)) return fail('messages must be an array');
     const messages = value.messages.map((item, i) => message(item, `messages[${i}]`));
     const summary = summaryState(value.summary ?? null);
+    const requestMode = value.requestMode ?? null;
+    if (
+      requestMode !== null &&
+      (typeof requestMode !== 'string' || !isExecutionMode(requestMode))
+    ) {
+      fail('requestMode must be auto, readonly or null');
+    }
     checkStructure(messages, summary);
-    return { ok: true, snapshot: { messages, summary } };
+    return {
+      ok: true,
+      snapshot: { messages, summary, requestMode: requestMode as ExecutionMode | null },
+    };
   } catch (error) {
     if (error instanceof InvalidSnapshot) return { ok: false, error: error.message };
     throw error;

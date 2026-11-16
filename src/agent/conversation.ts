@@ -8,6 +8,7 @@ import type {
 } from '../providers/types.ts';
 import { contentBlocks } from '../providers/types.ts';
 import { FENCE, fenced } from '../sanitize/fence.ts';
+import type { ExecutionMode } from '../tools/policy.ts';
 import type { ConversationSnapshot } from './snapshot.ts';
 
 export const INTERRUPTED_RESULT = '[interrupted: the tool call did not complete]';
@@ -79,10 +80,23 @@ export class Conversation {
   private history: ProviderMessage[] = [];
   private anchor: MeasurementAnchor | null = null;
   private summaryState: SummaryState | null = null;
+  private lastRequestMode: ExecutionMode | null = null;
   private changed = 0;
 
   messages(): readonly ProviderMessage[] {
     return this.history;
+  }
+
+  // The execution mode of the last request, which the history was produced under; null before
+  // the first request.
+  get requestMode(): ExecutionMode | null {
+    return this.lastRequestMode;
+  }
+
+  setRequestMode(mode: ExecutionMode): void {
+    if (mode === this.lastRequestMode) return;
+    this.changed++;
+    this.lastRequestMode = mode;
   }
 
   get length(): number {
@@ -105,6 +119,7 @@ export class Conversation {
     this.history = [];
     this.anchor = null;
     this.summaryState = null;
+    this.lastRequestMode = null;
   }
 
   // `input` is material the prompt refers to, such as piped stdin; it is added as data.
@@ -183,7 +198,11 @@ export class Conversation {
 
   // A copy of the state, enough to continue the conversation later.
   snapshot(): ConversationSnapshot {
-    return structuredClone({ messages: this.history, summary: this.summaryState });
+    return structuredClone({
+      messages: this.history,
+      summary: this.summaryState,
+      requestMode: this.lastRequestMode,
+    });
   }
 
   // Replaces the state with one taken earlier, checked by parseConversationSnapshot when it comes
@@ -191,6 +210,7 @@ export class Conversation {
   restore(snapshot: ConversationSnapshot): void {
     this.history = structuredClone(snapshot.messages);
     this.summaryState = structuredClone(snapshot.summary);
+    this.lastRequestMode = snapshot.requestMode;
     this.anchor = null;
     this.changed++;
   }

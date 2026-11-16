@@ -300,6 +300,7 @@ export class SessionLink {
       conversation: {
         messages: [...this.agent.conversation.messages()],
         summary: this.agent.conversation.summary(),
+        requestMode: this.agent.conversation.requestMode,
       },
     };
   }
