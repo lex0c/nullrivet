@@ -3,34 +3,37 @@ import { AbortError } from './errors.ts';
 import type { ProviderCapabilities } from './types.ts';
 
 export const DISCOVERY_TIMEOUT_MS = 5_000;
-// Used when the listing reports no completion limit for the model.
+// Used when the source reports no completion limit for the model.
 export const DISCOVERED_OUTPUT_FALLBACK = 8_192;
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
-// The subset of one listing entry that discovery reads. A field is undefined when the payload
-// omitted it or gave it the wrong type.
+// The subset of what a source reports about one model that discovery reads. A field is undefined
+// when the payload omitted it or gave it the wrong type. `features` keeps the vocabulary of the
+// source: OpenRouter `supported_parameters` or Ollama `capabilities`.
 interface ListedModel {
   contextLength: number | undefined;
   maxCompletionTokens: number | undefined;
-  supportedParameters: readonly string[] | undefined;
+  features: readonly string[] | undefined;
 }
 
-// Parsed listings per base URL. Kept in memory only, for the lifetime of the process.
+// Parsed models per source. Kept in memory only, for the lifetime of the process.
 export type DiscoveryCache = Map<string, ReadonlyMap<string, ListedModel>>;
 
 const processCache: DiscoveryCache = new Map();
 
 export interface DiscoveryOptions {
   baseUrl: string;
+  // Sent only by sources that require authentication.
+  apiKey?: string;
   fetch?: FetchLike;
   cache?: DiscoveryCache;
   signal?: AbortSignal;
   timeoutMs?: number;
 }
 
-// `unavailable` means the listing could not be used, so the caller may fall back to defaults.
-// `not_found` and `rejected` are definite answers from a valid listing.
+// `unavailable` means the source could not be used, so the caller may fall back to defaults.
+// `not_found` and `rejected` are definite answers from a valid response.
 export type DiscoveryResult =
   | { ok: true; capabilities: ProviderCapabilities }
   | { ok: false; kind: 'unavailable' | 'not_found' | 'rejected'; error: string };
@@ -41,31 +44,8 @@ const isRecord = (v: unknown): v is Record<string, unknown> =>
 const positiveInt = (v: unknown): number | undefined =>
   typeof v === 'number' && Number.isSafeInteger(v) && v > 0 ? v : undefined;
 
-// The payload is untrusted. Entries without a string id are skipped, and a malformed field only
-// affects its own entry, so one bad entry does not invalidate the whole listing.
-const parseModelList = (payload: unknown): Map<string, ListedModel> | undefined => {
-  if (!isRecord(payload) || !Array.isArray(payload.data)) return undefined;
-  const models = new Map<string, ListedModel>();
-  for (const item of payload.data) {
-    if (!isRecord(item) || typeof item.id !== 'string' || item.id.length === 0) continue;
-    if (models.has(item.id)) continue;
-    const topProvider = isRecord(item.top_provider) ? item.top_provider : undefined;
-    const params = item.supported_parameters;
-    const listed = positiveInt(item.context_length);
-    const served = positiveInt(topProvider?.context_length);
-    models.set(item.id, {
-      // The default-routed provider may serve a smaller window than the headline maximum, and
-      // requests are sent without OpenRouter's automatic truncation, so the smaller one is used.
-      contextLength:
-        listed !== undefined && served !== undefined ? Math.min(listed, served) : listed,
-      maxCompletionTokens: positiveInt(topProvider?.max_completion_tokens),
-      supportedParameters: Array.isArray(params)
-        ? params.filter((p): p is string => typeof p === 'string')
-        : undefined,
-    });
-  }
-  return models;
-};
+const stringList = (v: unknown): string[] | undefined =>
+  Array.isArray(v) ? v.filter((item): item is string => typeof item === 'string') : undefined;
 
 // Messages may reach logs, so they never carry credentials or query parameters from the URL.
 const displayUrl = (url: string): string => {
@@ -77,51 +57,80 @@ const displayUrl = (url: string): string => {
   }
 };
 
-type ListResult = { ok: true; models: Map<string, ListedModel> } | { ok: false; error: string };
+type JsonResult =
+  | { ok: true; payload: unknown }
+  | { ok: false; status: number | undefined; error: string };
 
-const fetchModelList = async (
-  url: string,
+interface JsonRequest {
+  method: 'GET' | 'POST';
+  url: string;
+  headers: Record<string, string>;
+  body?: string;
+}
+
+const fetchJson = async (
+  request: JsonRequest,
   fetchImpl: FetchLike,
   signal: AbortSignal | undefined,
   timeoutMs: number,
-): Promise<ListResult> => {
-  const shown = displayUrl(url);
+): Promise<JsonResult> => {
+  const shown = `${request.method} ${displayUrl(request.url)}`;
   const timeout = AbortSignal.timeout(timeoutMs);
   const combined = signal === undefined ? timeout : AbortSignal.any([signal, timeout]);
-  let payload: unknown;
+  const init: RequestInit = {
+    method: request.method,
+    signal: combined,
+    headers: { accept: 'application/json', ...request.headers },
+  };
+  if (request.body !== undefined) init.body = request.body;
   try {
-    const res = await fetchImpl(url, {
-      signal: combined,
-      headers: { accept: 'application/json' },
-    });
+    const res = await fetchImpl(request.url, init);
     if (!res.ok) {
       await res.body?.cancel().catch(() => undefined);
-      return { ok: false, error: `GET ${shown} returned HTTP ${res.status}` };
+      return { ok: false, status: res.status, error: `${shown} returned HTTP ${res.status}` };
     }
-    payload = await res.json();
+    return { ok: true, payload: await res.json() };
   } catch (e) {
     if (signal?.aborted === true) throw new AbortError();
     if (timeout.aborted) {
-      return { ok: false, error: `GET ${shown} timed out after ${timeoutMs} ms` };
+      return { ok: false, status: undefined, error: `${shown} timed out after ${timeoutMs} ms` };
     }
-    return { ok: false, error: `GET ${shown} failed: ${errorMessage(e)}` };
+    return { ok: false, status: undefined, error: `${shown} failed: ${errorMessage(e)}` };
   }
-  const models = parseModelList(payload);
-  if (models === undefined) {
-    return { ok: false, error: `GET ${shown} returned an unexpected payload (no "data" array)` };
-  }
-  return { ok: true, models };
 };
 
-const toCapabilities = (model: string, entry: ListedModel): DiscoveryResult => {
-  if (entry.supportedParameters === undefined) {
+// The payload is untrusted. Entries without a string id are skipped, and a malformed field only
+// affects its own entry, so one bad entry does not invalidate the whole listing.
+const parseModelList = (payload: unknown): Map<string, ListedModel> | undefined => {
+  if (!isRecord(payload) || !Array.isArray(payload.data)) return undefined;
+  const models = new Map<string, ListedModel>();
+  for (const item of payload.data) {
+    if (!isRecord(item) || typeof item.id !== 'string' || item.id.length === 0) continue;
+    if (models.has(item.id)) continue;
+    const topProvider = isRecord(item.top_provider) ? item.top_provider : undefined;
+    const listed = positiveInt(item.context_length);
+    const served = positiveInt(topProvider?.context_length);
+    models.set(item.id, {
+      // The default-routed provider may serve a smaller window than the headline maximum, and
+      // requests are sent without OpenRouter's automatic truncation, so the smaller one is used.
+      contextLength:
+        listed !== undefined && served !== undefined ? Math.min(listed, served) : listed,
+      maxCompletionTokens: positiveInt(topProvider?.max_completion_tokens),
+      features: stringList(item.supported_parameters),
+    });
+  }
+  return models;
+};
+
+const toOpenRouterCapabilities = (model: string, entry: ListedModel): DiscoveryResult => {
+  if (entry.features === undefined) {
     return {
       ok: false,
       kind: 'unavailable',
       error: `OpenRouter listing for "${model}" has no valid supported_parameters`,
     };
   }
-  if (!entry.supportedParameters.includes('tools')) {
+  if (!entry.features.includes('tools')) {
     return {
       ok: false,
       kind: 'rejected',
@@ -144,8 +153,8 @@ const toCapabilities = (model: string, entry: ListedModel): DiscoveryResult => {
   };
   // Effort levels are never inferred: the listing does not say which levels a model accepts, and
   // an unsupported level is rejected by the API.
-  if (entry.supportedParameters.includes('reasoning')) capabilities.supports_reasoning = true;
-  if (!entry.supportedParameters.includes('temperature')) capabilities.supports_sampling = false;
+  if (entry.features.includes('reasoning')) capabilities.supports_reasoning = true;
+  if (!entry.features.includes('temperature')) capabilities.supports_sampling = false;
   return { ok: true, capabilities };
 };
 
@@ -161,19 +170,127 @@ export const discoverOpenRouterModel = async (
   const cache = options.cache ?? processCache;
   let models = cache.get(baseUrl);
   if (models === undefined) {
-    const listed = await fetchModelList(
-      `${baseUrl}/models`,
+    const url = `${baseUrl}/models`;
+    const fetched = await fetchJson(
+      { method: 'GET', url, headers: {} },
       options.fetch ?? fetch,
       options.signal,
       options.timeoutMs ?? DISCOVERY_TIMEOUT_MS,
     );
-    if (!listed.ok) return { ok: false, kind: 'unavailable', error: listed.error };
-    models = listed.models;
+    if (!fetched.ok) return { ok: false, kind: 'unavailable', error: fetched.error };
+    const parsed = parseModelList(fetched.payload);
+    if (parsed === undefined) {
+      return {
+        ok: false,
+        kind: 'unavailable',
+        error: `GET ${displayUrl(url)} returned an unexpected payload (no "data" array)`,
+      };
+    }
+    models = parsed;
     cache.set(baseUrl, models);
   }
   const entry = models.get(model);
   if (entry === undefined) {
     return { ok: false, kind: 'not_found', error: `OpenRouter does not list model "${model}"` };
   }
-  return toCapabilities(model, entry);
+  return toOpenRouterCapabilities(model, entry);
+};
+
+// `/api/show` reports the context length under an architecture-specific key such as
+// `llama.context_length`. When the architecture is missing, a single unambiguous
+// `*.context_length` entry is accepted instead.
+const ollamaContextLength = (info: Record<string, unknown>): number | undefined => {
+  const arch = info['general.architecture'];
+  if (typeof arch === 'string' && arch.length > 0) {
+    const direct = positiveInt(info[`${arch}.context_length`]);
+    if (direct !== undefined) return direct;
+  }
+  const candidates = new Set<number>();
+  for (const [key, value] of Object.entries(info)) {
+    if (!key.endsWith('.context_length')) continue;
+    const n = positiveInt(value);
+    if (n !== undefined) candidates.add(n);
+  }
+  return candidates.size === 1 ? [...candidates][0] : undefined;
+};
+
+const parseOllamaShow = (payload: unknown): ListedModel | undefined => {
+  if (!isRecord(payload)) return undefined;
+  const info = isRecord(payload.model_info) ? payload.model_info : undefined;
+  return {
+    contextLength: info === undefined ? undefined : ollamaContextLength(info),
+    maxCompletionTokens: undefined,
+    features: stringList(payload.capabilities),
+  };
+};
+
+const toOllamaCapabilities = (model: string, entry: ListedModel): DiscoveryResult => {
+  // Servers older than the `capabilities` field do not say whether a model supports tools, so
+  // only a model whose reported capabilities lack tools is rejected.
+  if (entry.features !== undefined && !entry.features.includes('tools')) {
+    return {
+      ok: false,
+      kind: 'rejected',
+      error: `Ollama model "${model}" does not support tool calling (capabilities has no "tools")`,
+    };
+  }
+  if (entry.contextLength === undefined) {
+    return {
+      ok: false,
+      kind: 'unavailable',
+      error: `Ollama reports no context length for "${model}"`,
+    };
+  }
+  const capabilities: ProviderCapabilities = {
+    context_window: entry.contextLength,
+    output_max_tokens: Math.min(DISCOVERED_OUTPUT_FALLBACK, entry.contextLength),
+  };
+  if (entry.features?.includes('thinking') === true) capabilities.supports_reasoning = true;
+  return { ok: true, capabilities };
+};
+
+// Asks the server about one model with `POST /api/show`. A 404 means the server does not have the
+// model, which is a definite answer; other failures leave the capabilities unknown. Successful
+// answers are cached per base URL and model; a missing model is not, so it can be pulled and
+// resolved again in the same process.
+export const discoverOllamaModel = async (
+  model: string,
+  options: DiscoveryOptions,
+): Promise<DiscoveryResult> => {
+  if (options.signal?.aborted === true) throw new AbortError();
+  const baseUrl = options.baseUrl.replace(/\/+$/, '');
+  const url = `${baseUrl}/api/show`;
+  const cache = options.cache ?? processCache;
+  const cached = cache.get(url);
+  let entry = cached?.get(model);
+  if (entry === undefined) {
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    if (options.apiKey !== undefined) headers.authorization = `Bearer ${options.apiKey}`;
+    const fetched = await fetchJson(
+      { method: 'POST', url, headers, body: JSON.stringify({ model }) },
+      options.fetch ?? fetch,
+      options.signal,
+      options.timeoutMs ?? DISCOVERY_TIMEOUT_MS,
+    );
+    if (!fetched.ok) {
+      if (fetched.status === 404) {
+        return {
+          ok: false,
+          kind: 'not_found',
+          error: `Ollama at ${displayUrl(baseUrl)} has no model "${model}" (for a local server, pull it with "ollama pull ${model}")`,
+        };
+      }
+      return { ok: false, kind: 'unavailable', error: fetched.error };
+    }
+    entry = parseOllamaShow(fetched.payload);
+    if (entry === undefined) {
+      return {
+        ok: false,
+        kind: 'unavailable',
+        error: `POST ${displayUrl(url)} returned an unexpected payload (not a JSON object)`,
+      };
+    }
+    cache.set(url, new Map([...(cached ?? []), [model, entry]]));
+  }
+  return toOllamaCapabilities(model, entry);
 };

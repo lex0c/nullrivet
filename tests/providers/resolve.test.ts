@@ -2,6 +2,8 @@ import { describe, expect, test } from 'bun:test';
 import { AbortError } from '../../src/agent/abortable.ts';
 import { findCatalogEntry, MODEL_CATALOG } from '../../src/providers/catalog.ts';
 import type { FetchLike } from '../../src/providers/discovery.ts';
+import { DEFAULT_OLLAMA_BASE_URL } from '../../src/providers/ollama/http.ts';
+import { DEFAULT_OLLAMA_NUM_CTX } from '../../src/providers/ollama/messages.ts';
 import { DEFAULT_OPENROUTER_BASE_URL } from '../../src/providers/openrouter/index.ts';
 import {
   DEFAULT_CAPABILITIES,
@@ -223,14 +225,14 @@ describe('resolveModel', () => {
   test('an unknown family is an error listing the supported families', async () => {
     const error = expectError(await resolve('foo/bar'));
     expect(error).toContain('unknown provider family "foo"');
-    expect(error).toContain('supported families: openrouter');
+    expect(error).toContain('supported families: anthropic, ollama, openai, openrouter');
   });
 
   test('a known family without an adapter is not supported yet', async () => {
-    for (const family of ['anthropic', 'openai', 'ollama', 'google', 'xai']) {
+    for (const family of ['google', 'xai']) {
       const error = expectError(await resolve(`${family}/some-model`));
       expect(error).toContain(`"${family}" is not supported yet`);
-      expect(error).toContain('supported families: openrouter');
+      expect(error).toContain('supported families: anthropic, ollama, openai, openrouter');
     }
   });
 
@@ -264,5 +266,164 @@ describe('resolveModel', () => {
       }),
     );
     expect(r.provider.replaysReasoning).toBe(false);
+  });
+});
+
+describe('resolveModel for the direct provider families', () => {
+  const resolveWith = (id: string, env: Record<string, string>, over: ResolveOptions = {}) =>
+    resolveModel(id, { env, discoveryCache: new Map(), ...over });
+
+  test('catalog models of each family resolve with the family key', async () => {
+    for (const [id, env] of [
+      ['anthropic/claude-opus-4-8', { ANTHROPIC_API_KEY: 'sk-ant' }],
+      ['openai/gpt-5.4', { OPENAI_API_KEY: 'sk-oai' }],
+      ['openai/gpt-4o', { OPENAI_API_KEY: 'sk-oai' }],
+    ] as const) {
+      const r = expectOk(await resolveWith(id, env));
+      expect(r.source).toBe('catalog');
+      expect(r.provider.id).toBe(id);
+      expect(r.provider.capabilities).toEqual(catalogCapabilities(id));
+    }
+  });
+
+  test('a missing key is an error naming the variable of the family', async () => {
+    for (const [id, variable] of [
+      ['anthropic/claude-opus-4-8', 'ANTHROPIC_API_KEY'],
+      ['openai/gpt-5.4', 'OPENAI_API_KEY'],
+    ] as const) {
+      const f = listingFetch([]);
+      const error = expectError(
+        await resolveWith(id, { OPENROUTER_API_KEY: 'x' }, { fetch: f.fetch }),
+      );
+      expect(error).toContain(variable);
+      expect(f.urls).toEqual([]);
+    }
+  });
+
+  test('a model outside the Anthropic or OpenAI catalog gets defaults with a warning', async () => {
+    const r = expectOk(await resolveWith('anthropic/claude-future', { ANTHROPIC_API_KEY: 'k' }));
+    expect(r.source).toBe('defaults');
+    expect(r.warnings[0]).toContain('no discovery endpoint');
+    expect(r.provider.id).toBe('anthropic/claude-future');
+  });
+
+  test('adapter warnings are returned to the caller', async () => {
+    const r = expectOk(
+      await resolveWith('openai/gpt-5.5', {
+        OPENAI_API_KEY: 'k',
+        NULLRIVET_OPENAI_PROMPT_CACHE_RETENTION: 'in_memory',
+      }),
+    );
+    expect(r.warnings).toHaveLength(1);
+    expect(r.warnings[0]).toContain('24h');
+  });
+
+  test('a local Ollama catalog model needs no key and serves the capped window', async () => {
+    const r = expectOk(await resolveWith('ollama/llama3.1:8b', {}));
+    expect(r.source).toBe('catalog');
+    expect(r.provider.capabilities.context_window).toBe(DEFAULT_OLLAMA_NUM_CTX);
+  });
+
+  test('an Ollama Cloud catalog model requires OLLAMA_API_KEY', async () => {
+    const error = expectError(await resolveWith('ollama/glm-5.2', {}));
+    expect(error).toContain('OLLAMA_API_KEY');
+    expect(error).toContain('https://ollama.com');
+    const r = expectOk(await resolveWith('ollama/glm-5.2', { OLLAMA_API_KEY: 'ok' }));
+    expect(r.provider.capabilities.context_window).toBe(
+      catalogCapabilities('ollama/glm-5.2').context_window,
+    );
+  });
+
+  interface ShowCall {
+    url: string;
+    headers: Headers;
+  }
+
+  const showFetch = (payload: unknown, status = 200) => {
+    const calls: ShowCall[] = [];
+    const fetchImpl: FetchLike = async (url, init) => {
+      calls.push({ url, headers: new Headers(init?.headers) });
+      return new Response(JSON.stringify(payload), { status });
+    };
+    return { calls, fetch: fetchImpl };
+  };
+
+  const toolModel = {
+    model_info: { 'general.architecture': 'llama', 'llama.context_length': 131_072 },
+    capabilities: ['completion', 'tools', 'thinking'],
+  };
+
+  test('an Ollama model outside the catalog is discovered on the local server', async () => {
+    const f = showFetch(toolModel);
+    const r = expectOk(
+      await resolveWith(
+        'ollama/my-model:latest',
+        { OLLAMA_API_KEY: 'cloud-key' },
+        { fetch: f.fetch },
+      ),
+    );
+    expect(r.source).toBe('discovery');
+    expect(r.provider.capabilities).toMatchObject({
+      context_window: DEFAULT_OLLAMA_NUM_CTX,
+      supports_reasoning: true,
+    });
+    expect(f.calls.map((c) => c.url)).toEqual([`${DEFAULT_OLLAMA_BASE_URL}/api/show`]);
+    // The cloud key never reaches a server that does not use it.
+    expect(f.calls[0]?.headers.has('authorization')).toBe(false);
+  });
+
+  test('an Ollama model without tool support or missing on the server is an error', async () => {
+    const rejected = showFetch({ ...toolModel, capabilities: ['completion'] });
+    expect(expectError(await resolveWith('ollama/plain', {}, { fetch: rejected.fetch }))).toContain(
+      'does not support tool calling',
+    );
+    const missing = showFetch({ error: 'not found' }, 404);
+    expect(expectError(await resolveWith('ollama/typo', {}, { fetch: missing.fetch }))).toContain(
+      'ollama pull typo',
+    );
+  });
+
+  test('an unreachable Ollama server falls back to defaults with a warning', async () => {
+    const r = expectOk(
+      await resolveWith(
+        'ollama/anything',
+        {},
+        {
+          fetch: async () => {
+            throw new TypeError('fetch failed');
+          },
+        },
+      ),
+    );
+    expect(r.source).toBe('defaults');
+    expect(r.warnings[0]).toContain('fetch failed');
+  });
+
+  test('NULLRIVET_OLLAMA_BASE_URL applies to every Ollama model', async () => {
+    const f = showFetch(toolModel);
+    expectOk(
+      await resolveWith(
+        'ollama/my-model',
+        { NULLRIVET_OLLAMA_BASE_URL: 'http://gpu-box:11434/' },
+        { fetch: f.fetch },
+      ),
+    );
+    expect(f.calls[0]?.url).toBe('http://gpu-box:11434/api/show');
+    // A cloud catalog model served by a local daemon needs no key.
+    expectOk(
+      await resolveWith('ollama/glm-5.2', { NULLRIVET_OLLAMA_BASE_URL: 'http://localhost:11434' }),
+    );
+  });
+
+  test('discovery against Ollama Cloud sends the key', async () => {
+    const f = showFetch(toolModel);
+    expectOk(
+      await resolveWith(
+        'ollama/cloud-only',
+        { NULLRIVET_OLLAMA_BASE_URL: 'https://ollama.com', OLLAMA_API_KEY: 'ok' },
+        { fetch: f.fetch },
+      ),
+    );
+    expect(f.calls[0]?.headers.get('authorization')).toBe('Bearer ok');
   });
 });
