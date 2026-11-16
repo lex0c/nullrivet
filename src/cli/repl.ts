@@ -26,7 +26,14 @@ import {
 } from '../tui/term.ts';
 import { composeLive } from '../tui/view.ts';
 import { type SessionFile, SessionLink } from './session-file.ts';
-import { findCommand, parseSlash, runSlash, type SlashContext, suggestCommands } from './slash.ts';
+import {
+  describeModeChange,
+  findCommand,
+  parseSlash,
+  runSlash,
+  type SlashContext,
+  suggestCommands,
+} from './slash.ts';
 
 // A lone ESC byte is ambiguous until no continuation arrives: it is either the Escape key or the
 // start of an escape sequence split across reads.
@@ -357,10 +364,12 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       if (handlePopoverKey(key)) return;
       if (isShiftTab(key)) {
         // Also while a task runs: the executor reads the mode before every tool call, so the
-        // switch applies from the next one, as with /permission.
+        // switch applies from the next one, as with /permission. The notice records the switch
+        // in the scrollback, the only record of which mode the tool calls around it ran in.
         agent.mode = agent.mode === 'auto' ? 'readonly' : 'auto';
         dispatch({ type: 'exit-disarm' });
         syncStatus();
+        notice('info', describeModeChange(agent.mode));
         void agent.checkpoint?.();
         return;
       }

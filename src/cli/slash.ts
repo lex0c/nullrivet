@@ -3,7 +3,7 @@ import { errorMessage } from '../errors.ts';
 import type { ResolveResult } from '../providers/resolve.ts';
 import type { ProviderEffort } from '../providers/types.ts';
 import { resolvePath } from '../tools/paths.ts';
-import { isExecutionMode } from '../tools/policy.ts';
+import { type ExecutionMode, isExecutionMode } from '../tools/policy.ts';
 import { EFFORT_LEVELS } from './args.ts';
 import { SessionFile, type SessionLink } from './session-file.ts';
 
@@ -46,6 +46,9 @@ export const parseSlash = (text: string): ParsedSlash | null => {
   if (match === null) return null;
   return { name: match[1] ?? '', args: (match[2] ?? '').trim() };
 };
+
+export const describeModeChange = (mode: ExecutionMode): string =>
+  `Execution mode set to ${mode}; it applies from the next tool call.`;
 
 const describeInstructions = (agent: Agent): string => {
   const files = agent.instructions();
@@ -145,7 +148,7 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
       }
       ctx.agent.mode = args;
       await ctx.agent.checkpoint?.();
-      ctx.notice('info', `Execution mode set to ${args}; it applies from the next tool call.`);
+      ctx.notice('info', describeModeChange(args));
     },
   },
   {

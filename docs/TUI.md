@@ -78,8 +78,9 @@ does not settle it. Any remaining text is settled when a tool call starts or the
   as `Enter`; `Alt+Enter` and `\` followed by `Enter` insert a newline everywhere.
 - While a task runs, the next prompt can be typed, but it is sent only once the task ends.
 - `Shift+Tab` switches the execution mode between `auto` and `readonly`, also while a task runs:
-  the executor reads the mode before every tool call, so the switch applies from the next one. The
-  status line shows the mode, with the `Shift+Tab` hint when no task runs and the interrupt hint
+  the executor reads the mode before every tool call, so the switch applies from the next one. Each
+  switch prints a line in the scrollback, the only record of which mode the tool calls around it
+  ran in. The status line shows the mode, with the `Shift+Tab` hint when no task runs and the interrupt hint
   while one does, so the latter stays visible in narrow terminals. With the command list open,
   `Shift+Tab` completes the selected command, like `Tab`.
 - The editor (`src/tui/input-editor.ts`) is a pure function from the input state and a key to the

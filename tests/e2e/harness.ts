@@ -23,10 +23,16 @@ export const cliShellCommand = (args: readonly string[]): string =>
 const PTY_RUNNER =
   'import os, pty, sys; sys.exit(os.waitstatus_to_exitcode(pty.spawn(sys.argv[1:])))';
 
+// The pseudo-terminal starts without a size, so the command runs after stty gives it a common one
+// and the interface lays out as it would in a real terminal.
 export const inTerminal = (argv: readonly string[]): string[] => [
   'python3',
   '-c',
   PTY_RUNNER,
+  'sh',
+  '-c',
+  'stty cols 120 rows 40 && exec "$@"',
+  'sh',
   ...argv,
 ];
 

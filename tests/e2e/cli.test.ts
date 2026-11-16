@@ -355,8 +355,12 @@ describe('terminal', () => {
       await Bun.sleep(1_500);
       child.stdin.write('/exit\r');
       child.stdin.flush();
-      const [, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+      const [output, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
       expect(code).toBe(0);
+      expect(output).toContain('readonly mode on');
+      expect(output).toContain(
+        'Execution mode set to readonly; it applies from the next tool call.',
+      );
       expect(existsSync(join(cwd, 'created.txt'))).toBe(false);
       const results = toolMessages(server.requests.at(-1)).map((m) => m.content);
       expect(results).toHaveLength(1);
