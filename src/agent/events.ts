@@ -36,6 +36,7 @@ export type AgentEvent =
       cacheWrite: number;
       reportedCostUsd?: number;
     }
+  | { type: 'warning'; message: string }
   | { type: 'error'; message: string };
 
 export type AgentEventListener = (event: AgentEvent) => void;
