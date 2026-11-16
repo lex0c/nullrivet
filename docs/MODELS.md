@@ -76,7 +76,7 @@ rejected by the API.
 
 The output limit of a request starts at the smaller of the model's `output_max_tokens` and a
 quarter of its context window, and shrinks as the conversation grows so that prompt and answer
-always fit in the window. See [ARCHITECTURE.md](ARCHITECTURE.md#context-limits).
+always fit in the window. See [ARCHITECTURE.md](ARCHITECTURE.md#context-management).
 
 ## Reasoning effort
 

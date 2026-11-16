@@ -7,8 +7,8 @@ test, by reading and editing files, running commands and inspecting git reposito
 conversation lives only in memory: nullrivet writes no files of its own, and when the process exits,
 nothing of the session remains except the changes the tools made on purpose.
 
-> **Status:** early development. The interactive session and the one-shot mode work end to end;
-> OpenRouter is the only provider so far, and long conversations are not compacted yet.
+> **Status:** early development. The interactive session and the one-shot mode work end to end,
+> and long conversations are compacted automatically; OpenRouter is the only provider so far.
 
 - **Ephemeral.** No database, history, logs, caches or configuration files. See
   [What nullrivet does not store](#what-nullrivet-does-not-store).
@@ -138,7 +138,10 @@ results) goes to the terminal's normal scrollback; only the task in progress, th
 the status line are redrawn at the bottom. Answers are rendered as Markdown while they stream.
 
 The status line shows the execution mode, the model, how much of the context window the last
-request used, and the tokens used in the session.
+request used, and the tokens used in the session. When the conversation grows past about 70% of
+the window, its older part is summarized and the recent part kept verbatim; your requests and the
+files touched are always kept. See
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#context-management).
 
 ### Keys
 
@@ -166,12 +169,13 @@ While a task runs you can type the next prompt, but it can only be sent once the
 | `/model [family/model]` | Show the model, or switch to another one for the next prompts. |
 | `/effort [low\|medium\|high\|xhigh\|max\|off]` | Show or set the reasoning effort. |
 | `/permission [auto\|readonly]` | Show or change the execution mode; it applies from the next tool call. |
+| `/compact [focus]` | Summarize the older part of the conversation now; the focus guides the summary. |
 | `/clear` | Discard the conversation and clear the screen. |
 | `/instructions [reload]` | List the loaded `AGENTS.md` files, or read them again. |
 | `/stats` | Show the token usage of the session. |
 | `/exit` | Exit. |
 
-`/model` and `/clear` cannot be used while a task runs. An unknown command is not sent anywhere
+`/model`, `/compact` and `/clear` cannot be used while a task runs. An unknown command is not sent anywhere
 and stays in the input; to send text that starts with `/` as a prompt, begin it with a space. How the interface works is described in
 [docs/TUI.md](docs/TUI.md).
 

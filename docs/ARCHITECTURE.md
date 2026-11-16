@@ -129,19 +129,66 @@ The in-memory conversation keeps the invariants that provider APIs require:
 - Tool arguments are stored with sorted keys, so the same call always serializes to the same
   bytes and the provider's prompt cache stays valid.
 
-## Context limits
+## Context management
 
-The context is measured with a character-based estimate (about 4 characters per token, which
-overestimates English by 10–25%). For every request:
+Everything lives in memory: there is no log to recover discarded content from, so the conversation
+is reduced conservatively and never with pointers to data that no longer exists.
 
-- the output limit starts at the smaller of the model's output limit and a quarter of its context
-  window;
-- it is reduced so that the estimated prompt plus the answer fit in the window, with a safety
-  margin;
-- if fewer than 1,024 tokens would remain for the answer, the turn ends with `budget` instead of
-  sending a request the provider would reject.
+### Measuring
 
-Automatic compaction of long conversations is planned and not implemented yet.
+The size of the next request is the usage the provider reported for the previous one (prompt plus
+answer) plus a character-based estimate (about 4 characters per token) of what was appended
+since. When there is no reported usage for the current model, system prompt and tool set (the
+first request, after a compaction, a model switch or a mode change), everything is estimated.
+
+### Budget
+
+| Value | Rule |
+|---|---|
+| Output limit | Smaller of the model's limit and a quarter of the window, reduced per request so prompt and answer fit |
+| Reserve | Output limit plus 4,096 tokens of margin |
+| Trigger | Smaller of 70% of the window and the window minus the reserve |
+| Kept tail | Smaller of 20,000 tokens and a quarter of the window |
+| Target | 60% of the trigger |
+
+The ratio keeps large windows from filling with expensive, degraded context; the reserve keeps room
+for the answer in small windows. A compaction aims at the target, well below the trigger, because
+each one invalidates the provider's prompt cache.
+
+### Compaction
+
+When the estimate exceeds the trigger before a request (or on `/compact`):
+
+1. **Cut.** The recent part of the conversation, up to the kept-tail budget, stays verbatim. It
+   starts at a prompt when possible, or at an assistant message, never at tool results, which
+   would lose the calls they answer. The latest exchange always stays.
+2. **Summary.** The older part is serialized as a labeled transcript (long tool results and large
+   arguments shortened) and sent to the current model with the previous summary, asking for an
+   updated one with fixed sections: goal, constraints, next steps, progress, errors, decisions,
+   anchors (file:line, symbols, commands) and rejected approaches. Each compaction updates the
+   previous summary instead of replacing it, so nothing earlier is lost on the second one. A large
+   transcript is summarized in chunks, in sequence.
+3. **Deterministic sections.** The user's requests (verbatim, shortened when very long) and the
+   files read and modified are derived by code and accumulated across compactions; a poor or
+   failed summary cannot lose or invent them.
+4. **Assembly.** The summary becomes the first block of the first user message, followed by the
+   kept tail. If the result is still above the target, tool results in the tail are shortened,
+   except errors and the latest results.
+
+If the summary request fails or returns something without the expected sections, the older part
+is dropped and the previous summary plus the deterministic sections remain; a warning says so.
+An abort during compaction leaves the conversation unchanged.
+
+### Overflow recovery
+
+A provider can still reject a request as too long, because estimates are approximate. Adapters
+report this one way (a `ContextOverflowError`, or a stream error with code `context_overflow`). The
+agent then compacts with half the usual tail and retries the step. An answer cut off by the context
+window keeps the text already shown, answers its tool calls as interrupted, compacts and continues
+with a note to the model. Only one recovery happens per step: a second overflow ends the turn with
+`budget`.
+
+### Tool output
 
 Tool output is reduced before it enters the conversation: large results keep their first and last
 lines (or bytes, for very long lines) with a marker showing how much was dropped.
@@ -197,5 +244,5 @@ rendering, input handling and interrupt behavior are described in [TUI.md](TUI.m
 
 ## Not implemented yet
 
-- Automatic compaction of long conversations.
 - Providers other than OpenRouter.
+- Subagents.
