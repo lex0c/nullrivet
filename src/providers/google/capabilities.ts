@@ -39,6 +39,7 @@ export const GOOGLE_CAPS: Record<string, ProviderCapabilities> = {
     context_window: 1_048_576,
     output_max_tokens: 32_768,
     supports_reasoning_effort: true,
+    min_thinking_budget: 512,
     max_thinking_budget: 24_576,
   },
 };

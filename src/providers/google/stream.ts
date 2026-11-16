@@ -55,6 +55,9 @@ const FINISH_REASON_MAP: Readonly<Record<string, StopReason>> = {
   BLOCKLIST: 'refusal',
   PROHIBITED_CONTENT: 'refusal',
   SPII: 'refusal',
+  IMAGE_SAFETY: 'refusal',
+  IMAGE_PROHIBITED_CONTENT: 'refusal',
+  IMAGE_RECITATION: 'refusal',
 };
 
 // The model attempted a function call that cannot be executed; the agent reports it back so the
@@ -97,7 +100,9 @@ export async function* normalizeGoogleStream(
   raw: AsyncIterable<RawGoogleChunk>,
 ): AsyncIterable<StreamEvent> {
   let messageStarted = false;
-  let stopReason: StopReason = 'end_turn';
+  // Set only by a finish reason or a blocked prompt: a stream that ends without one was cut short,
+  // and the step collector reports it as incomplete.
+  let stopReason: StopReason | undefined;
   let toolCallSeen = false;
   let rawPrompt = 0;
   let rawCandidates = 0;
@@ -218,8 +223,20 @@ export async function* normalizeGoogleStream(
             message: `the model produced a function call that cannot be executed (${finish})${detail}`,
             retryable: false,
           };
+        } else if (FINISH_REASON_MAP[finish] !== undefined) {
+          stopReason = FINISH_REASON_MAP[finish];
         } else {
-          stopReason = FINISH_REASON_MAP[finish] ?? 'end_turn';
+          // OTHER, TOO_MANY_TOOL_CALLS, an unspecified reason or one added later: the model
+          // stopped for a reason this adapter cannot vouch for, which must not look like a clean
+          // finish.
+          const detail =
+            candidate.finishMessage === undefined ? '' : `: ${candidate.finishMessage}`;
+          yield {
+            kind: 'error',
+            code: 'google.finish_reason',
+            message: `the model stopped with finish reason ${finish}${detail}`,
+            retryable: false,
+          };
         }
       }
     }
@@ -227,10 +244,12 @@ export async function* normalizeGoogleStream(
     if (!messageStarted) yield { kind: 'start', message_id: synthesizeMessageId() };
     yield* emitUsage();
     // Gemini finishes a step with function calls as STOP.
-    yield {
-      kind: 'stop',
-      reason: toolCallSeen && stopReason === 'end_turn' ? 'tool_use' : stopReason,
-    };
+    if (stopReason !== undefined) {
+      yield {
+        kind: 'stop',
+        reason: toolCallSeen && stopReason === 'end_turn' ? 'tool_use' : stopReason,
+      };
+    }
   } finally {
     // A turn that failed mid-stream was still billed, so its usage is reported before the error
     // propagates.

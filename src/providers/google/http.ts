@@ -6,6 +6,7 @@ import {
   isContextOverflowMessage,
   ProviderRequestError,
 } from '../errors.ts';
+import { displayOrigin, readLines } from '../http-stream.ts';
 import type { RawGoogleChunk } from './stream.ts';
 
 // Client for `models/{model}:streamGenerateContent`, read as server-sent events with fetch, so
@@ -17,13 +18,16 @@ export const DEFAULT_GOOGLE_BASE_URL = 'https://generativelanguage.googleapis.co
 // An event this long without its terminating blank line means a runaway or hostile stream.
 const MAX_EVENT_CHARS = 16 * 1024 * 1024;
 
-// `status` lets the generic retry treat 429 and 5xx as transient.
+// `status` lets the generic retry treat 429 and 5xx as transient, and `headers` carries the
+// server's advice on when to retry, which the retry reads.
 export class GoogleHttpError extends Error {
   readonly status: number | undefined;
-  constructor(message: string, status?: number) {
+  readonly headers: Record<string, string> | undefined;
+  constructor(message: string, status?: number, headers?: Record<string, string>) {
     super(message);
     this.name = 'GoogleHttpError';
     this.status = status;
+    this.headers = headers;
   }
 }
 
@@ -33,20 +37,31 @@ export interface GoogleHttpOptions {
   fetch?: FetchLike;
 }
 
-// Messages may reach logs, so they never carry credentials or query parameters from the URL.
-const displayOrigin = (url: string): string => {
-  try {
-    return new URL(url).origin;
-  } catch {
-    return '<invalid url>';
-  }
-};
-
 interface ErrorDetails {
   message: string;
   // Canonical status name, such as INVALID_ARGUMENT or RESOURCE_EXHAUSTED.
   status: string | undefined;
+  // From a RetryInfo detail, which quota errors carry instead of a Retry-After header.
+  retryDelayMs: number | undefined;
 }
+
+// A protobuf Duration in its JSON form, such as "30s" or "1.5s".
+const durationMs = (value: unknown): number | undefined => {
+  if (typeof value !== 'string') return undefined;
+  const match = /^(\d+(?:\.\d+)?)s$/.exec(value.trim());
+  return match === null ? undefined : Math.round(Number(match[1]) * 1_000);
+};
+
+const retryDelayOf = (details: unknown): number | undefined => {
+  if (!Array.isArray(details)) return undefined;
+  for (const detail of details as unknown[]) {
+    const entry = detail as { '@type'?: unknown; retryDelay?: unknown } | null;
+    if (typeof entry?.['@type'] === 'string' && entry['@type'].endsWith('RetryInfo')) {
+      return durationMs(entry.retryDelay);
+    }
+  }
+  return undefined;
+};
 
 // Error bodies are `{ error: { code, message, status } }`, or an array holding one such object,
 // and may be framed as a server-sent event.
@@ -54,17 +69,20 @@ const errorDetails = (body: string): ErrorDetails => {
   try {
     const parsed = JSON.parse(body.startsWith('data:') ? body.slice(5) : body) as unknown;
     const first = Array.isArray(parsed) ? (parsed[0] as unknown) : parsed;
-    const error = (first as { error?: { message?: unknown; status?: unknown } } | null)?.error;
+    const error = (
+      first as { error?: { message?: unknown; status?: unknown; details?: unknown } } | null
+    )?.error;
     if (error !== null && typeof error === 'object' && typeof error.message === 'string') {
       return {
         message: error.message.trim(),
         status: typeof error.status === 'string' ? error.status : undefined,
+        retryDelayMs: retryDelayOf(error.details),
       };
     }
   } catch {
     // Not JSON; the raw body is the message.
   }
-  return { message: body, status: undefined };
+  return { message: body, status: undefined, retryDelayMs: undefined };
 };
 
 const parseEvent = (data: string): RawGoogleChunk => {
@@ -116,13 +134,24 @@ export const createGoogleHttp = (options: GoogleHttpOptions) => {
       );
     }
     if (res.ok) return res;
-    const details = errorDetails((await res.text().catch(() => '')).trim());
+    const raw = await res.text().catch(() => '');
+    // An abort while the error body is read is a cancellation, not the server's failure.
+    if (signal?.aborted === true) throw new AbortError();
+    const details = errorDetails(raw.trim());
     if (isContextOverflowMessage(details.message)) throw new ContextOverflowError(details.message);
     const status = details.status === undefined ? '' : ` ${details.status}`;
     const message = details.message.length > 0 ? `: ${details.message}` : '';
+    const retryAfter = res.headers.get('retry-after');
+    const retryHeaders =
+      details.retryDelayMs !== undefined
+        ? { 'retry-after-ms': String(details.retryDelayMs) }
+        : retryAfter !== null
+          ? { 'retry-after': retryAfter }
+          : undefined;
     throw new GoogleHttpError(
       `Gemini API request for "${model}" failed: HTTP ${res.status}${status}${message}`,
       res.status,
+      retryHeaders,
     );
   };
 
@@ -132,72 +161,39 @@ export const createGoogleHttp = (options: GoogleHttpOptions) => {
     body: unknown,
     signal?: AbortSignal,
   ): AsyncIterable<RawGoogleChunk> {
-    // Read through a function: the signal changes while the stream is awaited.
-    const aborted = (): boolean => signal?.aborted === true;
-    if (aborted()) throw new AbortError();
+    if (signal?.aborted === true) throw new AbortError();
     const res = await post(model, body, signal);
-    if (res.body === null) throw new GoogleHttpError('Gemini API returned no response body');
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
     let data: string[] = [];
     let dataChars = 0;
-
     const takeEvent = (): RawGoogleChunk | undefined => {
       const joined = data.join('\n');
       data = [];
       dataChars = 0;
       return joined.length > 0 ? parseEvent(joined) : undefined;
     };
-
-    // Returns the event completed by this line, if any.
-    const readLine = (line: string): RawGoogleChunk | undefined => {
-      if (line.length === 0) return takeEvent();
-      if (line.startsWith('data:')) {
+    const lines = readLines(res, {
+      label: 'Gemini API',
+      maxLineChars: MAX_EVENT_CHARS,
+      signal,
+      fail: (message) => new GoogleHttpError(message),
+    });
+    for await (const line of lines) {
+      if (line.length === 0) {
+        const event = takeEvent();
+        if (event !== undefined) yield event;
+      } else if (line.startsWith('data:')) {
         const value = line.slice(line.startsWith('data: ') ? 6 : 5);
         data.push(value);
         dataChars += value.length;
-      }
-      return undefined;
-    };
-
-    try {
-      while (true) {
-        let chunk: Awaited<ReturnType<typeof reader.read>>;
-        try {
-          chunk = await reader.read();
-        } catch (e) {
-          if (aborted()) throw new AbortError();
-          throw new ProviderRequestError(`Gemini API stream failed: ${errorMessage(e)}`, {
-            retryable: true,
-            cause: e,
-          });
-        }
-        if (chunk.done) break;
-        buffer += decoder.decode(chunk.value, { stream: true });
-        let nl = buffer.indexOf('\n');
-        while (nl !== -1) {
-          const line = buffer.slice(0, nl).replace(/\r$/, '');
-          buffer = buffer.slice(nl + 1);
-          const event = readLine(line);
-          if (event !== undefined) yield event;
-          nl = buffer.indexOf('\n');
-        }
-        if (buffer.length + dataChars > MAX_EVENT_CHARS) {
+        if (dataChars > MAX_EVENT_CHARS) {
           throw new GoogleHttpError(
             `Gemini API sent an event longer than ${MAX_EVENT_CHARS} characters`,
           );
         }
       }
-      buffer += decoder.decode();
-      if (buffer.length > 0) readLine(buffer.replace(/\r$/, ''));
-      const last = takeEvent();
-      if (last !== undefined) yield last;
-    } finally {
-      await reader.cancel().catch(() => undefined);
     }
-    // A cancelled body can end without an error; the truncated turn must not look complete.
-    if (aborted()) throw new AbortError();
+    const last = takeEvent();
+    if (last !== undefined) yield last;
   }
 
   return { streamGenerateContent };

@@ -241,7 +241,9 @@ curl -s https://openrouter.ai/api/v1/models \
 - **Thought signatures.** Thinking models attach a signature to their function calls, and
   Gemini 3 and later reject a function call of the current turn whose signature is not sent back.
   nullrivet keeps each signature unmodified, attached to the part it came with, and sends it back
-  on every following request.
+  on every following request. Function calls made by another model, after a switch with
+  `/model`, have no signature; the first of them in a step is sent with the placeholder Google
+  documents for history from another model.
 - Tool schemas are sent as JSON Schema (`parametersJsonSchema`), so keywords such as
   `additionalProperties` are accepted.
 - Gemini 3 and later models are sent no `temperature` or `top_p`, as Google advises keeping their

@@ -507,11 +507,15 @@ describe('normalizeOpenAIStream', () => {
     expect(events.find((e) => e.kind === 'tool_use_stop')).toBeUndefined();
   });
 
-  test('empty stream still yields a well-formed start+stop sequence', async () => {
-    const events = await collectNonUsage(normalizeOpenAIStream(fromChunks([])));
-    expect(events).toHaveLength(2);
-    expect(events[0]?.kind).toBe('start');
-    expect(events[1]).toEqual({ kind: 'stop', reason: 'end_turn' });
+  test('a stream that ends without a finish reason reports no stop, so it is not taken as complete', async () => {
+    const empty = await collectNonUsage(normalizeOpenAIStream(fromChunks([])));
+    expect(empty.map((e) => e.kind)).toEqual(['start']);
+    const cut = await collectNonUsage(
+      normalizeOpenAIStream(
+        fromChunks([{ id: 'c', choices: [{ delta: { content: 'half an an' } }] }]),
+      ),
+    );
+    expect(cut.map((e) => e.kind)).toEqual(['start', 'text_delta']);
   });
 
   test('does NOT emit a usage event when chunk.usage is an empty object', async () => {

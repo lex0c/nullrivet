@@ -5,8 +5,8 @@
 #
 # target is a Bun compile target such as bun-linux-x64 (default: this machine).
 #
-# The grep worker is a second entry point; src/tools/grep.ts finds it inside the executable by its
-# path relative to src/. The executable does not load .env or bunfig.toml from the directory it
+# The grep worker is a second entry point; the grep tool finds it inside the executable by its path
+# relative to src/, so the entry points must keep that layout. The executable does not load .env or bunfig.toml from the directory it
 # runs in: a repository must not be able to configure the agent or preload code into it.
 set -euo pipefail
 

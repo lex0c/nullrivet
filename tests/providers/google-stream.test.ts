@@ -95,6 +95,7 @@ describe('normalizeGoogleStream', () => {
                     { functionCall: { name: 'read_file', args: { path: 'a' } } },
                   ],
                 },
+                finishReason: 'STOP',
               },
             ],
           },
@@ -192,12 +193,31 @@ describe('normalizeGoogleStream', () => {
       ['MAX_TOKENS', 'max_tokens'],
       ['SAFETY', 'refusal'],
       ['PROHIBITED_CONTENT', 'refusal'],
-      ['OTHER', 'end_turn'],
+      ['IMAGE_SAFETY', 'refusal'],
     ] as const) {
       const ev = await collectNonUsage(
         normalizeGoogleStream(from([{ candidates: [{ finishReason: finish }] }])),
       );
       expect(ev.at(-1)).toEqual({ kind: 'stop', reason });
+    }
+  });
+
+  test('a finish reason the adapter does not know is an error, not a clean finish', async () => {
+    for (const finish of [
+      'OTHER',
+      'FINISH_REASON_UNSPECIFIED',
+      'TOO_MANY_TOOL_CALLS',
+      'NEW_REASON',
+    ]) {
+      const ev = await collectNonUsage(
+        normalizeGoogleStream(from([{ candidates: [{ finishReason: finish }] }])),
+      );
+      expect(ev.some((e) => e.kind === 'stop')).toBe(false);
+      expect(ev.at(-1)).toMatchObject({
+        kind: 'error',
+        code: 'google.finish_reason',
+        retryable: false,
+      });
     }
   });
 
@@ -296,9 +316,9 @@ describe('normalizeGoogleStream', () => {
     expect(ev.at(-1)).toMatchObject({ code: CONTEXT_OVERFLOW, retryable: false });
   });
 
-  test('an empty stream still starts and stops', async () => {
+  test('an empty stream starts but reports no stop, so it is not taken as complete', async () => {
     const ev = await collect(normalizeGoogleStream(from([])));
-    expect(ev.map((e) => e.kind)).toEqual(['start', 'stop']);
+    expect(ev.map((e) => e.kind)).toEqual(['start']);
   });
 
   test('usage seen before a mid-stream failure is reported before the error propagates', async () => {

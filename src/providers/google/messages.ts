@@ -71,6 +71,8 @@ const toolResultPart = (
   return { functionResponse: id === undefined ? { name, response } : { id, name, response } };
 };
 
+const UNSIGNED_CALL_SIGNATURE = 'skip_thought_signature_validator';
+
 // A signature belongs to the part that follows its reasoning block, as the stream normalizer
 // emits it before that part. A signature with no part after it (the API may send it alone in a
 // final empty text part) goes to the last part when that part has none, because an empty text
@@ -113,6 +115,15 @@ const toParts = (m: ProviderMessage, callNames: Map<string, string>): GooglePart
   if (pending !== undefined && last !== undefined && last.thoughtSignature === undefined) {
     last.thoughtSignature = pending;
   }
+  // Gemini 3 and later reject a function call of the current turn without a signature, and calls
+  // made by another model (after switching with /model) have none. The placeholder Google
+  // documents for history from another model skips that check. Only the first call of a step
+  // carries a signature.
+  const calls = parts.filter((p) => 'functionCall' in p);
+  const first = calls[0];
+  if (first !== undefined && calls.every((p) => p.thoughtSignature === undefined)) {
+    first.thoughtSignature = UNSIGNED_CALL_SIGNATURE;
+  }
   return parts;
 };
 
@@ -153,7 +164,8 @@ export const googleThinkingConfig = (
     return { thinkingLevel: cappedEffortLevel(req.effort, caps.supports_effort_xhigh === true) };
   }
   const budget = effortThinkingBudget(req.effort, req.max_tokens);
-  if (budget === undefined) return undefined;
+  // An output limit too small for the model's smallest budget leaves thinking at its default.
+  if (budget === undefined || budget < (caps.min_thinking_budget ?? 0)) return undefined;
   return { thinkingBudget: Math.min(budget, caps.max_thinking_budget) };
 };
 

@@ -23,6 +23,9 @@ export class ProviderRequestError extends Error {
 // ending the turn.
 export const INVALID_TOOL_CALL = 'tool_call.invalid';
 
+// A response stream that ended before the provider reported how it finished.
+export const STREAM_INCOMPLETE = 'stream.incomplete';
+
 // Stream error code for a request the provider rejected because the prompt does not fit the
 // context window. The agent recovers by compacting the conversation and retrying once.
 export const CONTEXT_OVERFLOW = 'context_overflow';

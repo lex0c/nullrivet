@@ -1,11 +1,11 @@
-import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 export interface EvalRun {
   dir: string;
   code: number;
   events: { type: string; [key: string]: unknown }[];
-  // Text of the final answer, concatenated from text deltas.
+  // Text of the final answer: what the model wrote after its last tool call.
   answer: string;
   // Model requests of the main agent, compaction and subagent requests excluded.
   steps: number;
@@ -28,7 +28,7 @@ export interface EvalTask {
 const write = (dir: string, files: Record<string, string>): void => {
   for (const [path, content] of Object.entries(files)) {
     const full = join(dir, path);
-    Bun.spawnSync(['mkdir', '-p', join(full, '..')]);
+    mkdirSync(dirname(full), { recursive: true });
     writeFileSync(full, content);
   }
 };

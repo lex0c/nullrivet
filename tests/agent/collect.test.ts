@@ -212,4 +212,27 @@ describe('collectStep', () => {
     expect(out.usage.output).toBe(12);
     expect(out.usageSeen).toBe(true);
   });
+
+  test('a stream that ends without a stop is incomplete and can be retried', async () => {
+    const out = await collectStep(
+      fromEvents([
+        { kind: 'start', message_id: 'm' },
+        { kind: 'text_delta', text: 'half an ans' },
+      ]),
+    );
+    expect(out.errors).toEqual([
+      {
+        code: 'stream.incomplete',
+        message: 'the response stream ended before the model finished',
+        retryable: true,
+      },
+    ]);
+    const failed = await collectStep(
+      fromEvents([
+        { kind: 'start', message_id: 'm' },
+        { kind: 'error', code: 'x', message: 'boom', retryable: false },
+      ]),
+    );
+    expect(failed.errors.map((e) => e.code)).toEqual(['x']);
+  });
 });

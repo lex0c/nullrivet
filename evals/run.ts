@@ -60,10 +60,12 @@ const runTask = async (task: (typeof TASKS)[number]): Promise<EvalRun & { ms: nu
     .split('\n')
     .filter((line) => line.trim().length > 0)
     .map((line) => JSON.parse(line) as EvalRun['events'][number]);
-  const answer = events
-    .filter((e) => e.type === 'text:delta')
-    .map((e) => String(e.text))
-    .join('');
+  // The final answer is the text after the last tool call; earlier text is narration of the work.
+  let answer = '';
+  for (const e of events) {
+    if (e.type === 'tool:start') answer = '';
+    else if (e.type === 'text:delta') answer += String(e.text);
+  }
   const run: EvalRun & { ms: number } = {
     dir,
     code,

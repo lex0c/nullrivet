@@ -27,6 +27,8 @@ export interface ProviderCapabilities {
   supports_effort_xhigh?: boolean;
   // Google: ceiling for the numeric thinking budget; larger values are rejected.
   max_thinking_budget?: number;
+  // Google: floor for the numeric thinking budget; smaller values other than zero are rejected.
+  min_thinking_budget?: number;
   // Prompt caching requires explicit `cache_control` markers instead of automatic caching.
   cache_explicit_breakpoints?: boolean;
   // OpenAI: extended prompt-cache retention, and whether only the extended mode is accepted.

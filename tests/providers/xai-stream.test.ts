@@ -231,9 +231,9 @@ describe('normalizeXaiStream', () => {
     expect(ev.at(-1)).toMatchObject({ code: CONTEXT_OVERFLOW, retryable: false });
   });
 
-  test('an empty stream still starts and stops', async () => {
+  test('an empty stream starts but reports no stop, so it is not taken as complete', async () => {
     const ev = await collect(normalizeXaiStream(from([])));
-    expect(ev.map((e) => e.kind)).toEqual(['start', 'stop']);
+    expect(ev.map((e) => e.kind)).toEqual(['start']);
   });
 
   test('usage seen before a mid-stream failure is reported before the error propagates', async () => {

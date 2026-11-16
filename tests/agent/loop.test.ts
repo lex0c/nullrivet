@@ -378,6 +378,25 @@ describe('runTurn', () => {
     expect(result.message).toContain('output token limit');
   });
 
+  test('a response cut short before any output is requested again', async () => {
+    const h = harness([[{ kind: 'start', message_id: 'cut' }], textTurn('complete')]);
+    const result = await runTurn('go', h.deps);
+    expect(result.reason).toBe('done');
+    expect(h.provider.calls).toHaveLength(2);
+  });
+
+  test('a response cut short after some output ends the turn with an error', async () => {
+    const h = harness([
+      [
+        { kind: 'start', message_id: 'cut' },
+        { kind: 'text_delta', text: 'The answer is' },
+      ],
+    ]);
+    const result = await runTurn('go', h.deps);
+    expect(result.reason).toBe('error');
+    expect(result.message).toContain('stream.incomplete');
+  });
+
   describe('context limits', () => {
     const SUMMARY = 'GOAL:\ncontinue\nNEXT:\nreply\nERRORS:\n(none)';
 

@@ -1,16 +1,12 @@
 import { createHash } from 'node:crypto';
-import OpenAI, { APIConnectionError, APIError, type ClientOptions } from 'openai';
+import type OpenAI from 'openai';
+import type { ClientOptions } from 'openai';
 import type { ChatCompletionCreateParamsStreaming } from 'openai/resources/chat/completions';
 import type { ResponseCreateParamsStreaming } from 'openai/resources/responses/responses';
 import { stableStringify } from '../canonical-json.ts';
 import { boolFromEnv, type Env } from '../env.ts';
-import {
-  AbortError,
-  ContextOverflowError,
-  isContextOverflowMessage,
-  ProviderRequestError,
-} from '../errors.ts';
 import type { GenerateRequest, Provider, ProviderCapabilities, StreamEvent } from '../types.ts';
+import { buildCompatibleClient, type CompatibleService, streamItems } from './compatible.ts';
 import { toOpenAITools } from './convert.ts';
 import { systemText, toOpenAIChatMessages } from './messages.ts';
 import { buildResponsesParams } from './responses.ts';
@@ -48,81 +44,10 @@ const promptCacheRetentionFromEnv = (env: Env): '24h' | 'in_memory' => {
   return v === 'in_memory' || v === 'off' || v === '0' || v === 'false' ? 'in_memory' : '24h';
 };
 
-const isErrorBody = (value: unknown): value is RawOpenAIError =>
-  typeof value === 'object' && value !== null;
+const OPENAI: CompatibleService = { name: 'OpenAI', keyEnv: 'OPENAI_API_KEY' };
 
-const buildClient = (options: CreateOpenAIProviderOptions, baseURL: string): OpenAI => {
-  if (options.client !== undefined) return options.client;
-  const apiKey = options.apiKey;
-  if (apiKey === undefined || apiKey.length === 0) {
-    throw new Error('OpenAI API key required (set OPENAI_API_KEY)');
-  }
-  const sdkOptions: ClientOptions = {
-    apiKey,
-    baseURL,
-    // The SDK otherwise reads OPENAI_ORG_ID and OPENAI_PROJECT_ID from the environment and sends
-    // them as headers, which would disclose account details to a compatible endpoint.
-    organization: null,
-    project: null,
-    // Retries happen in generateWithRetry; SDK retries would multiply the attempts.
-    maxRetries: 0,
-    // The SDK logs to the console, which would write into the terminal interface.
-    logLevel: 'off',
-  };
-  if (options.fetch !== undefined) sdkOptions.fetch = options.fetch;
-  return new OpenAI(sdkOptions);
-};
-
-// Connection failures and timeouts carry no HTTP status, so the generic retry classification
-// cannot tell them apart from permanent errors; they are marked transient here.
-const classifyError = (error: unknown, signal: AbortSignal | undefined): unknown => {
-  if (signal?.aborted === true) return new AbortError();
-  if (error instanceof APIConnectionError) {
-    return new ProviderRequestError(`connection to OpenAI failed: ${error.message}`, {
-      retryable: true,
-      cause: error,
-    });
-  }
-  if (
-    error instanceof APIError &&
-    error.status === 400 &&
-    (error.code === 'context_length_exceeded' || isContextOverflowMessage(error.message))
-  ) {
-    return new ContextOverflowError(error.message, { cause: error });
-  }
-  return error;
-};
-
-// Opens the stream and yields its items. A stream error that the SDK throws is handed back through
-// `toItem` so the normalizer reports it as an error event, and an abort that the SDK turns into a
-// silent end of the stream becomes AbortError.
-async function* streamItems<T>(
-  open: () => Promise<unknown>,
-  toItem: (error: RawOpenAIError) => T,
-  signal: AbortSignal | undefined,
-): AsyncIterable<T> {
-  let stream: AsyncIterable<T>;
-  try {
-    stream = (await open()) as AsyncIterable<T>;
-  } catch (e) {
-    throw classifyError(e, signal);
-  }
-  try {
-    for await (const item of stream) yield item;
-  } catch (e) {
-    if (
-      signal?.aborted !== true &&
-      e instanceof APIError &&
-      e.status === undefined &&
-      isErrorBody(e.error)
-    ) {
-      yield toItem(e.error);
-      return;
-    }
-    throw classifyError(e, signal);
-  }
-  if (signal?.aborted === true) throw new AbortError();
-}
+const errorBody = (value: unknown): RawOpenAIError | undefined =>
+  typeof value === 'object' && value !== null ? (value as RawOpenAIError) : undefined;
 
 export const createOpenAIProvider = (
   modelName: string,
@@ -131,7 +56,7 @@ export const createOpenAIProvider = (
   const caps = options.capabilities;
   const env = options.env ?? process.env;
   const baseURL = (options.baseURL ?? DEFAULT_OPENAI_BASE_URL).replace(/\/+$/, '');
-  const client = buildClient(options, baseURL);
+  const client = buildCompatibleClient(options, baseURL, OPENAI);
   // Cache routing, cache retention and encrypted reasoning are OpenAI parameters that a compatible
   // endpoint may reject, so they are sent to the official endpoint only.
   const official = baseURL === DEFAULT_OPENAI_BASE_URL;
@@ -185,8 +110,12 @@ export const createOpenAIProvider = (
             chatParams(req) as unknown as ChatCompletionCreateParamsStreaming,
             { signal },
           ),
-        (error) => ({ error }),
+        (body) => {
+          const error = errorBody(body);
+          return error === undefined ? undefined : { error };
+        },
         signal,
+        OPENAI,
       ),
     );
 
@@ -205,13 +134,16 @@ export const createOpenAIProvider = (
             }) as unknown as ResponseCreateParamsStreaming,
             { signal },
           ),
-        (error) => {
+        (body) => {
+          const error = errorBody(body);
+          if (error === undefined) return undefined;
           const event: RawResponsesEvent = { type: 'error' };
           if (error.code !== undefined && error.code !== null) event.code = String(error.code);
           if (error.message !== undefined) event.message = error.message;
           return event;
         },
         signal,
+        OPENAI,
       ),
     );
 

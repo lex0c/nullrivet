@@ -112,11 +112,16 @@ provider.generate(request, stepSignal)
 ```
 
 - **Before the first event**, HTTP 429 and 5xx responses, network errors and connection failures
-  are retried up to 3 attempts, with 200 ms and 800 ms backoff or the server's `Retry-After`,
-  capped at 8 s. Once an event has been yielded, the stream is never replayed, because the user
+  are retried up to 3 attempts, with 200 ms and 800 ms backoff or the server's advice
+  (`Retry-After`, or the retry delay in a Gemini quota error), capped at 8 s. Once an event has been yielded, the stream is never replayed, because the user
   has already seen its output.
 - **Inside the stream**, a provider may report a transient error. If the step produced no text and
   no tool call yet, the step is repeated, up to 2 times per step.
+- **A stream cut short** (a dropped connection, a proxy closing it) must not pass for a complete
+  answer. Adapters emit a stop only when the provider reports how the response finished, and the
+  step collector turns a missing stop into a transient `stream.incomplete` error: the step is
+  repeated when nothing came through, and the turn ends with an error otherwise. A finish reason
+  an adapter does not know (Gemini's `OTHER`, for example) is an error too, not a clean finish.
 - **A malformed tool call** (no name, arguments that are not a JSON object) is not fatal: the valid
   calls of the step run, and the model is told which calls were rejected so it can issue them
   again.

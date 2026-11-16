@@ -82,7 +82,9 @@ export async function* normalizeOpenRouterStream(
   raw: AsyncIterable<RawORChunk>,
 ): AsyncIterable<StreamEvent> {
   let messageStarted = false;
-  let stopReason: StopReason = 'end_turn';
+  // Set only by a finish reason: a stream that ends without one was cut short, and the step
+  // collector reports it as incomplete.
+  let stopReason: StopReason | undefined;
   const toolCalls = new Map<number, ToolCallInProgress>();
   const reasoningDetails: unknown[] = [];
   // Kept for replay when the model streams no structured reasoning_details.
@@ -284,7 +286,7 @@ export async function* normalizeOpenRouterStream(
       yield { kind: 'start', message_id: synthesizeMessageId() };
     }
     yield* emitUsage();
-    yield { kind: 'stop', reason: stopReason };
+    if (stopReason !== undefined) yield { kind: 'stop', reason: stopReason };
   } finally {
     // A turn that failed mid-stream was still billed, so its usage is reported before the error
     // propagates.

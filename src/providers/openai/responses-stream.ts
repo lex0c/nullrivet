@@ -201,6 +201,7 @@ export async function* normalizeResponsesStream(
   }
 
   yield* start(undefined);
-  // Without a terminal event, a pending tool call still continues the loop.
-  yield { kind: 'stop', reason: stopReason ?? (sawToolCall ? 'tool_use' : 'end_turn') };
+  // Without response.completed or response.incomplete the stream was cut short: no stop is
+  // emitted, and the step collector reports it as incomplete.
+  if (stopReason !== undefined) yield { kind: 'stop', reason: stopReason };
 }

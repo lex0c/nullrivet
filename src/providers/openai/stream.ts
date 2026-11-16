@@ -15,6 +15,8 @@ export interface RawOpenAIChoice {
     role?: string;
     content?: string | null;
     refusal?: string | null;
+    // Reasoning that some compatible servers (xAI) stream for display.
+    reasoning_content?: string | null;
     tool_calls?: RawOpenAIToolCallDelta[];
   };
   finish_reason?: string | null;
@@ -25,6 +27,7 @@ export interface RawOpenAIUsage {
   prompt_tokens?: number;
   completion_tokens?: number;
   prompt_tokens_details?: { cached_tokens?: number } | null;
+  completion_tokens_details?: { reasoning_tokens?: number } | null;
 }
 
 export interface RawOpenAIError {
@@ -63,8 +66,6 @@ const FINISH_REASON_MAP: Readonly<Record<string, StopReason>> = {
 
 const RETRYABLE_ERROR_CODES: ReadonlySet<string> = new Set(['server_error', 'rate_limit_exceeded']);
 
-const synthesizeMessageId = (): string => `openai_${crypto.randomUUID()}`;
-
 // Shared by the Chat Completions and Responses normalizers.
 export const openAIStreamErrorEvent = (error: RawOpenAIError): StreamEvent => {
   const code = error.code === null || error.code === undefined ? undefined : String(error.code);
@@ -81,14 +82,32 @@ export const openAIStreamErrorEvent = (error: RawOpenAIError): StreamEvent => {
   };
 };
 
+// How a compatible server's stream differs from OpenAI's own.
+export interface ChatStreamOptions {
+  // Prefix of the message ids made up when the server sends none.
+  idPrefix?: string;
+  // `completion_tokens` leaves out the reasoning tokens reported in its details, although they
+  // are billed as output, so they are added back.
+  reasoningExcludedFromCompletion?: boolean;
+  // Maps an error that arrives in the stream to an event.
+  streamError?: (error: RawOpenAIError) => StreamEvent;
+}
+
+// A stop event is emitted only when the server reports a finish reason: a stream that ends without
+// one was cut short, and the step collector reports it as incomplete.
 export async function* normalizeOpenAIStream(
   raw: AsyncIterable<RawOpenAIChunk>,
+  options: ChatStreamOptions = {},
 ): AsyncIterable<StreamEvent> {
+  const synthesizeMessageId = (): string =>
+    `${options.idPrefix ?? 'openai'}_${crypto.randomUUID()}`;
+  const streamError = options.streamError ?? openAIStreamErrorEvent;
   let messageStarted = false;
-  let stopReason: StopReason = 'end_turn';
+  let stopReason: StopReason | undefined;
   const toolCalls = new Map<number, ToolCallInProgress>();
   let rawPrompt = 0;
   let rawCompletion = 0;
+  let rawReasoning = 0;
   let rawCached = 0;
   let usageSeen = false;
   let usageEmitted = false;
@@ -102,7 +121,8 @@ export async function* normalizeOpenAIStream(
         kind: 'usage',
         usage: {
           input: Math.max(0, rawPrompt - rawCached),
-          output: rawCompletion,
+          output:
+            rawCompletion + (options.reasoningExcludedFromCompletion === true ? rawReasoning : 0),
           cache_read: rawCached,
           cache_creation: 0,
         },
@@ -118,7 +138,7 @@ export async function* normalizeOpenAIStream(
       }
 
       if (chunk.error !== undefined && chunk.error !== null) {
-        yield openAIStreamErrorEvent(chunk.error);
+        yield streamError(chunk.error);
         yield* emitUsage();
         return;
       }
@@ -131,6 +151,10 @@ export async function* normalizeOpenAIStream(
         }
         if (typeof u.completion_tokens === 'number') {
           rawCompletion = Math.max(rawCompletion, u.completion_tokens);
+          usageSeen = true;
+        }
+        if (typeof u.completion_tokens_details?.reasoning_tokens === 'number') {
+          rawReasoning = Math.max(rawReasoning, u.completion_tokens_details.reasoning_tokens);
           usageSeen = true;
         }
         if (typeof u.prompt_tokens_details?.cached_tokens === 'number') {
@@ -149,6 +173,10 @@ export async function* normalizeOpenAIStream(
         }
         if (typeof delta.refusal === 'string' && delta.refusal.length > 0) {
           yield { kind: 'text_delta', text: delta.refusal };
+        }
+        // Display only: Chat Completions has no input slot for reasoning, so nothing is replayed.
+        if (typeof delta.reasoning_content === 'string' && delta.reasoning_content.length > 0) {
+          yield { kind: 'thinking_delta', text: delta.reasoning_content };
         }
         for (const tc of delta.tool_calls ?? []) {
           let inProgress = toolCalls.get(tc.index);
@@ -217,7 +245,7 @@ export async function* normalizeOpenAIStream(
 
     if (!messageStarted) yield { kind: 'start', message_id: synthesizeMessageId() };
     yield* emitUsage();
-    yield { kind: 'stop', reason: stopReason };
+    if (stopReason !== undefined) yield { kind: 'stop', reason: stopReason };
   } finally {
     // A turn that failed mid-stream was still billed, so its usage is reported before the error
     // propagates.

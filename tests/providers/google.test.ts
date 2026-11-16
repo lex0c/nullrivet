@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { AbortError } from '../../src/agent/abortable.ts';
 import { buildAssistantContent } from '../../src/agent/assistant-content.ts';
 import { collectStep } from '../../src/agent/collect.ts';
-import { generateWithRetry, isRetryableError } from '../../src/agent/retry.ts';
+import { generateWithRetry, isRetryableError, retryAfterMs } from '../../src/agent/retry.ts';
 import {
   ContextOverflowError,
   INVALID_TOOL_CALL,
@@ -238,6 +238,21 @@ describe('googleThinkingConfig', () => {
     ).toBeUndefined();
   });
 
+  test('Gemini 2.5 thinks only when the output limit leaves room for its smallest budget', () => {
+    const small = buildGoogleRequest(
+      reqGen({ effort: 'high', max_tokens: 400 }),
+      caps('gemini-2.5-flash-lite'),
+    );
+    expect(small.generationConfig.thinkingConfig).toBeUndefined();
+    const large = buildGoogleRequest(
+      reqGen({ effort: 'high', max_tokens: 32_768 }),
+      caps('gemini-2.5-flash-lite'),
+    );
+    expect(large.generationConfig.thinkingConfig).toMatchObject({
+      thinkingBudget: expect.any(Number),
+    });
+  });
+
   test('the thinking configuration is placed in generationConfig', () => {
     const body = buildGoogleRequest(reqGen({ effort: 'low' }), caps('gemini-3.5-flash'));
     expect(body.generationConfig.thinkingConfig).toEqual({ thinkingLevel: 'low' });
@@ -245,6 +260,29 @@ describe('googleThinkingConfig', () => {
 });
 
 describe('toGoogleContents', () => {
+  test('calls from another model get the placeholder signature on the first call only', () => {
+    const step = (reasoning: ProviderMessage['content']): ProviderMessage[] => [
+      { role: 'user', content: 'go' },
+      { role: 'assistant', content: reasoning },
+    ];
+    const calls = [
+      { type: 'tool_use' as const, id: 'a', name: 'glob', input: {} },
+      { type: 'tool_use' as const, id: 'b', name: 'grep', input: {} },
+    ];
+    const unsigned = toGoogleContents(step(calls))[1]?.parts ?? [];
+    expect(unsigned.map((p) => p.thoughtSignature)).toEqual([
+      'skip_thought_signature_validator',
+      undefined,
+    ]);
+    const signed = toGoogleContents(
+      step([
+        { type: 'reasoning', provider: 'google', data: { thoughtSignature: 'real' } },
+        ...calls,
+      ]),
+    )[1]?.parts;
+    expect(signed?.map((p) => p.thoughtSignature)).toEqual(['real', undefined]);
+  });
+
   test('roles map to user and model; tool results answer calls by name', () => {
     const messages: ProviderMessage[] = [
       { role: 'user', content: 'go' },
@@ -282,7 +320,10 @@ describe('toGoogleContents', () => {
         role: 'model',
         parts: [
           { text: 'Listing.' },
-          { functionCall: { name: 'glob', args: { p: 1 } } },
+          {
+            functionCall: { name: 'glob', args: { p: 1 } },
+            thoughtSignature: 'skip_thought_signature_validator',
+          },
           { functionCall: { id: 'fc-issued', name: 'read_file', args: { path: 'a' } } },
         ],
       },
@@ -477,6 +518,39 @@ describe('createGoogleProvider over HTTP', () => {
     const f = recordingFetch(() => sseResponse('data: [1]\n\n'));
     const e = await caught(make('gemini-3.5-flash', { fetch: f.fetch }).generate(reqGen()));
     expect(e).toBeInstanceOf(GoogleHttpError);
+  });
+
+  test('a quota error carries the retry delay the server advises', async () => {
+    const f = recordingFetch(() =>
+      errorResponse(429, {
+        code: 429,
+        status: 'RESOURCE_EXHAUSTED',
+        message: 'Quota exceeded',
+        details: [{ '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '7.5s' }],
+      }),
+    );
+    const e = await caught(make('gemini-3.5-flash', { fetch: f.fetch }).generate(reqGen()));
+    expect(e).toBeInstanceOf(GoogleHttpError);
+    expect(isRetryableError(e)).toBe(true);
+    expect(retryAfterMs(e)).toBe(7_500);
+  });
+
+  test('an abort while the error body is read is reported as an abort', async () => {
+    const controller = new AbortController();
+    const f = recordingFetch(() => {
+      const body = new ReadableStream<Uint8Array>({
+        start(stream) {
+          stream.enqueue(new TextEncoder().encode('{"error":'));
+          controller.signal.addEventListener('abort', () => stream.error(new Error('aborted')));
+        },
+      });
+      setTimeout(() => controller.abort(), 10);
+      return new Response(body, { status: 503 });
+    });
+    const e = await caught(
+      make('gemini-3.5-flash', { fetch: f.fetch }).generate(reqGen(), controller.signal),
+    );
+    expect(e).toBeInstanceOf(AbortError);
   });
 
   test('a prompt over the context window is a ContextOverflowError', async () => {

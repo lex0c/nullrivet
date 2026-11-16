@@ -6,6 +6,7 @@ import {
   isContextOverflowMessage,
   ProviderRequestError,
 } from '../errors.ts';
+import { displayOrigin, readLines } from '../http-stream.ts';
 
 // Client for the native `POST /api/chat` endpoint, read as an NDJSON stream with fetch so the
 // request can be cancelled through its signal and parsing stays under local control.
@@ -68,15 +69,6 @@ export interface OllamaHttpOptions {
   fetch?: FetchLike;
 }
 
-// Messages may reach logs, so they never carry credentials or query parameters from the URL.
-const displayOrigin = (url: string): string => {
-  try {
-    return new URL(url).origin;
-  } catch {
-    return '<invalid url>';
-  }
-};
-
 const errorText = (body: string): string => {
   try {
     const parsed = JSON.parse(body) as unknown;
@@ -135,7 +127,10 @@ export const createOllamaHttp = (options: OllamaHttpOptions) => {
       );
     }
     if (res.ok) return res;
-    const body = errorText((await res.text().catch(() => '')).trim());
+    const raw = await res.text().catch(() => '');
+    // An abort while the error body is read is a cancellation, not the server's failure.
+    if (signal?.aborted === true) throw new AbortError();
+    const body = errorText(raw.trim());
     if (isContextOverflowMessage(body)) throw new ContextOverflowError(body);
     if (res.status === 404) {
       throw new OllamaHttpError(
@@ -153,49 +148,18 @@ export const createOllamaHttp = (options: OllamaHttpOptions) => {
     req: OllamaChatRequest,
     signal?: AbortSignal,
   ): AsyncIterable<OllamaChatChunk> {
-    // Read through a function: the signal changes while the stream is awaited.
-    const aborted = (): boolean => signal?.aborted === true;
-    if (aborted()) throw new AbortError();
+    if (signal?.aborted === true) throw new AbortError();
     const res = await post(req, signal);
-    if (res.body === null) throw new OllamaHttpError('Ollama /api/chat returned no response body');
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    try {
-      while (true) {
-        let chunk: Awaited<ReturnType<typeof reader.read>>;
-        try {
-          chunk = await reader.read();
-        } catch (e) {
-          if (aborted()) throw new AbortError();
-          throw new ProviderRequestError(`Ollama /api/chat stream failed: ${errorMessage(e)}`, {
-            retryable: true,
-            cause: e,
-          });
-        }
-        if (chunk.done) break;
-        buffer += decoder.decode(chunk.value, { stream: true });
-        let nl = buffer.indexOf('\n');
-        while (nl !== -1) {
-          const line = buffer.slice(0, nl).trim();
-          buffer = buffer.slice(nl + 1);
-          if (line.length > 0) yield parseLine(line);
-          nl = buffer.indexOf('\n');
-        }
-        if (buffer.length > MAX_STREAM_LINE_CHARS) {
-          throw new OllamaHttpError(
-            `Ollama /api/chat sent more than ${MAX_STREAM_LINE_CHARS} characters without a newline`,
-          );
-        }
-      }
-      buffer += decoder.decode();
-      const rest = buffer.trim();
-      if (rest.length > 0) yield parseLine(rest);
-    } finally {
-      await reader.cancel().catch(() => undefined);
+    const lines = readLines(res, {
+      label: 'Ollama /api/chat',
+      maxLineChars: MAX_STREAM_LINE_CHARS,
+      signal,
+      fail: (message) => new OllamaHttpError(message),
+    });
+    for await (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.length > 0) yield parseLine(trimmed);
     }
-    // A cancelled body can end without an error; the truncated turn must not look complete.
-    if (aborted()) throw new AbortError();
   }
 
   return { chatStream };

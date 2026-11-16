@@ -1,3 +1,4 @@
+import { STREAM_INCOMPLETE } from '../providers/errors.ts';
 import type {
   ProviderReasoningBlock,
   StopReason,
@@ -75,6 +76,7 @@ export const collectStep = async (
   onEvent?: (event: StreamEvent) => void,
 ): Promise<CollectedStep> => {
   const out = emptyStep();
+  let stopSeen = false;
   const toolNamesById = new Map<string, string>();
   // Contiguous text deltas become one ordered block, flushed before the next non-text block.
   let pendingText = '';
@@ -144,6 +146,7 @@ export const collectStep = async (
           break;
         case 'stop':
           out.stop_reason = ev.reason;
+          stopSeen = true;
           break;
         case 'error':
           out.errors.push({ code: ev.code, message: ev.message, retryable: ev.retryable });
@@ -156,5 +159,15 @@ export const collectStep = async (
   }
 
   flushText();
+  // Adapters emit a stop only when the provider reports how the response finished, so a stream
+  // that ended without one was cut short (a dropped connection, a proxy closing it). Partial output
+  // must not pass for a complete answer: the step fails, and is retried when nothing came through.
+  if (!stopSeen && out.errors.length === 0) {
+    out.errors.push({
+      code: STREAM_INCOMPLETE,
+      message: 'the response stream ended before the model finished',
+      retryable: true,
+    });
+  }
   return out;
 };

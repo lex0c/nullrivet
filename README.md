@@ -23,7 +23,7 @@ nothing of the session remains except the changes the tools made on purpose.
 
 ## Requirements
 
-- Linux (macOS is untested)
+- Linux or macOS
 - `bash` and `git` on `PATH`
 - To run from source only: [Bun](https://bun.sh) 1.4.4 or newer (the version CI runs on)
 - An API key for one of the supported providers (Anthropic, OpenAI, OpenRouter, Ollama Cloud), or
@@ -38,8 +38,10 @@ Download the executable for your platform from the
 |---|---|
 | Linux x64 | `nullrivet-linux-x64` |
 | Linux arm64 | `nullrivet-linux-arm64` |
-| macOS, Apple silicon (untested) | `nullrivet-darwin-arm64` |
-| macOS, Intel (untested) | `nullrivet-darwin-x64` |
+| macOS, Apple silicon | `nullrivet-darwin-arm64` |
+| macOS, Intel | `nullrivet-darwin-x64` |
+
+Each executable is tested on its own platform before a release is published.
 
 ```bash
 curl -fsSLO https://github.com/lex0c/nullrivet/releases/latest/download/nullrivet-linux-x64
