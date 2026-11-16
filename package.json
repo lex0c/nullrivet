@@ -23,5 +23,8 @@
   },
   "trustedDependencies": [
     "@biomejs/biome"
-  ]
+  ],
+  "dependencies": {
+    "openai": "~6.34.0"
+  }
 }
