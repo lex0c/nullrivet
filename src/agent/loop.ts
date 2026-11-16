@@ -109,6 +109,20 @@ const isOverflowFailure = (step: CollectedStep): boolean =>
   step.text.length === 0 &&
   step.tool_uses.length === 0;
 
+// Abort reason of a task stopped by its time limit.
+export class TimeLimitReached extends Error {
+  constructor(limitMs: number) {
+    super(`time limit of ${formatDuration(limitMs)} reached`);
+    this.name = 'TimeLimitReached';
+  }
+}
+
+const formatDuration = (ms: number): string => {
+  if (ms % 3_600_000 === 0) return `${ms / 3_600_000}h`;
+  if (ms % 60_000 === 0) return `${ms / 60_000}m`;
+  return `${Math.ceil(ms / 1_000)}s`;
+};
+
 // Growth, as a share of the window, after which an ineffective compaction is tried again.
 const REGROWTH_RATIO = 0.1;
 
@@ -223,7 +237,11 @@ export const runTurn = async (prompt: string, deps: TurnDependencies): Promise<T
   let usage = emptyUsage();
   let steps = 0;
   let streamRetries = 0;
-  const end = (reason: AgentEndReason, message?: string): TurnResult => {
+  const end = (endReason: AgentEndReason, endMessage?: string): TurnResult => {
+    // A task stopped by its time limit ends at a limit, like the step limit, not as an interrupt.
+    const timedOut = endReason === 'aborted' && signal.reason instanceof TimeLimitReached;
+    const reason = timedOut ? 'budget' : endReason;
+    const message = timedOut ? (signal.reason as TimeLimitReached).message : endMessage;
     emit(
       message === undefined
         ? { type: 'agent:end', reason }

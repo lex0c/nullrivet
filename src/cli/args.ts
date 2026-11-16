@@ -13,6 +13,7 @@ export interface CliConfig {
   json: boolean;
   agentsMd: boolean;
   maxSteps: number | undefined;
+  timeLimitMs: number | undefined;
   contextWindow: number | undefined;
   maxOutput: number | undefined;
   prompt: string;
@@ -39,15 +40,31 @@ Options:
       --json                  Emit agent events as NDJSON on stdout
       --no-agents             Do not load AGENTS.md project instructions
       --max-steps <n>         Maximum model requests per task
+      --timeout <time>        Time limit per task: 90s, 30m, 2h (seconds without a unit)
       --context-window <n>    Override the model context window
       --max-output <n>        Override the model output token limit
   -h, --help                  Show this help
   -v, --version               Show the version
 
 Environment:
-  NULLRIVET_MODEL, NULLRIVET_EFFORT, NULLRIVET_PERMISSION, NULLRIVET_MAX_STEPS
+  NULLRIVET_MODEL, NULLRIVET_EFFORT, NULLRIVET_PERMISSION, NULLRIVET_MAX_STEPS,
+  NULLRIVET_TIMEOUT
   ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY, OLLAMA_API_KEY
                               Credentials of each provider family`;
+
+const DURATION_UNITS: Record<string, number> = { s: 1_000, m: 60_000, h: 3_600_000 };
+
+// A positive whole number of seconds, minutes or hours, returned in milliseconds.
+export const parseDuration = (value: string | undefined, name: string): number | undefined => {
+  if (value === undefined || value === '') return undefined;
+  const match = /^(\d+)([smh]?)$/.exec(value.trim());
+  const amount = match === null ? Number.NaN : Number(match[1]);
+  const ms = amount * (DURATION_UNITS[match?.[2] || 's'] ?? Number.NaN);
+  if (!Number.isSafeInteger(ms) || ms <= 0) {
+    throw new UsageError(`${name} must be a duration such as 90s, 30m or 2h, got '${value}'`);
+  }
+  return ms;
+};
 
 const positiveInteger = (value: string | undefined, name: string): number | undefined => {
   if (value === undefined || value === '') return undefined;
@@ -93,6 +110,7 @@ export const parseCli = (
         json: { type: 'boolean' },
         'no-agents': { type: 'boolean' },
         'max-steps': { type: 'string' },
+        timeout: { type: 'string' },
         'context-window': { type: 'string' },
         'max-output': { type: 'string' },
         help: { type: 'boolean', short: 'h' },
@@ -123,6 +141,9 @@ export const parseCli = (
     maxSteps:
       positiveInteger(str('max-steps'), '--max-steps') ??
       positiveInteger(env.NULLRIVET_MAX_STEPS, 'NULLRIVET_MAX_STEPS'),
+    timeLimitMs:
+      parseDuration(str('timeout'), '--timeout') ??
+      parseDuration(env.NULLRIVET_TIMEOUT, 'NULLRIVET_TIMEOUT'),
     contextWindow: positiveInteger(str('context-window'), '--context-window'),
     maxOutput: positiveInteger(str('max-output'), '--max-output'),
     prompt: parsed.positionals.join(' ').trim(),

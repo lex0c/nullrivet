@@ -120,6 +120,7 @@ export const runCli = async (io: CliIO): Promise<number> => {
     instructions: config.agentsMd ? new InstructionsLoader() : null,
     ...(config.effort === undefined ? {} : { effort: config.effort }),
     ...(config.maxSteps === undefined ? {} : { maxSteps: config.maxSteps }),
+    ...(config.timeLimitMs === undefined ? {} : { timeLimitMs: config.timeLimitMs }),
   });
   const warnings = [...resolved.warnings, ...agent.bootWarnings];
 

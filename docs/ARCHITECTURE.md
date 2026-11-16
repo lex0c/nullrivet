@@ -93,7 +93,7 @@ The turn ends with one of four reasons, reported in the `agent:end` event:
 | `done` | The model answered without tool calls. |
 | `aborted` | The user interrupted the turn. |
 | `error` | A provider failure or a stream error that cannot be corrected by the model. |
-| `budget` | The step limit, the output token limit, or the context window was reached. |
+| `budget` | The step limit, the time limit, the output token limit, or the context window was reached. A time limit stops the task like an interrupt (running commands are terminated) before ending it here. |
 
 ## Provider step and retries
 

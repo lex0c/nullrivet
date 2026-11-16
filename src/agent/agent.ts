@@ -8,7 +8,13 @@ import type { Tool } from '../tools/types.ts';
 import { type CompactionOutcome, compactConversation } from './compactor.ts';
 import { Conversation } from './conversation.ts';
 import type { AgentEventListener } from './events.ts';
-import { type LoopLimits, promptShape, runTurn, type TurnResult } from './loop.ts';
+import {
+  type LoopLimits,
+  promptShape,
+  runTurn,
+  TimeLimitReached,
+  type TurnResult,
+} from './loop.ts';
 import { buildSystemPrompt, localDate } from './system-prompt.ts';
 
 export const DEFAULT_MAX_STEPS = 200;
@@ -23,6 +29,9 @@ export interface AgentOptions {
   instructions: InstructionsLoader | null;
   effort?: ProviderEffort;
   maxSteps?: number;
+  // Wall-clock limit of each task; when it passes, the task is stopped like an interrupt and ends
+  // at a limit.
+  timeLimitMs?: number;
   stallMs?: number;
 }
 
@@ -150,6 +159,14 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
     async run(prompt: string, runOptions: RunOptions = {}): Promise<TurnResult> {
       if (running) throw new Error('the agent is already running a turn');
       running = true;
+      const external = runOptions.signal ?? new AbortController().signal;
+      const timeLimitMs = options.timeLimitMs;
+      const deadline = timeLimitMs === undefined ? null : new AbortController();
+      const timer =
+        deadline === null
+          ? undefined
+          : setTimeout(() => deadline.abort(new TimeLimitReached(timeLimitMs ?? 0)), timeLimitMs);
+      const signal = deadline === null ? external : AbortSignal.any([external, deadline.signal]);
       try {
         const limits: LoopLimits = {
           maxSteps: options.maxSteps ?? DEFAULT_MAX_STEPS,
@@ -167,9 +184,10 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
           limits,
           ...(agent.effort === undefined ? {} : { effort: agent.effort }),
           emit: runOptions.onEvent ?? (() => undefined),
-          signal: runOptions.signal ?? new AbortController().signal,
+          signal,
         });
       } finally {
+        clearTimeout(timer);
         running = false;
       }
     },

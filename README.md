@@ -96,6 +96,7 @@ reads it until end of file, so programs that start nullrivet without piping anyt
 | `--json` | Emit agent events as NDJSON on stdout. |
 | `--no-agents` | Do not load `AGENTS.md` files. |
 | `--max-steps <n>` | Maximum number of model requests for the task (default 200). |
+| `--timeout <time>` | Time limit for the task: `90s`, `30m`, `2h`, or seconds without a unit. When it passes, the task is stopped like an interrupt and ends at a limit (exit code 3). No limit by default. |
 | `--context-window <n>` | Override the model's context window, in tokens. |
 | `--max-output <n>` | Override the model's output token limit. |
 | `-h, --help` | Show help. |
@@ -115,6 +116,7 @@ Flags take precedence over environment variables, which take precedence over the
 | `NULLRIVET_EFFORT` | Default reasoning effort. |
 | `NULLRIVET_PERMISSION` | Default execution mode. |
 | `NULLRIVET_MAX_STEPS` | Default step limit. |
+| `NULLRIVET_TIMEOUT` | Default time limit per task. |
 | `NULLRIVET_<FAMILY>_BASE_URL` | Endpoint of a provider family, e.g. `NULLRIVET_OPENAI_BASE_URL`. |
 
 Provider-specific settings are listed in [docs/MODELS.md](docs/MODELS.md).
@@ -126,7 +128,7 @@ Provider-specific settings are listed in [docs/MODELS.md](docs/MODELS.md).
 | `0` | The task finished. |
 | `1` | The task failed (provider error, unrecoverable stream error). |
 | `2` | Invalid usage or configuration (bad flag, unknown model, missing credentials). |
-| `3` | A limit was reached: step limit, output limit, or the conversation no longer fits the context window. |
+| `3` | A limit was reached: step limit, time limit, output limit, or the conversation no longer fits the context window. |
 | `130` | Interrupted. |
 
 ### Interrupting
