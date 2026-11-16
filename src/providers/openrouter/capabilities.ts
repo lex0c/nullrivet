@@ -55,20 +55,11 @@ export const OPENROUTER_CAPS: Record<string, ProviderCapabilities> = {
     output_max_tokens: 32_768,
     supports_reasoning_effort: true,
   },
-  // Free routes are heavily rate-limited on OpenRouter.
-  'tencent/hy3:free': {
-    context_window: 262_144,
-    output_max_tokens: 32_768,
-    supports_reasoning_effort: true,
-  },
-  // Free route: heavily rate-limited, and the free endpoint collects prompt data.
+  // Free routes disappear without notice, so only free models verified to complete agentic
+  // tasks with tools are kept here; other free models resolve through discovery. This route is
+  // heavily rate-limited, and the free endpoint collects prompt data.
   'nvidia/nemotron-3-ultra-550b-a55b:free': {
     context_window: 1_000_000,
-    output_max_tokens: 32_768,
-    supports_reasoning_effort: true,
-  },
-  'openai/gpt-oss-20b:free': {
-    context_window: 131_072,
     output_max_tokens: 32_768,
     supports_reasoning_effort: true,
   },

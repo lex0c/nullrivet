@@ -31,7 +31,7 @@ export const USAGE = `Usage: nullrivet [options] [prompt...]
 Runs one task and exits. Text piped on stdin is appended to the prompt.
 
 Options:
-  -m, --model <id>            Model as <family>/<model>, e.g. openrouter/openai/gpt-oss-20b:free
+  -m, --model <id>            Model as <family>/<model>, e.g. openrouter/deepseek/deepseek-v4-flash
   -e, --effort <level>        Reasoning effort: ${EFFORT_LEVELS.join(', ')}
   -p, --permission <mode>     auto (default) or readonly
   -C, --cwd <dir>             Starting directory (does not restrict file access)
