@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { chmod, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { listFiles } from '../../src/tools/file-walk.ts';
 import { gitTool } from '../../src/tools/git.ts';
 import type { ToolContext } from '../../src/tools/types.ts';
 
@@ -155,6 +156,12 @@ describe('git tool', () => {
         stderr: 'ignore',
       });
       expect((await fired()).length).toBeGreaterThan(0);
+    });
+
+    test('listing files for glob and grep executes nothing either', async () => {
+      const { files } = await listFiles(dir, new AbortController().signal);
+      expect(files).toContain('a.txt');
+      expect(await fired()).toEqual([]);
     });
 
     test('no subcommand executes a program configured by the repository', async () => {

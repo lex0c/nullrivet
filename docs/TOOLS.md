@@ -1,11 +1,13 @@
 # Tools
 
-nullrivet exposes five tools to the model. Each declares an effect, which decides whether it is
+nullrivet exposes seven tools to the model. Each declares an effect, which decides whether it is
 available in `readonly` mode.
 
 | Tool | Effect | `auto` | `readonly` |
 |---|---|---|---|
 | `read_file` | read | yes | yes |
+| `glob` | read | yes | yes |
+| `grep` | read | yes | yes |
 | `git` | read | yes | yes |
 | `edit_file` | write | yes | no |
 | `write_file` | write | yes | no |
@@ -40,6 +42,52 @@ Reads a UTF-8 text file.
   the lines shown and the `offset` to continue from.
 - Refused: directories, binary files (a NUL byte in the first 8000 bytes), files over 10 MiB,
   FIFOs, devices and sockets.
+
+## glob
+
+Finds files by path pattern.
+
+| Parameter | Description |
+|---|---|
+| `pattern` | Glob pattern: `*`, `**`, `?`, `[abc]`, `{a,b}`. |
+| `path` | Directory to search (default: the starting directory). |
+
+- A pattern without `/` matches file names at any depth (`*.ts`, `README*`), as in `.gitignore`. A
+  pattern with `/` matches the path relative to `path` (`src/**/*.test.ts`). Patterns that are
+  absolute or contain `..` are refused; set `path` to search another directory.
+- Results are sorted, one per line, relative to the starting directory when inside it and
+  absolute otherwise, so they can be passed to `read_file` as is. At most 500 are returned, with
+  a note giving the total.
+
+## grep
+
+Searches file contents line by line with a regular expression.
+
+| Parameter | Description |
+|---|---|
+| `pattern` | Regular expression in JavaScript syntax. |
+| `path` | File or directory to search (default: the starting directory). |
+| `glob` | Only search files matching this pattern, with the rules of `glob`. |
+| `ignore_case` | Match case-insensitively. |
+| `literal` | Treat the pattern as plain text. |
+
+- Matches come back as `path:line: text`, with 1-based line numbers. Lines are cut at 500
+  characters.
+- At most 200 matches or 64 KiB are returned; a note says when the search stopped early.
+- Binary files and files over 10 MiB are skipped.
+- The search runs inside nullrivet and needs no external program.
+
+### Which files are searched
+
+`glob` and `grep` list a directory the same way:
+
+- **Inside a git repository**, the list comes from `git ls-files`, so files ignored by git are
+  left out and untracked files are included. git runs with the same hardening as the `git` tool,
+  because listing untracked files otherwise runs the repository's fsmonitor program.
+- **Outside a repository**, or in a directory git ignores entirely (`node_modules/lib`, `dist`),
+  the directory is walked, skipping `.git` and `node_modules`. Symbolic links are listed but not
+  followed.
+- At most 200,000 files are listed; past that, the result says only part of the tree was searched.
 
 ## write_file
 

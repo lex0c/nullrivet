@@ -16,6 +16,8 @@ export interface ProcessRunOptions {
   env: Record<string, string>;
   timeoutMs: number;
   signal: AbortSignal;
+  // Memory bound for stdout; defaults to CAPTURE_LIMIT_BYTES.
+  stdoutLimitBytes?: number;
 }
 
 export interface ProcessRunResult {
@@ -45,8 +47,8 @@ export const killAllProcessGroups = (): void => {
   liveGroups.clear();
 };
 
-const capture = (stream: Readable | null): BoundedCapture => {
-  const out = new BoundedCapture(CAPTURE_LIMIT_BYTES);
+const capture = (stream: Readable | null, limit = CAPTURE_LIMIT_BYTES): BoundedCapture => {
+  const out = new BoundedCapture(limit);
   stream?.on('data', (chunk: Buffer) => out.push(chunk));
   return out;
 };
@@ -78,7 +80,7 @@ export const runProcess = (options: ProcessRunOptions): Promise<ProcessRunResult
     });
     const pgid = child.pid;
     if (pgid !== undefined) liveGroups.add(pgid);
-    const stdout = capture(child.stdout);
+    const stdout = capture(child.stdout, options.stdoutLimitBytes);
     const stderr = capture(child.stderr);
     let termination: Termination = 'exited';
     let killTimer: ReturnType<typeof setTimeout> | null = null;

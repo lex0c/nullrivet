@@ -14,7 +14,7 @@ import { resolvePath } from './paths.ts';
 import { type ProcessRunResult, runProcess } from './process.ts';
 import { type Tool, type ToolResult, toolError } from './types.ts';
 
-const GIT_TIMEOUT_MS = 30_000;
+export const GIT_TIMEOUT_MS = 30_000;
 const MODEL_OUTPUT_BYTES = 32 * 1024;
 const LOG_DEFAULT_COUNT = 20;
 const LOG_MAX_COUNT = 200;
@@ -26,7 +26,7 @@ type Subcommand = (typeof SUBCOMMANDS)[number];
 // programs: fsmonitor hooks, pagers, external diff tools, textconv and clean/smudge filters,
 // signature verification, lazy fetches through a transport. Each vector is disabled here so the
 // tool stays free of side effects, which is what makes it safe to expose in readonly mode.
-const HARDENING_CONFIG = [
+export const HARDENING_CONFIG = [
   'core.fsmonitor=false',
   'core.hooksPath=/dev/null',
   'core.pager=cat',
@@ -41,7 +41,7 @@ const HARDENING_CONFIG = [
 // them, an empty driver command from HARDENING_CONFIG is never consulted.
 const NO_DRIVERS = ['--no-ext-diff', '--no-textconv'];
 
-const gitEnv = (): Record<string, string> => ({
+export const gitEnv = (): Record<string, string> => ({
   ...scrubAgentEnv(process.env, ['GIT_EXTERNAL_DIFF', 'GIT_PAGER', 'PAGER']),
   // Without this, `status` refreshes and rewrites the index.
   GIT_OPTIONAL_LOCKS: '0',
@@ -50,7 +50,8 @@ const gitEnv = (): Record<string, string> => ({
   GIT_NO_LAZY_FETCH: '1',
 });
 
-const configArgs = (entries: readonly string[]): string[] => entries.flatMap((e) => ['-c', e]);
+export const configArgs = (entries: readonly string[]): string[] =>
+  entries.flatMap((e) => ['-c', e]);
 
 const FILTER_KEY = /^filter\.(.+)\.(clean|smudge|process|required)$/;
 const DIFF_KEY = /^diff\.(.+)\.(textconv|command)$/;

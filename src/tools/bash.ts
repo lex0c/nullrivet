@@ -58,7 +58,7 @@ export const bashTool: Tool = {
   name: 'bash',
   description: [
     'Run a shell command with bash and return its stdout, stderr and exit code.',
-    'Use it for searching (rg, grep, find), building, running tests, git operations that change state, and any other CLI tool.',
+    'Use it for building, running tests, git operations that change state, and any other CLI tool. Find and search files with glob and grep instead.',
     'Commands run non-interactively: stdin is empty, so never run commands that wait for input.',
     'Background processes started by the command are terminated when the command finishes.',
     `Default timeout is ${BASH_DEFAULT_TIMEOUT_MS / 1000}s, maximum ${BASH_MAX_TIMEOUT_MS / 1000}s.`,

@@ -6,6 +6,8 @@ const VERBS: Record<string, { running: string; done: string }> = {
   edit_file: { running: 'Editing', done: 'Edited' },
   bash: { running: 'Running', done: 'Ran' },
   git: { running: 'Inspecting', done: 'Inspected' },
+  glob: { running: 'Finding', done: 'Found' },
+  grep: { running: 'Searching', done: 'Searched' },
 };
 
 export const toolVerb = (name: string, phase: 'running' | 'done'): string =>
@@ -37,6 +39,12 @@ export const toolSubject = (name: string, args: Record<string, unknown>, max = 1
         ...paths,
       ];
       return oneLine(parts.filter((p) => p !== undefined && p !== '').join(' '), max);
+    }
+    case 'glob':
+    case 'grep': {
+      const path = str('path');
+      const where = path === undefined || path === '' ? '' : ` in ${path}`;
+      return oneLine(`${str('pattern') ?? ''}${where}`, max);
     }
     default:
       return oneLine(str('path') ?? '', max);

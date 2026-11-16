@@ -14,6 +14,16 @@ export const MAX_FILE_BYTES = 10 * 1024 * 1024;
 // classified as binary; it would decode to unreadable text anyway.
 const BINARY_SCAN_BYTES = 8000;
 
+// Offset of the first NUL byte in the leading bytes, the same heuristic git and grep use to tell
+// binary files from text; -1 for text.
+export const binaryOffset = (bytes: Uint8Array): number => {
+  const scanLength = Math.min(bytes.length, BINARY_SCAN_BYTES);
+  for (let i = 0; i < scanLength; i++) {
+    if (bytes[i] === 0) return i;
+  }
+  return -1;
+};
+
 export type FileOperation = 'read' | 'write';
 
 const errnoCode = (error: unknown): string | undefined => {
@@ -78,7 +88,7 @@ export const loadTextFileBytes = async (abs: string): Promise<LoadResult> => {
   if (info.isDirectory()) {
     return {
       ok: false,
-      error: directoryError(abs, 'List a directory with bash, for example `ls`.'),
+      error: directoryError(abs, 'List its files with glob, setting path to the directory.'),
     };
   }
   // A FIFO or a character device such as /dev/zero would block or never reach end of file.
@@ -89,7 +99,7 @@ export const loadTextFileBytes = async (abs: string): Promise<LoadResult> => {
       error: toolError(
         'fs.too_large',
         `${abs} is ${formatBytes(info.size)}, over the ${formatBytes(MAX_FILE_BYTES)} limit`,
-        'Use bash (grep, head, tail, sed) to work with part of the file.',
+        'Find the relevant lines with grep, or use bash (head, tail, sed) to work with part of the file.',
       ),
     };
   }
@@ -99,16 +109,14 @@ export const loadTextFileBytes = async (abs: string): Promise<LoadResult> => {
   } catch (error) {
     return { ok: false, error: fileSystemError(error, 'read', abs) };
   }
-  const scanLength = Math.min(bytes.length, BINARY_SCAN_BYTES);
-  for (let i = 0; i < scanLength; i++) {
-    if (bytes[i] === 0) {
-      const error = toolError(
-        'fs.binary',
-        `${abs} is a binary file (NUL byte at offset ${i})`,
-        'Use bash (for example `file`, `xxd` or `hexdump`) to inspect raw bytes.',
-      );
-      return { ok: false, error: { ...error, meta: { ...error.meta, nulOffset: i } } };
-    }
+  const nul = binaryOffset(bytes);
+  if (nul >= 0) {
+    const error = toolError(
+      'fs.binary',
+      `${abs} is a binary file (NUL byte at offset ${nul})`,
+      'Use bash (for example `file`, `xxd` or `hexdump`) to inspect raw bytes.',
+    );
+    return { ok: false, error: { ...error, meta: { ...error.meta, nulOffset: nul } } };
   }
   return { ok: true, bytes };
 };

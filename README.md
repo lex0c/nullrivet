@@ -25,7 +25,7 @@ nothing of the session remains except the changes the tools made on purpose.
 
 - [Bun](https://bun.sh) 1.1.30 or newer
 - Linux (macOS is untested)
-- `bash` and `git` on `PATH`; `rg` (ripgrep) is recommended, since the agent searches through bash
+- `bash` and `git` on `PATH`
 - An API key for one of the supported providers (Anthropic, OpenAI, OpenRouter, Ollama Cloud), or
   a local [Ollama](https://ollama.com) server
 
@@ -209,8 +209,8 @@ Details: [docs/MODELS.md](docs/MODELS.md).
 
 | Mode | Tools offered to the model | Enforcement |
 |---|---|---|
-| `auto` (default) | `read_file`, `git`, `edit_file`, `write_file`, `bash` | None beyond operating system permissions. |
-| `readonly` | `read_file`, `git` | The other tools are neither offered nor executed, even if the model calls them. |
+| `auto` (default) | `read_file`, `glob`, `grep`, `git`, `edit_file`, `write_file`, `bash` | None beyond operating system permissions. |
+| `readonly` | `read_file`, `glob`, `grep`, `git` | The other tools are neither offered nor executed, even if the model calls them. |
 
 `auto` is **not a sandbox**. Commands run with your privileges and take effect immediately, and
 content the agent reads (files, command output, `AGENTS.md`) can contain prompt injection. Run
@@ -224,12 +224,14 @@ files.
 | Tool | Effect | Purpose |
 |---|---|---|
 | `read_file` | read | Read a text file, paged by lines. |
+| `glob` | read | Find files by path pattern, leaving out files ignored by git. |
+| `grep` | read | Search file contents with a regular expression. |
 | `git` | read | `status`, `diff`, `log`, `show`, `blame`, with repository-configured programs disabled. |
 | `edit_file` | write | Apply exact, all-or-nothing text replacements to a file. |
 | `write_file` | write | Create or replace a file atomically. |
 | `bash` | exec | Run a shell command non-interactively, with a timeout and output limits. |
 
-Searching, building, testing and git operations that change state go through `bash`. Details,
+Building, testing and git operations that change state go through `bash`. Details,
 limits and safety measures: [docs/TOOLS.md](docs/TOOLS.md).
 
 ## Project instructions

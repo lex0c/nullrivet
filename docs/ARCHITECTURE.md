@@ -51,6 +51,8 @@ src/
     types.ts, policy.ts    tool contract and execution modes
     bash.ts, git.ts        command tools
     read-file.ts, write-file.ts, edit-file.ts, atomic-write.ts, file-io.ts
+    glob.ts, grep.ts       file search
+    file-walk.ts           directory listing shared by glob and grep
     process.ts             process groups, timeouts, bounded capture
     args.ts, paths.ts, env.ts
   instructions/
