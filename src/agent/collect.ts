@@ -58,6 +58,11 @@ export class CollectStepError extends Error {
   }
 }
 
+// Shown between two text blocks of one response, so the second starts a new paragraph instead of
+// continuing the last line of the first, which may be a code fence that would then stay open.
+const blockSeparator = (shown: string): string =>
+  shown.endsWith('\n\n') ? '' : shown.endsWith('\n') ? '\n' : '\n\n';
+
 const emptyStep = (): CollectedStep => ({
   message_id: '',
   text: '',
@@ -89,9 +94,24 @@ export const collectStep = async (
 
   try {
     for await (const ev of events) {
+      // A text block that starts after an earlier one (they are separated by reasoning or a tool
+      // call, as when OpenAI's Responses API returns several messages) is displayed as a new
+      // paragraph. Only the displayed text gets the separator; the blocks in `order` are kept as
+      // the provider sent them.
+      const separator =
+        ev.kind === 'text_delta' &&
+        ev.text.length > 0 &&
+        pendingText.length === 0 &&
+        out.text.length > 0
+          ? blockSeparator(out.text)
+          : '';
       if (onEvent !== undefined) {
         try {
-          onEvent(ev);
+          onEvent(
+            ev.kind === 'text_delta' && separator.length > 0
+              ? { kind: 'text_delta', text: separator + ev.text }
+              : ev,
+          );
         } catch {
           // An observer failure must not abort the provider stream.
         }
@@ -101,7 +121,7 @@ export const collectStep = async (
           out.message_id = ev.message_id;
           break;
         case 'text_delta':
-          out.text += ev.text;
+          out.text += separator + ev.text;
           pendingText += ev.text;
           break;
         case 'thinking_delta':

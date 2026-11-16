@@ -236,3 +236,57 @@ describe('collectStep', () => {
     expect(failed.errors.map((e) => e.code)).toEqual(['x']);
   });
 });
+
+describe('text blocks of one response', () => {
+  const reasoning: StreamEvent = { kind: 'reasoning', provider: 'openai', data: { id: 'r' } };
+  const collect = async (events: StreamEvent[]) => {
+    const shown: string[] = [];
+    const out = await collectStep(
+      fromEvents([
+        { kind: 'start', message_id: 'm' },
+        ...events,
+        { kind: 'stop', reason: 'end_turn' },
+      ]),
+      (event) => {
+        if (event.kind === 'text_delta') shown.push(event.text);
+      },
+    );
+    return { out, shown: shown.join('') };
+  };
+
+  test('a block after reasoning is shown as a new paragraph and stored unchanged', async () => {
+    const { out, shown } = await collect([
+      { kind: 'text_delta', text: '```text\nhello\n```' },
+      reasoning,
+      { kind: 'text_delta', text: "I'm in " },
+      { kind: 'text_delta', text: 'readonly mode.' },
+      reasoning,
+    ]);
+    expect(shown).toBe("```text\nhello\n```\n\nI'm in readonly mode.");
+    expect(out.text).toBe(shown);
+    expect(out.order.filter((b) => b.kind === 'text')).toEqual([
+      { kind: 'text', text: '```text\nhello\n```' },
+      { kind: 'text', text: "I'm in readonly mode." },
+    ]);
+  });
+
+  test('the separator only adds the line breaks the first block lacks', async () => {
+    const oneBreak = await collect([
+      { kind: 'text_delta', text: 'a\n' },
+      reasoning,
+      { kind: 'text_delta', text: 'b' },
+    ]);
+    expect(oneBreak.shown).toBe('a\n\nb');
+    const twoBreaks = await collect([
+      { kind: 'text_delta', text: 'a\n\n' },
+      reasoning,
+      { kind: 'text_delta', text: 'b' },
+    ]);
+    expect(twoBreaks.shown).toBe('a\n\nb');
+  });
+
+  test('the first block of a response gets no separator, even after reasoning', async () => {
+    const { shown } = await collect([reasoning, { kind: 'text_delta', text: 'answer' }]);
+    expect(shown).toBe('answer');
+  });
+});

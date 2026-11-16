@@ -249,7 +249,7 @@ nullrivet --json --permission readonly "List the TODOs in src" | jq -c 'select(.
 | Event | Fields |
 |---|---|
 | `agent:start` | — |
-| `text:delta` | `text` |
+| `text:delta` | `text`; separate text blocks of one response are joined by a blank line |
 | `thinking:delta` | `text` |
 | `tool:start` | `id`, `name`, `args`, `step` (the model request of the turn that made the call) |
 | `tool:end` | `id`, `name`, `content`, `isError`, `meta` |
