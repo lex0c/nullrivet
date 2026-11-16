@@ -49,6 +49,13 @@ export const applyKey = (input: InputState, key: KeyEvent): ApplyKeyResult => {
 const sanitizeInsert = (text: string): string =>
   stripAnsi(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
+// An input holding `text` with the cursor at its end, cleaned like inserted text: recalled text
+// may come from outside the editor, such as a one-shot prompt kept in a session file.
+export const inputWithText = (text: string): InputState => {
+  const value = sanitizeInsert(text);
+  return { value, cursor: value.length };
+};
+
 const insertText = (input: InputState, text: string): InputState => {
   const clean = sanitizeInsert(text);
   if (clean === '') return input;

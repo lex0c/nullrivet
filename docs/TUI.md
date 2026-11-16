@@ -82,6 +82,8 @@ does not settle it. Any remaining text is settled when a tool call starts or the
   recalls the newest entry and keeps the text being typed as a draft; while browsing, `↑` and `↓`
   walk the history wherever the cursor is, even when a recalled command opens the command list,
   and `↓` past the newest entry restores the draft. Editing a recalled entry ends browsing.
+  Recalled entries are cleaned like pasted text, since a one-shot prompt kept in a session file
+  can hold escape sequences.
   `/clear` keeps the history. It lives in memory and, when a session file is attached, in that
   file.
 - `Shift+Tab` switches the execution mode between `auto` and `readonly`, also while a task runs:

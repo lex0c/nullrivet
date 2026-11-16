@@ -1,5 +1,10 @@
 import { describe, expect, test } from 'bun:test';
-import { applyKey, emptyInput, type InputState } from '../../src/tui/input-editor.ts';
+import {
+  applyKey,
+  emptyInput,
+  type InputState,
+  inputWithText,
+} from '../../src/tui/input-editor.ts';
 import { createKeyParser, type KeyEvent, type KeyName } from '../../src/tui/keys.ts';
 
 const empty = emptyInput;
@@ -433,5 +438,14 @@ describe('vertical movement keeps surrogate pairs intact', () => {
     // Line 2 is '😀x': column 1 would sit between the two halves of the emoji.
     const r = applyKey(at('ab\n😀x', 1), named('down'));
     expect(r.next.cursor).toBe(3);
+  });
+});
+
+describe('inputWithText', () => {
+  test('cleans the text like a paste and puts the cursor at its end', () => {
+    expect(inputWithText('say \x1b]0;title\x07hello\r\nworld\x1b[2J')).toEqual({
+      value: 'say hello\nworld',
+      cursor: 15,
+    });
   });
 });

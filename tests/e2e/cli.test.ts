@@ -412,6 +412,41 @@ describe('terminal', () => {
   );
 
   test.skipIf(Bun.which('python3') === null)(
+    'a recalled prompt reaches the terminal without its escape sequences',
+    async () => {
+      server.handle(() => ({ text: 'ok' }));
+      const cwd = tempDir();
+      const first = startCli(['--session', 's.json', 'say \x1b]0;injected\x07hello'], {
+        env: cliEnv(server),
+        cwd,
+      });
+      expect((await first.finished).code).toBe(0);
+      const child = Bun.spawn(inTerminal(cliCommand(['--session', 's.json'])), {
+        env: { ...cliEnv(server), TERM: 'xterm-256color' },
+        cwd,
+        stdin: 'pipe',
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      await Bun.sleep(1_500);
+      child.stdin.write('\x1b[A');
+      child.stdin.flush();
+      await Bun.sleep(300);
+      // Ctrl+C clears the recalled prompt without sending it.
+      child.stdin.write('\x03');
+      child.stdin.flush();
+      await Bun.sleep(200);
+      child.stdin.write('/exit\r');
+      child.stdin.flush();
+      const [output, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+      expect(code).toBe(0);
+      expect(output).toContain('say hello');
+      expect(output).not.toContain('\x1b]0;injected');
+    },
+    30_000,
+  );
+
+  test.skipIf(Bun.which('python3') === null)(
     'leaving the interactive session in the middle of a turn still saves the session',
     async () => {
       // The command ignores SIGTERM, so after the first Ctrl+C the turn keeps running for the

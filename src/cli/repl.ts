@@ -3,7 +3,7 @@ import type { Agent } from '../agent/agent.ts';
 import { errorMessage } from '../errors.ts';
 import { formatTokens } from '../format.ts';
 import type { ResolveResult } from '../providers/resolve.ts';
-import { applyKey, type InputState } from '../tui/input-editor.ts';
+import { applyKey, type InputState, inputWithText } from '../tui/input-editor.ts';
 import { createKeyParser, type KeyEvent } from '../tui/keys.ts';
 import { formatPermanent } from '../tui/permanent.ts';
 import { createScreen } from '../tui/screen.ts';
@@ -368,7 +368,7 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
         text = history.next();
       }
       if (text === null) return false;
-      setInput({ value: text, cursor: text.length });
+      setInput(inputWithText(text));
       return true;
     };
 
