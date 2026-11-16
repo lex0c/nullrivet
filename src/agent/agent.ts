@@ -83,6 +83,9 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
 
     clear(): void {
       conversation.clear();
+      // Boot instructions live in the system prompt; the ones attached to tool results of the
+      // discarded conversation must be attached again when needed.
+      options.instructions?.retainOnly(new Set(bootInstructions.map((file) => file.path)));
     },
 
     async run(prompt: string, runOptions: RunOptions = {}): Promise<TurnResult> {

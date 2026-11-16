@@ -63,6 +63,8 @@ const sanitize = (text: string): string => stripAnsi(text.replace(/\r\n?/g, '\n'
 // instructions apply; it never restricts which paths the tools may access.
 export class InstructionsLoader {
   private readonly loaded = new Map<string, InstructionFile>();
+  // Bytes each loaded file counts against the total limit.
+  private readonly sizes = new Map<string, number>();
   private readonly lookups = new Map<string, string | null>();
   private readonly gitRoots = new Map<string, boolean>();
   private totalBytes = 0;
@@ -85,9 +87,21 @@ export class InstructionsLoader {
   // Forgets everything so the next discovery reads the files again.
   reset(): void {
     this.loaded.clear();
+    this.sizes.clear();
     this.lookups.clear();
     this.gitRoots.clear();
     this.totalBytes = 0;
+  }
+
+  // Forgets every loaded file except the given ones, so instructions that were attached to a
+  // discarded conversation are attached again when their paths are touched in a new one.
+  retainOnly(paths: ReadonlySet<string>): void {
+    for (const path of [...this.loaded.keys()]) {
+      if (paths.has(path)) continue;
+      this.loaded.delete(path);
+      this.totalBytes -= this.sizes.get(path) ?? 0;
+      this.sizes.delete(path);
+    }
   }
 
   // Returns only files that were not loaded before, ordered from the outermost directory to the
@@ -186,8 +200,10 @@ export class InstructionsLoader {
       content: sanitize(read.text),
       truncated: read.truncated,
     };
+    const bytes = Buffer.byteLength(read.text, 'utf8');
     this.loaded.set(path, file);
-    this.totalBytes += Buffer.byteLength(read.text, 'utf8');
+    this.sizes.set(path, bytes);
+    this.totalBytes += bytes;
     return file;
   }
 }

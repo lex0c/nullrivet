@@ -281,6 +281,86 @@ describe('runTurn', () => {
     expect(h.provider.calls).toHaveLength(3);
   });
 
+  test('an invalid tool call is reported back to the model instead of ending the turn', async () => {
+    const broken: StreamEvent[] = [
+      { kind: 'start', message_id: 'm' },
+      { kind: 'tool_use_start', id: 't1', name: 'read_file' },
+      { kind: 'tool_use_stop', id: 't1', final_args: { path: 'a.ts' } },
+      {
+        kind: 'error',
+        code: 'tool_call.invalid',
+        message: 'failed to parse arguments of call t2',
+        retryable: false,
+      },
+      { kind: 'stop', reason: 'tool_use' },
+    ];
+    const h = harness([broken, textTurn('fixed')]);
+    const result = await runTurn('go', h.deps);
+    expect(result.reason).toBe('done');
+    const sent = h.provider.calls[1]?.req.messages.at(-1);
+    expect(toolResults(sent)).toHaveLength(1);
+    const text = Array.isArray(sent?.content)
+      ? sent.content.filter((b) => b.type === 'text').map((b) => (b as { text: string }).text)
+      : [];
+    expect(text.join('')).toContain('failed to parse arguments of call t2');
+    expect(h.events.some((e) => e.type === 'warning')).toBe(true);
+  });
+
+  test('transient failures in different steps each get their own retries', async () => {
+    const failed: StreamEvent[] = [
+      { kind: 'start', message_id: 'm' },
+      { kind: 'error', code: 'openrouter.stream_error', message: 'upstream', retryable: true },
+    ];
+    const h = harness([
+      failed,
+      toolTurn([{ id: 't1', name: 'read_file', args: {} }]),
+      failed,
+      failed,
+      textTurn('done'),
+    ]);
+    const result = await runTurn('go', h.deps);
+    expect(result.reason).toBe('done');
+    expect(h.provider.calls).toHaveLength(5);
+  });
+
+  test('the output limit shrinks to fit the remaining context window', async () => {
+    const h = harness([textTurn('ok')]);
+    h.deps.provider.capabilities.context_window = 6_000;
+    h.deps.limits.maxOutputTokens = 4_000;
+    const prompt = 'x'.repeat(4 * 2_000);
+    await runTurn(prompt, h.deps);
+    const sent = h.provider.calls[0]?.req.max_tokens ?? 0;
+    expect(sent).toBeLessThan(4_000);
+    expect(sent).toBeGreaterThanOrEqual(1_024);
+  });
+
+  test('a conversation that no longer fits the window ends with a budget reason', async () => {
+    const h = harness([textTurn('never sent')]);
+    h.deps.provider.capabilities.context_window = 4_000;
+    const result = await runTurn('x'.repeat(4 * 4_000), h.deps);
+    expect(result.reason).toBe('budget');
+    expect(result.message).toContain('context window');
+    expect(h.provider.calls).toHaveLength(0);
+  });
+
+  test('a stalled stream cancels the provider request', async () => {
+    let received: AbortSignal | undefined;
+    const h = harness([]);
+    h.deps.limits.stallMs = 30;
+    h.deps.provider = {
+      ...h.deps.provider,
+      async *generate(_req, signal) {
+        received = signal;
+        yield { kind: 'start', message_id: 'm' };
+        await new Promise<void>((resolve) => signal?.addEventListener('abort', () => resolve()));
+      },
+    };
+    const result = await runTurn('go', h.deps);
+    expect(result.reason).toBe('error');
+    expect(result.message).toContain('stopped responding');
+    expect(received?.aborted).toBe(true);
+  });
+
   test('a truncated answer ends with a budget reason', async () => {
     const h = harness([
       [

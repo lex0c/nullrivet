@@ -1,10 +1,6 @@
-// Has no `status` or network `code`, so the retry layer never treats an abort as retryable.
-export class AbortError extends Error {
-  constructor() {
-    super('aborted');
-    this.name = 'AbortError';
-  }
-}
+import { AbortError } from '../providers/errors.ts';
+
+export { AbortError };
 
 // Kept distinct from AbortError: a stall means the provider went silent, not that the user
 // cancelled, and the loop reports the two differently.

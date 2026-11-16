@@ -1,7 +1,7 @@
-import OpenAI, { type ClientOptions } from 'openai';
+import OpenAI, { APIConnectionError, APIError, type ClientOptions } from 'openai';
 import type { ChatCompletionCreateParamsStreaming } from 'openai/resources/chat/completions';
-import { AbortError } from '../../agent/abortable.ts';
 import { boolFromEnv, type Env } from '../env.ts';
+import { AbortError, ProviderRequestError } from '../errors.ts';
 import { toOpenAITools } from '../openai/convert.ts';
 import type { GenerateRequest, Provider, ProviderCapabilities, StreamEvent } from '../types.ts';
 import { buildReasoningParam, toOpenRouterMessages } from './messages.ts';
@@ -55,6 +55,22 @@ const buildClient = (options: CreateOpenRouterProviderOptions, env: Env): OpenAI
   return new OpenAI(sdkOptions);
 };
 
+const isErrorBody = (value: unknown): value is { code?: number | string; message?: string } =>
+  typeof value === 'object' && value !== null;
+
+// Connection failures and timeouts carry no HTTP status, so the generic retry classification
+// cannot tell them apart from permanent errors; they are marked transient here.
+const classifyError = (error: unknown, signal: AbortSignal | undefined): unknown => {
+  if (signal?.aborted === true) return new AbortError();
+  if (error instanceof APIConnectionError) {
+    return new ProviderRequestError(`connection to OpenRouter failed: ${error.message}`, {
+      retryable: true,
+      cause: error,
+    });
+  }
+  return error;
+};
+
 export const createOpenRouterProvider = (
   modelName: string,
   options: CreateOpenRouterProviderOptions,
@@ -98,15 +114,31 @@ export const createOpenRouterProvider = (
     signal: AbortSignal | undefined,
   ): AsyncIterable<RawORChunk> {
     const params = buildParams(req);
+    let stream: AsyncIterable<RawORChunk>;
     try {
-      const stream = await client.chat.completions.create(
+      stream = (await client.chat.completions.create(
         params as unknown as ChatCompletionCreateParamsStreaming,
         { signal },
-      );
-      yield* stream as unknown as AsyncIterable<RawORChunk>;
+      )) as unknown as AsyncIterable<RawORChunk>;
     } catch (e) {
-      if (signal?.aborted === true) throw new AbortError();
-      throw e;
+      throw classifyError(e, signal);
+    }
+    try {
+      for await (const chunk of stream) yield chunk;
+    } catch (e) {
+      // The SDK throws on a stream chunk carrying an `error` field before the normalizer sees it.
+      // Handing it back as a chunk lets the normalizer report it as an error event that is
+      // retryable according to its code.
+      if (
+        signal?.aborted !== true &&
+        e instanceof APIError &&
+        e.status === undefined &&
+        isErrorBody(e.error)
+      ) {
+        yield { error: e.error };
+        return;
+      }
+      throw classifyError(e, signal);
     }
     // The SDK ends the stream without an error when its request is aborted. Without this check
     // the normalizer would report the truncated turn as a clean stop.

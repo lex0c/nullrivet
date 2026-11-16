@@ -1,4 +1,4 @@
-import { AbortError } from '../agent/abortable.ts';
+import { AbortError } from './errors.ts';
 import type { ProviderCapabilities } from './types.ts';
 
 export const DISCOVERY_TIMEOUT_MS = 5_000;

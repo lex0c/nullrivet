@@ -23,7 +23,7 @@ describe('headTailSummary', () => {
   test('elides middle when input exceeds maxBytes (many-lines path)', () => {
     const lines = Array.from({ length: 200 }, (_, i) => `line${i}`);
     const text = lines.join('\n');
-    const out = headTailSummary(text, { maxBytes: 100, headLines: 10, tailLines: 10 });
+    const out = headTailSummary(text, { maxBytes: 200, headLines: 10, tailLines: 10 });
     expect(out.reduced).toBe(true);
     // First 10 + elision marker + last 10
     expect(out.text).toContain('line0');
@@ -99,5 +99,13 @@ describe('headTailSummary', () => {
     const text = Array.from({ length: 50 }, (_, i) => `${i}`).join('\n');
     const out = headTailSummary(text, { maxBytes: 1024, headLines: 5, tailLines: 5 });
     expect(out.reduced).toBe(false);
+  });
+  test('many long lines still respect the byte budget', () => {
+    const text = Array.from({ length: 1000 }, (_, i) => `${i}:${'x'.repeat(5000)}`).join('\n');
+    const out = headTailSummary(text, { maxBytes: 16 * 1024, headLines: 80, tailLines: 80 });
+    expect(out.reduced).toBe(true);
+    expect(Buffer.byteLength(out.text, 'utf8')).toBeLessThan(16 * 1024 + 100);
+    expect(out.text.startsWith('0:x')).toBe(true);
+    expect(out.text.endsWith('x'.repeat(100))).toBe(true);
   });
 });

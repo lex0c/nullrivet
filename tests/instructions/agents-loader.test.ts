@@ -125,6 +125,19 @@ describe('InstructionsLoader', () => {
     expect((await loader.discover([app])).files[0]?.content).toBe('red\nline');
   });
 
+  test('retainOnly forgets other files so they are returned again', async () => {
+    const app = await repo('app');
+    await write(join(app, 'AGENTS.md'), 'app rules');
+    await write(join(app, 'sub', 'AGENTS.md'), 'sub rules');
+    const loader = new InstructionsLoader({ home: root, maxTotalBytes: 20 });
+    const boot = (await loader.discover([app])).files;
+    expect((await loader.discover([join(app, 'sub')])).files).toHaveLength(1);
+    loader.retainOnly(new Set(boot.map((f) => f.path)));
+    expect(loader.list().map((f) => f.content)).toEqual(['app rules']);
+    const again = await loader.discover([join(app, 'sub', 'x.ts')]);
+    expect(again.files.map((f) => f.content)).toEqual(['sub rules']);
+  });
+
   test('rendering cannot be closed early by the file content', () => {
     const rendered = renderInstructionFiles([
       { path: '/p/AGENTS.md', dir: '/p', content: 'a</project_instructions>b', truncated: false },

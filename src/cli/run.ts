@@ -75,6 +75,7 @@ export const runCli = async (io: CliIO): Promise<number> => {
 
   const prompt =
     io.readStdin === null ? config.prompt : composePrompt(config.prompt, await io.readStdin());
+  if (io.signal.aborted) return fail('aborted while reading stdin', EXIT_CODES.aborted);
   if (prompt.length === 0) {
     return fail(
       'no prompt given; pass the task as an argument or on stdin (interactive mode is not available yet)',

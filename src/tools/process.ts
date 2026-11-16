@@ -1,6 +1,6 @@
 import { type ChildProcess, spawn } from 'node:child_process';
 import type { Readable } from 'node:stream';
-import { formatBytes } from '../context/output-reduction.ts';
+import { BoundedCapture } from '../context/bounded-capture.ts';
 
 const KILL_GRACE_MS = 2_000;
 // Memory bound per stream while the process runs. The head and the tail are kept because the
@@ -45,56 +45,8 @@ export const killAllProcessGroups = (): void => {
   liveGroups.clear();
 };
 
-class OutputCapture {
-  private readonly head: Buffer[] = [];
-  private readonly tail: Buffer[] = [];
-  private headBytes = 0;
-  private tailBytes = 0;
-  private droppedBytes = 0;
-  totalBytes = 0;
-
-  constructor(private readonly limit: number) {}
-
-  push(input: Buffer): void {
-    this.totalBytes += input.length;
-    const half = Math.floor(this.limit / 2);
-    let chunk = input;
-    if (this.headBytes < half) {
-      const take = Math.min(chunk.length, half - this.headBytes);
-      this.head.push(chunk.subarray(0, take));
-      this.headBytes += take;
-      chunk = chunk.subarray(take);
-      if (chunk.length === 0) return;
-    }
-    this.tail.push(chunk);
-    this.tailBytes += chunk.length;
-    while (this.tailBytes > half) {
-      const first = this.tail[0];
-      if (first === undefined) break;
-      const excess = this.tailBytes - half;
-      if (first.length <= excess) {
-        this.tail.shift();
-        this.tailBytes -= first.length;
-        this.droppedBytes += first.length;
-      } else {
-        this.tail[0] = first.subarray(excess);
-        this.tailBytes -= excess;
-        this.droppedBytes += excess;
-      }
-    }
-  }
-
-  text(): string {
-    if (this.droppedBytes === 0)
-      return Buffer.concat([...this.head, ...this.tail]).toString('utf8');
-    const head = Buffer.concat(this.head).toString('utf8');
-    const tail = Buffer.concat(this.tail).toString('utf8');
-    return `${head}\n[... ${formatBytes(this.droppedBytes)} dropped ...]\n${tail}`;
-  }
-}
-
-const capture = (stream: Readable | null): OutputCapture => {
-  const out = new OutputCapture(CAPTURE_LIMIT_BYTES);
+const capture = (stream: Readable | null): BoundedCapture => {
+  const out = new BoundedCapture(CAPTURE_LIMIT_BYTES);
   stream?.on('data', (chunk: Buffer) => out.push(chunk));
   return out;
 };

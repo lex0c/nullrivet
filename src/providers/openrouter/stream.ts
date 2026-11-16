@@ -1,3 +1,4 @@
+import { INVALID_TOOL_CALL } from '../errors.ts';
 import type { StopReason, StreamEvent } from '../types.ts';
 
 // OpenRouter streams the OpenAI Chat Completions chunk shape plus a few fields: plaintext
@@ -250,7 +251,7 @@ export async function* normalizeOpenRouterStream(
       if (tool.name.length === 0) {
         yield {
           kind: 'error',
-          code: 'openrouter.tool_use_no_name',
+          code: INVALID_TOOL_CALL,
           message: `tool_call ${tool.id} ended without a function name`,
           retryable: false,
         };
@@ -271,7 +272,7 @@ export async function* normalizeOpenRouterStream(
         } catch (e) {
           yield {
             kind: 'error',
-            code: 'tool_args_parse_error',
+            code: INVALID_TOOL_CALL,
             message: `failed to parse tool_use args for ${tool.id}: ${(e as Error).message}`,
             retryable: false,
           };

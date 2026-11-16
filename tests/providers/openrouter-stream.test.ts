@@ -231,7 +231,7 @@ describe('normalizeOpenRouterStream', () => {
     ]);
     expect(ev.find((e) => e.kind === 'error')).toMatchObject({
       kind: 'error',
-      code: 'tool_args_parse_error',
+      code: 'tool_call.invalid',
       retryable: false,
     });
     expect(ev.some((e) => e.kind === 'tool_use_stop')).toBe(false);
@@ -243,7 +243,7 @@ describe('normalizeOpenRouterStream', () => {
       { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
     ]);
     expect(ev.find((e) => e.kind === 'error')).toMatchObject({
-      code: 'openrouter.tool_use_no_name',
+      code: 'tool_call.invalid',
     });
   });
 

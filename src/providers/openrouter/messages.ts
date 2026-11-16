@@ -5,6 +5,10 @@ import {
   type ProviderCapabilities,
 } from '../types.ts';
 
+// The OpenAI message shape carries one string per message. Separate text blocks (two prompts merged
+// after an interrupted turn, or text split around tool calls) must not run together.
+const TEXT_BLOCK_SEPARATOR = '\n\n';
+
 // OpenRouter messages are OpenAI-shaped plus a reasoning slot (`reasoning_details` or
 // `reasoning`) that carries the model's reasoning across tool turns. The plain OpenAI mapping
 // drops reasoning, which is why this conversion is separate.
@@ -125,7 +129,7 @@ export const toOpenRouterMessages = (
     out.push(...toolResults);
 
     if (msg.role === 'assistant') {
-      const content = textParts.length > 0 ? textParts.join('') : null;
+      const content = textParts.length > 0 ? textParts.join(TEXT_BLOCK_SEPARATOR) : null;
       // An assistant message with neither content nor tool calls is invalid in the OpenAI shape,
       // and its reasoning has no value without the turn it belongs to, so it is dropped.
       if (content !== null || toolCalls.length > 0) {
@@ -145,7 +149,7 @@ export const toOpenRouterMessages = (
         out.push(m);
       }
     } else if (textParts.length > 0) {
-      out.push({ role: 'user', content: textParts.join('') });
+      out.push({ role: 'user', content: textParts.join(TEXT_BLOCK_SEPARATOR) });
     }
   }
 

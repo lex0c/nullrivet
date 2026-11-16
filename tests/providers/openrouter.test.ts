@@ -1,12 +1,14 @@
 import { describe, expect, test } from 'bun:test';
 import type OpenAI from 'openai';
 import { AbortError } from '../../src/agent/abortable.ts';
-import { generateWithRetry } from '../../src/agent/retry.ts';
+import { generateWithRetry, isRetryableError } from '../../src/agent/retry.ts';
+import { ProviderRequestError } from '../../src/providers/errors.ts';
 import { OPENROUTER_CAPS } from '../../src/providers/openrouter/capabilities.ts';
 import {
   type CreateOpenRouterProviderOptions,
   createOpenRouterProvider,
 } from '../../src/providers/openrouter/index.ts';
+import { toOpenRouterMessages } from '../../src/providers/openrouter/messages.ts';
 import type { RawORChunk } from '../../src/providers/openrouter/stream.ts';
 import type {
   GenerateRequest,
@@ -85,6 +87,27 @@ const capture = async (
   await collect(p.generate(reqGen(req), signal));
   return captured;
 };
+
+describe('toOpenRouterMessages text blocks', () => {
+  test('separate text blocks of one message do not run together', () => {
+    const out = toOpenRouterMessages(
+      reqGen({
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'fix the bug' },
+              { type: 'text', text: 'also add tests' },
+            ],
+          },
+        ],
+      }),
+      false,
+      false,
+    );
+    expect(out.at(-1)).toEqual({ role: 'user', content: 'fix the bug\n\nalso add tests' });
+  });
+});
 
 describe('createOpenRouterProvider', () => {
   test('throws without an api key or client', () => {
@@ -536,5 +559,33 @@ describe('createOpenRouterProvider over the SDK transport', () => {
     expect(fetchSignal?.aborted).toBe(true);
     expect(caught).toBeInstanceOf(AbortError);
     expect(events.map((e) => e.kind)).toEqual(['start', 'text_delta']);
+  });
+  test('an error reported inside the stream becomes a retryable error event', async () => {
+    const p = providerWithFetch(async () =>
+      sseResponse(
+        sse([
+          { id: 'm1', choices: [{ delta: { content: '' } }] },
+          { error: { code: 502, message: 'upstream provider failed' } },
+        ]),
+      ),
+    );
+    const ev = await collect(p.generate(req));
+    const error = ev.find((e) => e.kind === 'error');
+    expect(error).toMatchObject({ kind: 'error', retryable: true });
+    expect(ev.some((e) => e.kind === 'stop')).toBe(false);
+  });
+
+  test('a connection failure is classified as retryable', async () => {
+    const p = providerWithFetch(async () => {
+      throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+    });
+    let caught: unknown;
+    try {
+      await collect(p.generate(req));
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(ProviderRequestError);
+    expect(isRetryableError(caught)).toBe(true);
   });
 });

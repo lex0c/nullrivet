@@ -1,5 +1,6 @@
 #!/usr/bin/env -S bun --no-env-file
 import { runCli } from './cli/run.ts';
+import { BoundedCapture } from './context/bounded-capture.ts';
 import { killAllProcessGroups } from './tools/process.ts';
 
 const controller = new AbortController();
@@ -22,11 +23,26 @@ process.on('SIGTERM', () => {
 });
 process.on('exit', killAllProcessGroups);
 
-const readStdin = async (): Promise<string> => {
-  const chunks: Buffer[] = [];
-  for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
-  return Buffer.concat(chunks).toString('utf8');
-};
+// Piped input is read in bounded memory, and an interrupt stops waiting for an input that never
+// ends (a parent process that leaves stdin open).
+const STDIN_CAPTURE_BYTES = 1024 * 1024;
+
+const readStdin = (): Promise<string> =>
+  new Promise((resolve) => {
+    const capture = new BoundedCapture(STDIN_CAPTURE_BYTES);
+    const finish = (): void => {
+      controller.signal.removeEventListener('abort', onAbort);
+      resolve(capture.text());
+    };
+    const onAbort = (): void => {
+      process.stdin.destroy();
+      finish();
+    };
+    controller.signal.addEventListener('abort', onAbort, { once: true });
+    process.stdin.on('data', (chunk: Buffer) => capture.push(chunk));
+    process.stdin.once('end', finish);
+    process.stdin.once('error', finish);
+  });
 
 const code = await runCli({
   argv: process.argv.slice(2),

@@ -1,3 +1,4 @@
+import { ProviderRequestError } from '../providers/errors.ts';
 import type { GenerateRequest, Provider, StreamEvent } from '../providers/types.ts';
 import { AbortError, abortableSleep } from './abortable.ts';
 
@@ -21,6 +22,7 @@ const NETWORK_ERROR_CODES = ['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'ENOTFOU
 // Duck-typed so no SDK error class has to be imported: the SDKs expose `.status` on HTTP errors
 // and Node exposes `.code` on network errors.
 export const isRetryableError = (e: unknown): boolean => {
+  if (e instanceof ProviderRequestError) return e.retryable;
   if (!(e instanceof Error)) return false;
   const status = (e as { status?: unknown }).status;
   if (typeof status === 'number') {
