@@ -1,3 +1,4 @@
+import { stripAnsi } from '../sanitize/ansi.ts';
 import { shortenCwd } from './render/cwd.ts';
 import { formatChipDuration } from './render/duration.ts';
 import { padFrame } from './render/frame.ts';
@@ -9,7 +10,7 @@ import { truncateToWidth, visualWidth } from './render/width.ts';
 import type { ScreenFrame } from './screen.ts';
 import type { TuiState, TurnState } from './state.ts';
 import { type Capabilities, paint } from './term.ts';
-import { toolSubject, toolVerb } from './tool-labels.ts';
+import { subjectWidth, toolSubject, toolVerb } from './tool-labels.ts';
 
 const FOOTER_MARGIN = 2;
 const MIN_FOOTER_GAP = 2;
@@ -31,6 +32,25 @@ export const formatTokens = (n: number): string => {
 const rule = (caps: Capabilities): string =>
   paint(caps, 'dim', (caps.unicode ? '─' : '-').repeat(Math.max(0, caps.cols)));
 
+// The pending block is redrawn on every animation frame while its text changes far less often,
+// so the last rendering is reused until the text or the terminal changes.
+let pendingCache: { text: string; cols: number; color: string; lines: string[] } | null = null;
+
+const renderPending = (text: string, caps: Capabilities): string[] => {
+  const cached = pendingCache;
+  if (
+    cached !== null &&
+    cached.text === text &&
+    cached.cols === caps.cols &&
+    cached.color === caps.color
+  ) {
+    return cached.lines;
+  }
+  const lines = renderMarkdown(text, caps).map(padFrame);
+  pendingCache = { text, cols: caps.cols, color: caps.color, lines };
+  return lines;
+};
+
 const phaseChip = (turn: TurnState, caps: Capabilities, now: number): string => {
   const elapsed = formatChipDuration(now - turn.startedAt);
   let label: string;
@@ -40,6 +60,7 @@ const phaseChip = (turn: TurnState, caps: Capabilities, now: number): string => 
   else if (turn.pendingText.length > 0 || turn.outputChars > 0) label = 'Writing…';
   else label = 'Waiting for the model…';
   const details = [elapsed];
+  if (turn.interrupting) details.push('ctrl+c to exit');
   if (turn.outputChars > 0)
     details.push(`↓ ~${formatTokens(Math.ceil(turn.outputChars / 4))} tokens`);
   return `${paint(caps, 'accent', spinner(caps, now))} ${renderShimmer(label, caps, now, 'secondary')} ${paint(caps, 'dim', `(${details.join(' · ')})`)}`;
@@ -48,10 +69,10 @@ const phaseChip = (turn: TurnState, caps: Capabilities, now: number): string => 
 const turnRows = (turn: TurnState, caps: Capabilities, now: number): string[] => {
   const rows: string[] = [];
   if (turn.pendingText.trim().length > 0) {
-    rows.push('', ...renderMarkdown(turn.pendingText, caps).map(padFrame));
+    rows.push('', ...renderPending(turn.pendingText, caps));
   }
   for (const tool of turn.tools) {
-    const subject = toolSubject(tool.name, tool.args);
+    const subject = toolSubject(tool.name, tool.args, subjectWidth(caps));
     const elapsed = paint(caps, 'secondary', `  [${formatChipDuration(now - tool.startedAt)}]`);
     rows.push(
       '',
@@ -87,7 +108,7 @@ const footerRow = (state: TuiState, caps: Capabilities): string => {
   // row is too narrow, and the model name is shortened last.
   const totals = state.status.totals;
   const parts = [
-    state.status.model,
+    stripAnsi(state.status.model),
     ...(state.status.effort === undefined ? [] : [`effort ${state.status.effort}`]),
   ].map((text) => paint(caps, 'secondary', text));
   const context = contextLabel(state, caps);
@@ -129,7 +150,8 @@ export const composeLive = (state: TuiState, caps: Capabilities, now: number): S
     rows.push(...renderSlashPopover(state.slash, caps).map(padFrame));
   }
   rows.push(footerRow(state, caps));
-  rows.push(padFrame(paint(caps, 'dim', shortenCwd(state.status.cwd, state.status.home, caps))));
+  const cwd = stripAnsi(shortenCwd(state.status.cwd, state.status.home, caps));
+  rows.push(padFrame(paint(caps, 'dim', cwd)));
   const cursor = inputCursor(state.input, caps);
   return { rows, cursor: { row: inputTop + cursor.row, col: cursor.col } };
 };

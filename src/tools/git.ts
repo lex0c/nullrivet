@@ -1,5 +1,6 @@
 import { stat } from 'node:fs/promises';
 import { headTailSummary } from '../context/output-reduction.ts';
+import { errorMessage } from '../errors.ts';
 import {
   InvalidArgumentError,
   optionalBoolean,
@@ -294,7 +295,7 @@ export const gitTool: Tool = {
         signal: ctx.signal,
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = errorMessage(error);
       return toolError('git.failed', message);
     }
 

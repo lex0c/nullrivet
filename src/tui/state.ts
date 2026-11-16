@@ -150,7 +150,11 @@ const reduceAgentEvent = (state: TuiState, event: AgentEvent, now: number): Redu
     }
     case 'text:delta': {
       if (turn === null) return { state, permanent: [] };
-      const { settled, pending } = splitSettledMarkdown(turn.pendingText + event.text);
+      const text = turn.pendingText + event.text;
+      // A block boundary needs a newline, so most deltas skip the scan of the pending block.
+      const { settled, pending } = event.text.includes('\n')
+        ? splitSettledMarkdown(text)
+        : { settled: '', pending: text };
       return {
         state: {
           ...state,

@@ -1,5 +1,6 @@
 import type { AgentEvent } from '../agent/events.ts';
 import { stripAnsi } from '../sanitize/ansi.ts';
+import { errorSummary, toolSubject } from '../tui/tool-labels.ts';
 
 export interface OutputSink {
   event(event: AgentEvent): void;
@@ -20,26 +21,6 @@ export const createJsonSink = (write: (line: string) => void): OutputSink => ({
   },
   finish() {},
 });
-
-const oneLine = (value: string, max = 120): string => {
-  const flat = stripAnsi(value).replace(/\s+/g, ' ').trim();
-  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
-};
-
-export const describeToolCall = (name: string, args: Record<string, unknown>): string => {
-  const str = (key: string): string | undefined =>
-    typeof args[key] === 'string' ? (args[key] as string) : undefined;
-  switch (name) {
-    case 'bash':
-      return oneLine(str('command') ?? '');
-    case 'git':
-      return oneLine(
-        [str('subcommand'), str('ref'), str('base'), str('path')].filter(Boolean).join(' '),
-      );
-    default:
-      return oneLine(str('path') ?? '');
-  }
-};
 
 export interface PlainSinkOptions {
   stdout: (text: string) => void;
@@ -76,10 +57,10 @@ export const createPlainSink = (options: PlainSinkOptions): OutputSink => {
           return;
         }
         case 'tool:start':
-          diagnostic(dim(`› ${event.name} ${describeToolCall(event.name, event.args)}`));
+          diagnostic(dim(`› ${event.name} ${toolSubject(event.name, event.args)}`));
           return;
         case 'tool:end':
-          if (event.isError) diagnostic(red(`  ✗ ${oneLine(event.content, 200)}`));
+          if (event.isError) diagnostic(red(`  ✗ ${errorSummary(event.content, 200)}`));
           return;
         case 'warning':
           diagnostic(yellow(`warning: ${event.message}`));

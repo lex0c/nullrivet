@@ -1,3 +1,4 @@
+import { errorMessage } from '../errors.ts';
 import { AbortError } from './errors.ts';
 import type { ProviderCapabilities } from './types.ts';
 
@@ -65,8 +66,6 @@ const parseModelList = (payload: unknown): Map<string, ListedModel> | undefined 
   }
   return models;
 };
-
-const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 // Messages may reach logs, so they never carry credentials or query parameters from the URL.
 const displayUrl = (url: string): string => {

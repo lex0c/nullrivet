@@ -1,6 +1,7 @@
 import { open, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { errorMessage } from '../errors.ts';
 import { stripAnsi } from '../sanitize/ansi.ts';
 
 export const INSTRUCTIONS_FILE_NAME = 'AGENTS.md';
@@ -82,6 +83,24 @@ export class InstructionsLoader {
 
   list(): InstructionFile[] {
     return [...this.loaded.values()];
+  }
+
+  // Reads the files that apply to `paths` again, forgetting every other loaded file. The new
+  // state is built separately and adopted only when discovery completes, so a failure leaves
+  // the current state intact.
+  async reload(paths: readonly string[]): Promise<DiscoveryResult> {
+    const fresh = new InstructionsLoader({
+      maxFileBytes: this.maxFileBytes,
+      maxTotalBytes: this.maxTotalBytes,
+      maxDepth: this.maxDepth,
+      home: this.home,
+    });
+    const result = await fresh.discover(paths);
+    this.reset();
+    for (const [path, file] of fresh.loaded) this.loaded.set(path, file);
+    for (const [path, size] of fresh.sizes) this.sizes.set(path, size);
+    this.totalBytes = fresh.totalBytes;
+    return result;
   }
 
   // Forgets everything so the next discovery reads the files again.
@@ -189,7 +208,7 @@ export class InstructionsLoader {
     try {
       read = await readPrefix(path, Math.min(this.maxFileBytes, remaining));
     } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
+      const reason = errorMessage(error);
       warnings.push(`${path} could not be read: ${reason}`);
       return null;
     }

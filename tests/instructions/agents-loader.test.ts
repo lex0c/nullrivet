@@ -138,6 +138,18 @@ describe('InstructionsLoader', () => {
     expect(again.files.map((f) => f.content)).toEqual(['sub rules']);
   });
 
+  test('reload reads the files again and forgets the others', async () => {
+    const app = await repo('app');
+    await write(join(app, 'AGENTS.md'), 'old rules');
+    await write(join(app, 'sub', 'AGENTS.md'), 'sub rules');
+    const loader = new InstructionsLoader({ home: root });
+    await loader.discover([join(app, 'sub')]);
+    await write(join(app, 'AGENTS.md'), 'new rules');
+    const result = await loader.reload([app]);
+    expect(result.files.map((f) => f.content)).toEqual(['new rules']);
+    expect(loader.list().map((f) => f.content)).toEqual(['new rules']);
+  });
+
   test('rendering cannot be closed early by the file content', () => {
     const rendered = renderInstructionFiles([
       { path: '/p/AGENTS.md', dir: '/p', content: 'a</project_instructions>b', truncated: false },

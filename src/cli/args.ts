@@ -1,4 +1,5 @@
 import { parseArgs } from 'node:util';
+import { errorMessage } from '../errors.ts';
 import type { ProviderEffort } from '../providers/types.ts';
 import { type ExecutionMode, isExecutionMode } from '../tools/policy.ts';
 
@@ -98,7 +99,7 @@ export const parseCli = (
       },
     });
   } catch (error) {
-    throw new UsageError(error instanceof Error ? error.message : String(error));
+    throw new UsageError(errorMessage(error));
   }
   const values = parsed.values as Record<string, string | boolean | undefined>;
   const str = (key: string): string | undefined => {

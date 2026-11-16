@@ -1,5 +1,6 @@
 import { stat } from 'node:fs/promises';
 import { HEAD_TAIL_DEFAULT_LINES, headTailSummary } from '../context/output-reduction.ts';
+import { errorMessage } from '../errors.ts';
 import { optionalInteger, optionalString, requireNonEmptyString } from './args.ts';
 import { scrubAgentEnv } from './env.ts';
 import { resolvePath } from './paths.ts';
@@ -108,7 +109,7 @@ export const bashTool: Tool = {
         signal: ctx.signal,
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = errorMessage(error);
       return toolError('bash.spawn_failed', `could not start bash: ${message}`);
     }
 

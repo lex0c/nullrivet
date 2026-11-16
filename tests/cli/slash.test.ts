@@ -45,13 +45,14 @@ const run = async (h: Harness, text: string): Promise<void> => {
 describe('parseSlash', () => {
   test('parses a command and its arguments', () => {
     expect(parseSlash('/model openrouter/a/b')).toEqual({ name: 'model', args: 'openrouter/a/b' });
-    expect(parseSlash('  /help  ')).toEqual({ name: 'help', args: '' });
+    expect(parseSlash('/help  ')).toEqual({ name: 'help', args: '' });
   });
 
   test('a path or ordinary text is not a command', () => {
     expect(parseSlash('/etc/hosts is broken')).toBeNull();
     expect(parseSlash('fix /model')).toBeNull();
     expect(parseSlash('/')).toBeNull();
+    expect(parseSlash(' /tmp is full')).toBeNull();
   });
 });
 

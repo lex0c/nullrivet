@@ -1,4 +1,5 @@
 import type { Agent } from '../agent/agent.ts';
+import { errorMessage } from '../errors.ts';
 import type { ResolveResult } from '../providers/resolve.ts';
 import type { ProviderEffort } from '../providers/types.ts';
 import { isExecutionMode } from '../tools/policy.ts';
@@ -31,10 +32,10 @@ export interface ParsedSlash {
   args: string;
 }
 
-// Only `/word` at the start is a command, so a prompt such as "/etc/hosts is broken" is sent to
-// the model as text.
+// Only `/word` at the very start is a command: "/etc/hosts is broken" is not one, and leading
+// whitespace marks text that starts with "/" as a prompt.
 export const parseSlash = (text: string): ParsedSlash | null => {
-  const match = /^\/([a-z]+)(?:\s+([\s\S]*))?$/.exec(text.trim());
+  const match = /^\/([a-z]+)(?:\s+([\s\S]*))?$/.exec(text.trimEnd());
   if (match === null) return null;
   return { name: match[1] ?? '', args: (match[2] ?? '').trim() };
 };
@@ -210,6 +211,6 @@ export const runSlash = async (parsed: ParsedSlash, ctx: SlashContext): Promise<
   try {
     await command.run(parsed.args, ctx);
   } catch (error) {
-    ctx.notice('error', error instanceof Error ? error.message : String(error));
+    ctx.notice('error', errorMessage(error));
   }
 };

@@ -1,4 +1,5 @@
 import { estimatePromptTokens } from '../context/tokens.ts';
+import { errorMessage } from '../errors.ts';
 import type { InstructionsLoader } from '../instructions/agents-loader.ts';
 import { renderInstructionFiles } from '../instructions/agents-loader.ts';
 import { INVALID_TOOL_CALL } from '../providers/errors.ts';
@@ -97,9 +98,6 @@ const isTransientFailure = (step: CollectedStep): boolean =>
 
 const describeErrors = (errors: readonly CollectedError[]): string =>
   errors.map((e) => `${e.code}: ${e.message}`).join('; ');
-
-const errorMessage = (error: unknown): string =>
-  error instanceof Error ? error.message || error.name : String(error);
 
 // The output limit shrinks as the conversation grows, so prompt plus answer always fit the window.
 const outputBudget = (request: GenerateRequest, provider: Provider, limit: number): number => {

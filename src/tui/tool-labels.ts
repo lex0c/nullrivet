@@ -43,6 +43,11 @@ export const toolSubject = (name: string, args: Record<string, unknown>, max = 1
   }
 };
 
+// Room left for a tool subject on one row, after the glyph, the verb and the duration.
+const TOOL_ROW_RESERVED = 30;
+export const subjectWidth = (caps: { cols: number }): number =>
+  Math.max(10, caps.cols - TOOL_ROW_RESERVED);
+
 // First line of an error result, without the code prefix the model sees.
 export const errorSummary = (content: string, max = 160): string => {
   const first = content.split('\n')[0] ?? '';

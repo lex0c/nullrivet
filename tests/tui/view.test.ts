@@ -103,6 +103,58 @@ describe('formatPermanent', () => {
   });
 });
 
+describe('scrollback width', () => {
+  test('long notices wrap inside the frame margin', () => {
+    const text = `Unknown command /tmp. ${'word '.repeat(30)}`;
+    const lines = formatPermanent({ kind: 'notice', level: 'error', text }, caps(40)).filter(
+      (l) => l.length > 0,
+    );
+    expect(lines.length).toBeGreaterThan(1);
+    for (const line of lines) {
+      expect(line.length).toBeLessThanOrEqual(40);
+      expect(line).toStartWith('  ');
+    }
+  });
+
+  test('a finished tool row fits the terminal width', () => {
+    const lines = formatPermanent(
+      {
+        kind: 'tool',
+        name: 'bash',
+        args: { command: `echo ${'x'.repeat(200)}` },
+        isError: false,
+        content: '',
+        meta: undefined,
+        durationMs: 5,
+      },
+      caps(60),
+    );
+    for (const line of lines) expect(stripAnsi(line).length).toBeLessThanOrEqual(60);
+  });
+
+  test('provider failures are not repeated in the end-of-turn line', () => {
+    const lines = formatPermanent(
+      {
+        kind: 'turn-end',
+        reason: 'error',
+        message: 'provider request failed: 500',
+        durationMs: 2_000,
+      },
+      caps(80),
+    );
+    expect(lines.join('\n')).not.toContain('provider request failed');
+  });
+
+  test('escape sequences in notices are not written to the terminal', () => {
+    const lines = formatPermanent(
+      { kind: 'notice', level: 'error', text: 'bad \x1b]0;title\x07\x1b[2Jbody' },
+      caps(80),
+    );
+    expect(lines.join('')).not.toContain('\x1b]');
+    expect(lines.join('')).not.toContain('\x1b[2J');
+  });
+});
+
 describe('formatTokens', () => {
   test('uses k and M suffixes', () => {
     expect(formatTokens(999)).toBe('999');

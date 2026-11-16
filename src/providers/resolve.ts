@@ -1,3 +1,4 @@
+import { errorMessage } from '../errors.ts';
 import { FAMILY_ADAPTERS, type FamilyAdapter, findCatalogEntry } from './catalog.ts';
 import type { DiscoveryCache, DiscoveryOptions, FetchLike } from './discovery.ts';
 import type { Env } from './env.ts';
@@ -192,7 +193,7 @@ export const resolveModel = async (
   } catch (e) {
     return {
       ok: false,
-      error: `cannot create provider for "${id}": ${e instanceof Error ? e.message : String(e)}`,
+      error: `cannot create provider for "${id}": ${errorMessage(e)}`,
     };
   }
 };

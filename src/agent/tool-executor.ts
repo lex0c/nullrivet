@@ -1,3 +1,4 @@
+import { errorMessage } from '../errors.ts';
 import { stripAnsi } from '../sanitize/ansi.ts';
 import { InvalidArgumentError } from '../tools/args.ts';
 import { type ExecutionMode, isToolAllowed } from '../tools/policy.ts';
@@ -46,7 +47,7 @@ export const executeToolCall = async (
     if (error instanceof InvalidArgumentError) {
       return toolError('input.invalid', error.message);
     }
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     return toolError('tool.crashed', `${call.name} failed unexpectedly: ${message}`);
   }
 };

@@ -1,5 +1,6 @@
 import { homedir } from 'node:os';
 import type { Agent } from '../agent/agent.ts';
+import { errorMessage } from '../errors.ts';
 import type { ResolveResult } from '../providers/resolve.ts';
 import { applyKey, type InputState } from '../tui/input-editor.ts';
 import { createKeyParser, type KeyEvent } from '../tui/keys.ts';
@@ -43,9 +44,6 @@ export interface ReplOptions {
   stdout: NodeJS.WriteStream;
   env: Record<string, string | undefined>;
 }
-
-const errorMessage = (error: unknown): string =>
-  error instanceof Error ? error.message : String(error);
 
 export const formatStats = (status: StatusState): string => {
   const t = status.totals;
@@ -122,23 +120,47 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       if (state.turn !== null) scheduler.request();
     }, ANIMATION_MS);
 
+    // Every step runs even if an earlier one throws: leaving the terminal in raw mode, with the
+    // cursor hidden or with extended key reporting on, would break the user's shell.
     const finish = (code: number): void => {
       if (closed) return;
-      turn?.abort();
-      clearInterval(ticker);
-      if (exitTimer !== null) clearTimeout(exitTimer);
-      if (escTimer !== null) clearTimeout(escTimer);
-      scheduler.close();
-      stdin.off('data', onData);
-      disableBracketedPasteOn(write);
-      write(disableModifyOtherKeys);
-      disableRawMode(stdin);
-      stdin.pause();
-      screen.clearLive();
-      screen.close();
       closed = true;
+      const steps: (() => void)[] = [
+        () => turn?.abort(),
+        () => clearInterval(ticker),
+        () => exitTimer !== null && clearTimeout(exitTimer),
+        () => escTimer !== null && clearTimeout(escTimer),
+        () => scheduler.close(),
+        () => stdin.off('data', onData),
+        () => disableBracketedPasteOn(write),
+        () => write(disableModifyOtherKeys),
+        () => disableRawMode(stdin),
+        () => stdin.pause(),
+        () => screen.clearLive(),
+        () => screen.close(),
+        () => process.off('uncaughtException', crash),
+        () => process.off('unhandledRejection', crash),
+      ];
+      for (const step of steps) {
+        try {
+          step();
+        } catch {
+          // Restoring the rest of the terminal matters more than reporting this step.
+        }
+      }
       resolveExit(code);
     };
+
+    // Errors thrown from key, render or timer callbacks would otherwise end the process with the
+    // terminal still in raw mode.
+    function crash(error: unknown): void {
+      finish(1);
+      const detail =
+        error instanceof Error && error.stack !== undefined ? error.stack : errorMessage(error);
+      process.stderr.write(`nullrivet: unexpected error: ${detail}\n`);
+    }
+    process.on('uncaughtException', crash);
+    process.on('unhandledRejection', crash);
 
     const slashContext: SlashContext = {
       agent,
@@ -203,13 +225,34 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       updateSlash(input.value);
     };
 
+    // A command and a turn never overlap: /model and /instructions reload await work that must
+    // not change the agent while a turn uses it.
+    let commandRunning = false;
+
     const submit = async (raw: string): Promise<void> => {
       const text = raw.trim();
       if (text.length === 0) return;
-      const parsed = parseSlash(text);
+      if (commandRunning) {
+        notice('warning', 'A command is still running. Try again when it finishes.');
+        return;
+      }
+      const parsed = parseSlash(raw);
       if (parsed !== null) {
+        if (findCommand(parsed.name) === undefined) {
+          // The input is kept so the text is not lost when it was meant as a prompt.
+          notice(
+            'error',
+            `Unknown command /${parsed.name}. Type /help for the list, or start the text with a space to send it as a prompt.`,
+          );
+          return;
+        }
         dispatch({ type: 'submit', text });
-        await runSlash(parsed, slashContext);
+        commandRunning = true;
+        try {
+          await runSlash(parsed, slashContext);
+        } finally {
+          commandRunning = false;
+        }
         syncStatus();
         return;
       }
@@ -255,7 +298,10 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
     const onKey = (key: KeyEvent): void => {
       if (isCtrlC(key)) {
         if (turn !== null) {
-          interrupt();
+          // A turn that does not settle after an interrupt (a process that ignores signals, a
+          // silent stream) must not keep the user from leaving.
+          if (turn.signal.aborted) finish(130);
+          else interrupt();
         } else if (state.input.value.length > 0) {
           setInput({ value: '', cursor: 0 });
         } else if (state.exitArmedAt !== null) {

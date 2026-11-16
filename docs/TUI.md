@@ -81,7 +81,12 @@ does not settle it. Any remaining text is settled when a tool call starts or the
 ## Interrupting and exiting
 
 - `Esc` or `Ctrl+C` during a task aborts it. The abort reaches the HTTP request and every
-  process group started by the tools; completed tool results stay in the conversation.
+  process group started by the tools; completed tool results stay in the conversation. If the
+  task does not stop, a second `Ctrl+C` exits anyway.
+- A slash command and a task never run at the same time: a prompt submitted while a command such
+  as `/model` is still resolving is refused, so the agent is never changed mid-task.
+- If an unexpected error reaches the session, the terminal is restored (raw mode, cursor, key
+  reporting) before the error is printed and nullrivet exits with code 1.
 - `Ctrl+C` on an empty prompt with no task running arms an exit; a second `Ctrl+C` within two
   seconds exits. Typing anything disarms it.
 - On exit the live region is erased, the cursor is shown, raw mode, bracketed paste and the

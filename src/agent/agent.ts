@@ -99,8 +99,7 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
     async reloadInstructions() {
       if (options.instructions === null) return { files: [], warnings: [] };
       if (running) throw new Error('instructions cannot be reloaded while a turn is running');
-      options.instructions.reset();
-      const discovered = await options.instructions.discover([options.cwd]);
+      const discovered = await options.instructions.reload([options.cwd]);
       bootInstructions = discovered.files;
       return discovered;
     },

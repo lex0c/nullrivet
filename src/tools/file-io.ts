@@ -1,6 +1,7 @@
 import type { Stats } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { formatBytes } from '../context/output-reduction.ts';
+import { errorMessage } from '../errors.ts';
 import { type ToolResult, toolError } from './types.ts';
 
 // Shared by read_file, edit_file and write_file. Files are loaded whole, so the cap bounds memory
@@ -57,7 +58,7 @@ export const fileSystemError = (
     case 'EISDIR':
       return directoryError(abs, 'Provide the path of a file.');
     default: {
-      const reason = error instanceof Error ? error.message : String(error);
+      const reason = errorMessage(error);
       return toolError(`fs.${operation}_failed`, `cannot ${operation} ${abs}: ${reason}`);
     }
   }

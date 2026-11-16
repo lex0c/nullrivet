@@ -18,7 +18,8 @@ const PREFIX_WIDTH = 2;
 // A tab is shown as one space. The width library counts a tab as zero columns while the
 // terminal jumps to the next tab stop, so a raw tab would desynchronize the wrap and the
 // cursor. The substitution is one code unit for one, so buffer offsets stay valid.
-const displayText = (value: string): string => value.replace(/\t/g, ' ');
+// Tabs are shown as one space so wrapping and the cursor column stay exact; the buffer keeps them.
+export const displayText = (value: string): string => value.replace(/\t/g, ' ');
 
 export interface RenderInputOptions {
   // Dim hint shown after the prompt while the buffer is empty.

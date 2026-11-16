@@ -146,7 +146,7 @@ request used, and the tokens used in the session.
 |---|---|
 | `Enter` | Send the prompt (or run the selected command). |
 | `Shift+Enter`, `Alt+Enter`, `\` then `Enter` | Insert a newline. |
-| `Esc` or `Ctrl+C` while a task runs | Interrupt the task; running commands are terminated. |
+| `Esc` or `Ctrl+C` while a task runs | Interrupt the task; running commands are terminated. A second `Ctrl+C` exits if the task does not stop. |
 | `Ctrl+C` on a non-empty prompt | Clear the prompt. |
 | `Ctrl+C` twice on an empty prompt | Exit (code 130). |
 | `Ctrl+D` on an empty prompt | Exit (code 0). |
@@ -171,7 +171,8 @@ While a task runs you can type the next prompt, but it can only be sent once the
 | `/stats` | Show the token usage of the session. |
 | `/exit` | Exit. |
 
-`/model` and `/clear` cannot be used while a task runs. How the interface works is described in
+`/model` and `/clear` cannot be used while a task runs. An unknown command is not sent anywhere
+and stays in the input; to send text that starts with `/` as a prompt, begin it with a space. How the interface works is described in
 [docs/TUI.md](docs/TUI.md).
 
 ## Models
