@@ -2,7 +2,11 @@ import { describe, expect, test } from 'bun:test';
 import type OpenAI from 'openai';
 import { AbortError } from '../../src/agent/abortable.ts';
 import { generateWithRetry, isRetryableError } from '../../src/agent/retry.ts';
-import { ProviderRequestError } from '../../src/providers/errors.ts';
+import {
+  CONTEXT_OVERFLOW,
+  ContextOverflowError,
+  ProviderRequestError,
+} from '../../src/providers/errors.ts';
 import { OPENROUTER_CAPS } from '../../src/providers/openrouter/capabilities.ts';
 import {
   type CreateOpenRouterProviderOptions,
@@ -573,6 +577,74 @@ describe('createOpenRouterProvider over the SDK transport', () => {
     const error = ev.find((e) => e.kind === 'error');
     expect(error).toMatchObject({ kind: 'error', retryable: true });
     expect(ev.some((e) => e.kind === 'stop')).toBe(false);
+  });
+
+  const rejectWith = (status: number, error: unknown) =>
+    providerWithFetch(
+      async () =>
+        new Response(JSON.stringify({ error }), {
+          status,
+          headers: { 'content-type': 'application/json' },
+        }),
+    );
+
+  const caught = async (it: AsyncIterable<StreamEvent>): Promise<unknown> => {
+    try {
+      await collect(it);
+    } catch (e) {
+      return e;
+    }
+    return undefined;
+  };
+
+  test('an upstream context-length rejection is a ContextOverflowError', async () => {
+    for (const error of [
+      {
+        code: 400,
+        message:
+          "This endpoint's maximum context length is 131072 tokens. However, you requested about 140000 tokens.",
+      },
+      {
+        code: 400,
+        message: 'Provider returned error',
+        metadata: {
+          raw: '{"error":{"message":"prompt is too long: 210000 tokens > 200000 maximum"}}',
+        },
+      },
+    ]) {
+      const e = await caught(rejectWith(400, error).generate(req));
+      expect(e).toBeInstanceOf(ContextOverflowError);
+      expect(isRetryableError(e)).toBe(false);
+    }
+  });
+
+  test('other rejections are left to the generic retry classification', async () => {
+    const badRequest = await caught(
+      rejectWith(400, { code: 400, message: 'tools is not supported' }).generate(req),
+    );
+    expect(badRequest).not.toBeInstanceOf(ContextOverflowError);
+    expect(badRequest).toMatchObject({ status: 400 });
+    const serverError = await caught(
+      rejectWith(502, { code: 502, message: 'maximum context length unavailable' }).generate(req),
+    );
+    expect(serverError).not.toBeInstanceOf(ContextOverflowError);
+    expect(serverError).toMatchObject({ status: 502 });
+  });
+
+  test('an overflow reported inside the stream becomes a context_overflow event', async () => {
+    const p = providerWithFetch(async () =>
+      sseResponse(
+        sse([
+          { id: 'm1', choices: [{ delta: { content: '' } }] },
+          { error: { code: 400, message: "This model's maximum context length is 8192 tokens" } },
+        ]),
+      ),
+    );
+    const ev = await collect(p.generate(req));
+    expect(ev.find((e) => e.kind === 'error')).toMatchObject({
+      code: CONTEXT_OVERFLOW,
+      retryable: false,
+    });
   });
 
   test('a connection failure is classified as retryable', async () => {

@@ -1,5 +1,11 @@
 import { errorMessage } from '../errors.ts';
-import { FAMILY_ADAPTERS, type FamilyAdapter, findCatalogEntry } from './catalog.ts';
+import {
+  FAMILY_ADAPTERS,
+  type FamilyAdapter,
+  findCatalogEntry,
+  type ModelEntry,
+  type ProviderFactoryOptions,
+} from './catalog.ts';
 import type { DiscoveryCache, DiscoveryOptions, FetchLike } from './discovery.ts';
 import type { Env } from './env.ts';
 import type { Provider, ProviderCapabilities, ProviderFamily } from './types.ts';
@@ -88,18 +94,19 @@ type CapabilityResolution =
 const resolveCapabilities = async (
   id: string,
   model: string,
+  entry: ModelEntry | undefined,
   adapter: FamilyAdapter,
-  baseUrl: string,
+  endpoint: { baseUrl: string; apiKey: string | undefined },
   options: ResolveOptions,
 ): Promise<CapabilityResolution> => {
-  const entry = findCatalogEntry(id);
   if (entry !== undefined) {
     return { ok: true, source: 'catalog', capabilities: entry.capabilities, warnings: [] };
   }
 
   let reason = 'the provider has no discovery endpoint';
   if (adapter.discover !== undefined) {
-    const discoveryOptions: DiscoveryOptions = { baseUrl };
+    const discoveryOptions: DiscoveryOptions = { baseUrl: endpoint.baseUrl };
+    if (endpoint.apiKey !== undefined) discoveryOptions.apiKey = endpoint.apiKey;
     if (options.fetch !== undefined) discoveryOptions.fetch = options.fetch;
     if (options.discoveryCache !== undefined) discoveryOptions.cache = options.discoveryCache;
     if (options.signal !== undefined) discoveryOptions.signal = options.signal;
@@ -162,34 +169,49 @@ export const resolveModel = async (
   const overrideError = validateOverrides(overrides);
   if (overrideError !== undefined) return { ok: false, error: overrideError };
 
-  const apiKey = env[adapter.apiKeyEnv];
-  if (apiKey === undefined || apiKey.length === 0) {
-    return {
-      ok: false,
-      error: `${adapter.apiKeyEnv} is not set; it is required for ${familyName} models`,
-    };
-  }
-
+  const entry = findCatalogEntry(id);
   const configuredBaseUrl = env[adapter.baseUrlEnv];
   const baseURL =
     configuredBaseUrl === undefined || configuredBaseUrl.length === 0
-      ? adapter.defaultBaseUrl
+      ? (entry?.baseUrl ?? adapter.defaultBaseUrl)
       : normalizeBaseUrl(configuredBaseUrl);
   if (baseURL === undefined) {
     return { ok: false, error: `${adapter.baseUrlEnv} must be an http or https URL` };
   }
 
-  const resolved = await resolveCapabilities(id, model, adapter, baseURL, options);
+  let apiKey: string | undefined;
+  if (adapter.usesApiKey?.(baseURL) ?? true) {
+    apiKey = env[adapter.apiKeyEnv];
+    if (apiKey === undefined || apiKey.length === 0) {
+      const scope =
+        adapter.usesApiKey === undefined
+          ? `${familyName} models`
+          : `${familyName} models served by ${new URL(baseURL).origin}`;
+      return { ok: false, error: `${adapter.apiKeyEnv} is not set; it is required for ${scope}` };
+    }
+  }
+
+  const resolved = await resolveCapabilities(
+    id,
+    model,
+    entry,
+    adapter,
+    { baseUrl: baseURL, apiKey },
+    options,
+  );
   if (!resolved.ok) return resolved;
 
+  const warnings = [...resolved.warnings];
+  const factoryOptions: ProviderFactoryOptions = {
+    baseURL,
+    capabilities: applyOverrides(resolved.capabilities, overrides),
+    env,
+    warn: (message) => warnings.push(message),
+  };
+  if (apiKey !== undefined) factoryOptions.apiKey = apiKey;
   try {
-    const provider = adapter.create(model, {
-      apiKey,
-      baseURL,
-      capabilities: applyOverrides(resolved.capabilities, overrides),
-      env,
-    });
-    return { ok: true, provider, source: resolved.source, warnings: resolved.warnings };
+    const provider = adapter.create(model, factoryOptions);
+    return { ok: true, provider, source: resolved.source, warnings };
   } catch (e) {
     return {
       ok: false,

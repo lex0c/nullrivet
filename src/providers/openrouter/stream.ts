@@ -1,4 +1,4 @@
-import { INVALID_TOOL_CALL } from '../errors.ts';
+import { CONTEXT_OVERFLOW, INVALID_TOOL_CALL, isContextOverflowMessage } from '../errors.ts';
 import type { StopReason, StreamEvent } from '../types.ts';
 
 // OpenRouter streams the OpenAI Chat Completions chunk shape plus a few fields: plaintext
@@ -121,12 +121,15 @@ export async function* normalizeOpenRouterStream(
       const choice = chunk.choices?.[0];
       const err = chunk.error ?? choice?.error;
       if (err !== undefined && err !== null) {
-        yield {
-          kind: 'error',
-          code: 'openrouter.stream_error',
-          message: err.message ?? `OpenRouter stream error (code=${err.code ?? 'unknown'})`,
-          retryable: isRetryableErrorCode(err.code),
-        };
+        const message = err.message ?? `OpenRouter stream error (code=${err.code ?? 'unknown'})`;
+        yield isContextOverflowMessage(message)
+          ? { kind: 'error', code: CONTEXT_OVERFLOW, message, retryable: false }
+          : {
+              kind: 'error',
+              code: 'openrouter.stream_error',
+              message,
+              retryable: isRetryableErrorCode(err.code),
+            };
         yield* emitUsage();
         return;
       }

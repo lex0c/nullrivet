@@ -1,7 +1,12 @@
 import OpenAI, { APIConnectionError, APIError, type ClientOptions } from 'openai';
 import type { ChatCompletionCreateParamsStreaming } from 'openai/resources/chat/completions';
 import { boolFromEnv, type Env } from '../env.ts';
-import { AbortError, ProviderRequestError } from '../errors.ts';
+import {
+  AbortError,
+  ContextOverflowError,
+  isContextOverflowMessage,
+  ProviderRequestError,
+} from '../errors.ts';
 import { toOpenAITools } from '../openai/convert.ts';
 import type { GenerateRequest, Provider, ProviderCapabilities, StreamEvent } from '../types.ts';
 import { buildReasoningParam, toOpenRouterMessages } from './messages.ts';
@@ -58,6 +63,18 @@ const buildClient = (options: CreateOpenRouterProviderOptions, env: Env): OpenAI
 const isErrorBody = (value: unknown): value is { code?: number | string; message?: string } =>
   typeof value === 'object' && value !== null;
 
+// OpenRouter relays the upstream provider's rejection, whose wording varies by provider. The raw
+// upstream text, when present, is in `metadata.raw`.
+const isContextOverflowRejection = (error: APIError): boolean => {
+  const status = error.status;
+  if (status === undefined || status < 400 || status >= 500 || status === 429) return false;
+  const raw = (error.error as { metadata?: { raw?: unknown } } | undefined)?.metadata?.raw;
+  return (
+    isContextOverflowMessage(error.message) ||
+    (typeof raw === 'string' && isContextOverflowMessage(raw))
+  );
+};
+
 // Connection failures and timeouts carry no HTTP status, so the generic retry classification
 // cannot tell them apart from permanent errors; they are marked transient here.
 const classifyError = (error: unknown, signal: AbortSignal | undefined): unknown => {
@@ -67,6 +84,9 @@ const classifyError = (error: unknown, signal: AbortSignal | undefined): unknown
       retryable: true,
       cause: error,
     });
+  }
+  if (error instanceof APIError && isContextOverflowRejection(error)) {
+    return new ContextOverflowError(error.message, { cause: error });
   }
   return error;
 };

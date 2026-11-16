@@ -4,6 +4,7 @@ import {
   DISCOVERED_OUTPUT_FALLBACK,
   type DiscoveryCache,
   type DiscoveryOptions,
+  discoverOllamaModel,
   discoverOpenRouterModel,
   type FetchLike,
 } from '../../src/providers/discovery.ts';
@@ -218,5 +219,164 @@ describe('discoverOpenRouterModel', () => {
     const working = jsonFetch(listing(toolModel()));
     const result = await discover('vendor/model', working.fetch, { cache });
     expect(result.ok).toBe(true);
+  });
+});
+
+const OLLAMA = 'http://localhost:11434';
+
+const showPayload = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+  details: { family: 'llama' },
+  model_info: { 'general.architecture': 'llama', 'llama.context_length': 131_072 },
+  capabilities: ['completion', 'tools'],
+  ...over,
+});
+
+interface ShowCall {
+  url: string;
+  init: RequestInit | undefined;
+}
+
+const showFetch = (payload: unknown, status = 200) => {
+  const calls: ShowCall[] = [];
+  const fetchImpl: FetchLike = async (url, init) => {
+    calls.push({ url, init });
+    return new Response(typeof payload === 'string' ? payload : JSON.stringify(payload), {
+      status,
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+  return { calls, fetch: fetchImpl };
+};
+
+const discoverOllama = (
+  model: string,
+  fetchImpl: FetchLike,
+  over: Partial<DiscoveryOptions> = {},
+) => discoverOllamaModel(model, { baseUrl: OLLAMA, fetch: fetchImpl, cache: new Map(), ...over });
+
+describe('discoverOllamaModel', () => {
+  test('reads the context length and tool support from POST /api/show', async () => {
+    const m = showFetch(showPayload());
+    const result = await discoverOllama('llama3.1:8b', m.fetch);
+    expect(result).toEqual({
+      ok: true,
+      capabilities: { context_window: 131_072, output_max_tokens: DISCOVERED_OUTPUT_FALLBACK },
+    });
+    expect(m.calls).toHaveLength(1);
+    expect(m.calls[0]?.url).toBe(`${OLLAMA}/api/show`);
+    expect(m.calls[0]?.init?.method).toBe('POST');
+    expect(JSON.parse(String(m.calls[0]?.init?.body))).toEqual({ model: 'llama3.1:8b' });
+    expect(new Headers(m.calls[0]?.init?.headers).has('authorization')).toBe(false);
+  });
+
+  test('`thinking` marks reasoning support', async () => {
+    const m = showFetch(showPayload({ capabilities: ['completion', 'tools', 'thinking'] }));
+    const result = await discoverOllama('qwen3:8b', m.fetch);
+    expect(result.ok && result.capabilities.supports_reasoning).toBe(true);
+  });
+
+  test('the output cap never exceeds a small context window', async () => {
+    const m = showFetch(
+      showPayload({ model_info: { 'general.architecture': 'x', 'x.context_length': 4_096 } }),
+    );
+    const result = await discoverOllama('tiny', m.fetch);
+    expect(result.ok && result.capabilities.output_max_tokens).toBe(4_096);
+  });
+
+  test('a model whose capabilities lack tools is rejected', async () => {
+    const m = showFetch(showPayload({ capabilities: ['completion'] }));
+    const result = await discoverOllama('gemma:2b', m.fetch);
+    expect(result).toMatchObject({ ok: false, kind: 'rejected' });
+    expect(!result.ok && result.error).toContain('does not support tool calling');
+  });
+
+  test('a server that reports no capabilities does not reject the model', async () => {
+    const m = showFetch(showPayload({ capabilities: undefined }));
+    const result = await discoverOllama('old', m.fetch);
+    expect(result.ok).toBe(true);
+  });
+
+  test('an unambiguous context length is found without the architecture key', async () => {
+    const m = showFetch(showPayload({ model_info: { 'qwen2.context_length': 32_768 } }));
+    const result = await discoverOllama('qwen', m.fetch);
+    expect(result.ok && result.capabilities.context_window).toBe(32_768);
+  });
+
+  test('a missing, malformed or ambiguous context length is unavailable', async () => {
+    for (const modelInfo of [
+      undefined,
+      'x',
+      {},
+      { 'general.architecture': 'llama', 'llama.context_length': '8192' },
+      { 'general.architecture': 'llama', 'llama.context_length': -1 },
+      { 'a.context_length': 8_192, 'b.context_length': 4_096 },
+    ]) {
+      const m = showFetch(showPayload({ model_info: modelInfo }));
+      const result = await discoverOllama('m', m.fetch);
+      expect(result).toMatchObject({ ok: false, kind: 'unavailable' });
+    }
+  });
+
+  test('a payload that is not an object, or not JSON, is unavailable', async () => {
+    for (const payload of [null, [], 'not json', 42]) {
+      const m = showFetch(payload);
+      const result = await discoverOllama('m', m.fetch);
+      expect(result).toMatchObject({ ok: false, kind: 'unavailable' });
+    }
+  });
+
+  test('non-string capability entries are ignored', async () => {
+    const m = showFetch(showPayload({ capabilities: [1, null, 'tools'] }));
+    expect((await discoverOllama('m', m.fetch)).ok).toBe(true);
+  });
+
+  test('a 404 means the server does not have the model', async () => {
+    const m = showFetch({ error: "model 'm' not found" }, 404);
+    const result = await discoverOllama('m', m.fetch);
+    expect(result).toMatchObject({ ok: false, kind: 'not_found' });
+    expect(!result.ok && result.error).toContain('ollama pull m');
+  });
+
+  test('other HTTP errors, network failures and timeouts are unavailable', async () => {
+    expect(await discoverOllama('m', showFetch({}, 500).fetch)).toMatchObject({
+      ok: false,
+      kind: 'unavailable',
+    });
+    const failed = await discoverOllama('m', async () => {
+      throw new TypeError('fetch failed');
+    });
+    expect(failed).toMatchObject({ ok: false, kind: 'unavailable' });
+    expect(!failed.ok && failed.error).toContain('fetch failed');
+    const stalled = await discoverOllama('m', hangingFetch, { timeoutMs: 20 });
+    expect(!stalled.ok && stalled.error).toContain('timed out after 20 ms');
+  });
+
+  test('an abort from the caller throws AbortError', async () => {
+    const ctrl = new AbortController();
+    const pending = discoverOllama('m', hangingFetch, { signal: ctrl.signal });
+    ctrl.abort();
+    await expect(pending).rejects.toBeInstanceOf(AbortError);
+  });
+
+  test('the API key is sent as a bearer token when given', async () => {
+    const m = showFetch(showPayload());
+    await discoverOllama('m', m.fetch, { baseUrl: 'https://ollama.com', apiKey: 'ok-key' });
+    expect(new Headers(m.calls[0]?.init?.headers).get('authorization')).toBe('Bearer ok-key');
+  });
+
+  test('successful answers are cached per base URL and model; failures are not', async () => {
+    const cache: DiscoveryCache = new Map();
+    const m = showFetch(showPayload());
+    await discoverOllama('a', m.fetch, { cache });
+    await discoverOllama('a', m.fetch, { cache });
+    await discoverOllama('b', m.fetch, { cache });
+    expect(m.calls).toHaveLength(2);
+    expect((await discoverOllama('a', m.fetch, { cache })).ok).toBe(true);
+    expect(m.calls).toHaveLength(2);
+
+    const missing = showFetch({ error: 'not found' }, 404);
+    await discoverOllama('c', missing.fetch, { cache });
+    await discoverOllama('c', missing.fetch, { cache });
+    expect(missing.calls).toHaveLength(2);
   });
 });
