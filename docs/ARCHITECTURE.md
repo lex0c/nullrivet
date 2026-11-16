@@ -11,7 +11,7 @@ session lives in memory and is discarded when the process exits.
 - **Provider-agnostic core.** The agent speaks one canonical message and stream format; adapters
   translate it to each provider's API.
 - **Events, not callbacks into the UI.** The core publishes `AgentEvent`s. The plain output, the
-  NDJSON output and any future terminal UI are consumers of the same events.
+  NDJSON output and the interactive session are consumers of the same events.
 - **Policy enforced in code.** The execution mode is checked by the executor before every tool
   call, not only by choosing which tools the model sees.
 - **Not a sandbox.** The working directory is a starting point, not a boundary. Isolation, when
@@ -24,8 +24,10 @@ src/
   main.ts                  process entry: signals, stdin, exit code
   cli/
     args.ts                flags, environment variables, defaults
-    run.ts                 one-shot run: resolve model, create agent, run the task
-    output.ts              plain and NDJSON event sinks
+    run.ts                 resolve the model, create the agent, run one task or the session
+    repl.ts                interactive session controller
+    slash.ts               slash commands
+    output.ts              plain and NDJSON event sinks for one-shot runs
   agent/
     agent.ts               createAgent(): the public API of the core
     loop.ts                runTurn(): the request / tool execution loop
@@ -56,6 +58,12 @@ src/
     tokens.ts              token estimation
     output-reduction.ts    head/tail reduction of large text
     bounded-capture.ts     bounded-memory stream capture
+  tui/
+    state.ts               reducer of the interactive session
+    view.ts, permanent.ts  live region and scrollback formatting
+    screen.ts              inline differential renderer
+    markdown-stream.ts     splits streamed Markdown into settled and pending blocks
+    keys.ts, input-editor.ts, term.ts, render/
   sanitize/
     ansi.ts                removes terminal escape sequences and control bytes
 ```
@@ -182,8 +190,12 @@ Commands run in their own process group with stdin closed. A timeout, an abort o
 command terminates the whole group (SIGTERM, then SIGKILL after 2 s), so background jobs do not
 outlive the call. Every live group is killed when nullrivet exits.
 
+## Interactive session
+
+The session keeps one agent, and therefore one conversation, alive between prompts. Its
+rendering, input handling and interrupt behavior are described in [TUI.md](TUI.md).
+
 ## Not implemented yet
 
-- Interactive terminal UI and REPL.
 - Automatic compaction of long conversations.
 - Providers other than OpenRouter.

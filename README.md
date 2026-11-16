@@ -7,8 +7,8 @@ test, by reading and editing files, running commands and inspecting git reposito
 conversation lives only in memory: nullrivet writes no files of its own, and when the process exits,
 nothing of the session remains except the changes the tools made on purpose.
 
-> **Status:** early development. One-shot mode works end to end; the interactive terminal UI is not
-> available yet, and OpenRouter is the only provider so far.
+> **Status:** early development. The interactive session and the one-shot mode work end to end;
+> OpenRouter is the only provider so far, and long conversations are not compacted yet.
 
 - **Ephemeral.** No database, history, logs, caches or configuration files. See
   [What nullrivet does not store](#what-nullrivet-does-not-store).
@@ -50,6 +50,9 @@ in.
 export OPENROUTER_API_KEY=sk-or-...
 export NULLRIVET_MODEL=openrouter/nvidia/nemotron-3-ultra-550b-a55b:free
 
+# Start an interactive session in the current directory
+nullrivet
+
 # Ask about the current repository without letting the agent change anything
 nullrivet --permission readonly "Summarize the last commits and what changed"
 
@@ -57,7 +60,7 @@ nullrivet --permission readonly "Summarize the last commits and what changed"
 nullrivet "The test suite is failing. Find the cause, fix it, and make sure the tests pass."
 ```
 
-From the repository, `bun run start <options> <prompt>` does the same and also loads the
+From the repository, `bun run start [options] [prompt]` does the same and also loads the
 repository's own `.env`, which is convenient during development.
 
 ## Usage
@@ -66,9 +69,10 @@ repository's own `.env`, which is convenient during development.
 nullrivet [options] [prompt...]
 ```
 
-nullrivet runs one task and exits. The prompt is the concatenation of the positional arguments.
-Text piped on stdin is appended to it inside a `<stdin>` block, or becomes the prompt when no
-argument is given:
+Without a prompt, in a terminal, nullrivet starts an [interactive session](#interactive-session).
+With a prompt, it runs one task and exits. The prompt is the concatenation of the positional
+arguments. Text piped on stdin is appended to it inside a `<stdin>` block, or becomes the prompt
+when no argument is given:
 
 ```bash
 git diff | nullrivet "Review this change for bugs"
@@ -122,8 +126,53 @@ Provider-specific settings are listed in [docs/MODELS.md](docs/MODELS.md).
 
 ### Interrupting
 
-The first `Ctrl+C` aborts the task: the running command and every process it started are
-terminated, and nullrivet exits with code 130. A second `Ctrl+C` exits immediately.
+In one-shot mode, the first `Ctrl+C` aborts the task: the running command and every process it
+started are terminated, and nullrivet exits with code 130. A second `Ctrl+C` exits immediately.
+In an interactive session, see [Keys](#keys).
+
+## Interactive session
+
+`nullrivet` with no prompt opens a session in the terminal. The conversation is kept in memory
+between prompts until `/clear` or until you exit. Finished output (your prompts, answers, tool
+results) goes to the terminal's normal scrollback; only the task in progress, the input box and
+the status line are redrawn at the bottom. Answers are rendered as Markdown while they stream.
+
+The status line shows the execution mode, the model, how much of the context window the last
+request used, and the tokens used in the session.
+
+### Keys
+
+| Key | Action |
+|---|---|
+| `Enter` | Send the prompt (or run the selected command). |
+| `Shift+Enter`, `Alt+Enter`, `\` then `Enter` | Insert a newline. |
+| `Esc` or `Ctrl+C` while a task runs | Interrupt the task; running commands are terminated. |
+| `Ctrl+C` on a non-empty prompt | Clear the prompt. |
+| `Ctrl+C` twice on an empty prompt | Exit (code 130). |
+| `Ctrl+D` on an empty prompt | Exit (code 0). |
+| `Tab`, `↑`/`↓` | Complete and choose in the command list. |
+
+`Shift+Enter` needs a terminal that reports it separately from `Enter` (xterm, kitty, WezTerm,
+iTerm2 and others with the extended keyboard protocol enabled). Where it does not, use
+`Alt+Enter` or `\` followed by `Enter`.
+
+While a task runs you can type the next prompt, but it can only be sent once the task ends.
+
+### Commands
+
+| Command | Action |
+|---|---|
+| `/help` | List the commands and keys. |
+| `/model [family/model]` | Show the model, or switch to another one for the next prompts. |
+| `/effort [low\|medium\|high\|xhigh\|max\|off]` | Show or set the reasoning effort. |
+| `/permission [auto\|readonly]` | Show or change the execution mode; it applies from the next tool call. |
+| `/clear` | Discard the conversation and clear the screen. |
+| `/instructions [reload]` | List the loaded `AGENTS.md` files, or read them again. |
+| `/stats` | Show the token usage of the session. |
+| `/exit` | Exit. |
+
+`/model` and `/clear` cannot be used while a task runs. How the interface works is described in
+[docs/TUI.md](docs/TUI.md).
 
 ## Models
 
@@ -238,6 +287,7 @@ The architecture is described in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   project instructions, events.
 - [docs/TOOLS.md](docs/TOOLS.md): each tool's parameters, limits and safety measures.
 - [docs/MODELS.md](docs/MODELS.md): model resolution, the catalog, discovery and provider settings.
+- [docs/TUI.md](docs/TUI.md): the interactive interface: rendering, streaming Markdown, keys.
 
 ## License
 
