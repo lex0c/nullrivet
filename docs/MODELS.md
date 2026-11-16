@@ -111,12 +111,14 @@ Request behavior:
 
 ### Free models
 
-OpenRouter's `:free` routes are useful for development, with caveats:
+OpenRouter's `:free` routes are selected and used like any other model. Differences to keep in
+mind:
 
-- they appear and disappear: a free route that existed yesterday may answer 404 today;
-- they are heavily rate-limited (nullrivet retries 429 responses, honoring `Retry-After`);
-- some free endpoints may record prompts on the provider side, so do not use them with code you
-  cannot share.
+- OpenRouter can withdraw a free route at any time; a route that existed yesterday may answer 404
+  today, which is why the catalog keeps only free models verified to work with tools;
+- free routes have stricter rate limits (nullrivet retries 429 responses, honoring `Retry-After`);
+- some free endpoints may record prompts on the provider side; each model's page on OpenRouter
+  states its data policy.
 
 To list the free models that currently support tools:
 

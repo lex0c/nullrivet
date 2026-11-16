@@ -137,9 +137,10 @@ There is no catalog file. A model is resolved, in order, from:
    limit and tool support, and keeps the answer in memory for the session;
 3. **conservative defaults** (32,768-token window, 8,192 output tokens), with a warning.
 
-Models without tool calling are rejected. Free OpenRouter models (`:free`) work well for
-experimenting, but they come and go and are heavily rate-limited, and some free endpoints may
-record prompts; do not use them with code you cannot share.
+Models without tool calling are rejected. Free OpenRouter models (`:free`) are used like any
+other model. OpenRouter can withdraw a free route at any time and applies stricter rate limits to
+free routes, and some free endpoints may record prompts; each model's page on OpenRouter states
+its data policy.
 
 Details: [docs/MODELS.md](docs/MODELS.md).
 
