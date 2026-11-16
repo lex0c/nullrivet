@@ -304,7 +304,7 @@ describe('delegate', () => {
       parentCalls++;
       return parentCalls === 1
         ? toolTurn([
-            delegateCall('d1', { cwd: '/proc/self/status' }),
+            delegateCall('d1', { cwd: import.meta.path }),
             delegateCall('d2', { cwd: '/nope/x' }),
           ])
         : textTurn('done');

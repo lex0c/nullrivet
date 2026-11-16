@@ -17,6 +17,13 @@ const shellQuote = (arg: string): string => `'${arg.replaceAll("'", "'\\''")}'`;
 export const cliShellCommand = (args: readonly string[]): string =>
   cliCommand(args).map(shellQuote).join(' ');
 
+// Runs a shell command in a pseudo-terminal with script(1), whose arguments differ between the
+// util-linux and BSD versions.
+export const inTerminal = (command: string): string[] =>
+  process.platform === 'darwin'
+    ? ['script', '-q', '/dev/null', 'sh', '-c', command]
+    : ['script', '-qec', command, '/dev/null'];
+
 export interface ChatMessage {
   role: string;
   content: string;

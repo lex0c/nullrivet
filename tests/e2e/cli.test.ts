@@ -17,6 +17,7 @@ import {
   cliEnv,
   cliShellCommand,
   type FakeOllama,
+  inTerminal,
   isSummaryRequest,
   processRunning,
   startCli,
@@ -232,7 +233,7 @@ describe('terminal', () => {
       server.handle(() => ({ text: 'ok' }));
       const cwd = tempDir();
       mkdirSync(join(cwd, 'sub'));
-      const child = Bun.spawn(['script', '-qec', cliShellCommand([]), '/dev/null'], {
+      const child = Bun.spawn(inTerminal(cliShellCommand([])), {
         env: { ...cliEnv(server), TERM: 'xterm-256color' },
         cwd,
         stdin: 'pipe',

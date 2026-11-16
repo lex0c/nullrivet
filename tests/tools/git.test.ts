@@ -141,7 +141,7 @@ describe('git tool', () => {
           `mkdir .hooks && printf '#!/bin/sh\\ntouch ${sentinels}/post_index_change\\n' > .hooks/post-index-change && chmod +x .hooks/post-index-change`,
           `printf '*.txt filter=evil diff=evil\\n' > .gitattributes`,
           'echo four >> a.txt',
-          "touch -d '2000-01-01' a.txt",
+          'touch -t 200001010000 a.txt',
         ].join(' && '),
       );
     });
