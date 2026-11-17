@@ -1,3 +1,4 @@
+import type { BackgroundWork } from '../agent/events.ts';
 import { formatTokens } from '../format.ts';
 import { stripAnsi } from '../sanitize/ansi.ts';
 import { shortenCwd } from './render/cwd.ts';
@@ -117,8 +118,21 @@ const contextLabel = (state: TuiState, caps: Capabilities): string | null => {
   return paint(caps, tone, `ctx ${percent}%`);
 };
 
+// Background work running now: jobs, then subagents, with those waiting for a slot after a `+`.
+const backgroundParts = (work: BackgroundWork): string[] => {
+  const parts: string[] = [];
+  if (work.jobs > 0) parts.push(`${work.jobs} ${work.jobs === 1 ? 'job' : 'jobs'}`);
+  if (work.queuedSubagents > 0) {
+    parts.push(`${work.subagents}+${work.queuedSubagents} subagents`);
+  } else if (work.subagents > 0) {
+    parts.push(`${work.subagents} ${work.subagents === 1 ? 'subagent' : 'subagents'}`);
+  }
+  return parts;
+};
+
 const footerRow = (state: TuiState, caps: Capabilities): string => {
   const sep = paint(caps, 'secondary', ' · ');
+  const work = state.status.background;
   let left: string;
   if (state.exitArmedAt !== null) {
     left = paint(caps, 'warn', 'Press Ctrl+C again to exit');
@@ -128,19 +142,25 @@ const footerRow = (state: TuiState, caps: Capabilities): string => {
         ? paint(caps, 'warn', 'auto mode on')
         : paint(caps, 'accent', 'readonly mode on');
     // While a task runs, the interrupt hint takes the place of the mode hint so it stays visible
-    // in narrow terminals.
+    // in narrow terminals. With no task running, Esc cancels the subagents, if any.
     left =
       state.turn !== null
         ? `${mode}${sep}${paint(caps, 'secondary', 'esc to interrupt')}`
-        : `${mode}${paint(caps, 'secondary', ' (shift+tab to change)')}`;
+        : work.subagents + work.queuedSubagents > 0
+          ? `${mode}${sep}${paint(caps, 'secondary', 'esc to cancel subagents')}`
+          : `${mode}${paint(caps, 'secondary', ' (shift+tab to change)')}`;
   }
   // Right-side parts in order of importance; the least important are dropped first when the
-  // row is too narrow, and the model name is shortened last.
+  // row is too narrow, and the first part left is shortened last. Background work comes first:
+  // it is what runs now, while no row of the live region shows a job.
   const totals = state.status.totals;
   const parts = [
-    stripAnsi(state.status.model),
-    ...(state.status.effort === undefined ? [] : [`effort ${state.status.effort}`]),
-  ].map((text) => paint(caps, 'secondary', text));
+    ...backgroundParts(work).map((text) => paint(caps, 'success', text)),
+    ...[
+      stripAnsi(state.status.model),
+      ...(state.status.effort === undefined ? [] : [`effort ${state.status.effort}`]),
+    ].map((text) => paint(caps, 'secondary', text)),
+  ];
   const context = contextLabel(state, caps);
   if (context !== null) parts.push(context);
   if (totals.requests > 0) {

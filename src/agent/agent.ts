@@ -15,7 +15,7 @@ import { MAX_TIMER_DELAY_MS } from '../tools/process.ts';
 import type { Tool } from '../tools/types.ts';
 import { type CompactionOutcome, compactConversation } from './compactor.ts';
 import { Conversation } from './conversation.ts';
-import type { AgentEventListener, PendingEventSource } from './events.ts';
+import type { AgentEventListener, BackgroundWork, PendingEventSource } from './events.ts';
 import {
   type LoopLimits,
   promptShape,
@@ -95,6 +95,8 @@ export interface Agent {
   // How many background jobs and subagents this agent has started. A turn that leaves it unchanged
   // started no background work, so it cannot cause more background events.
   backgroundStarts(): number;
+  // What runs in the background now: jobs, and subagents running or waiting for a slot.
+  backgroundWork(): BackgroundWork;
   readonly conversation: Conversation;
   readonly bootWarnings: readonly string[];
   mode: ExecutionMode;
@@ -404,6 +406,15 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
 
     backgroundStarts(): number {
       return (jobs?.startedCount ?? 0) + (subagents?.startedCount ?? 0);
+    },
+
+    backgroundWork(): BackgroundWork {
+      const queued = subagents?.queued() ?? 0;
+      return {
+        jobs: jobs?.running() ?? 0,
+        subagents: (subagents?.active() ?? 0) - queued,
+        queuedSubagents: queued,
+      };
     },
   };
   return agent;

@@ -152,6 +152,23 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
         },
       });
 
+    // Keeps the footer's count of background work current. It changes outside the reducer's
+    // events, so it is read again where it can change: at the end of a tool call (a job or
+    // subagent started or stopped), at a background event (a job or subagent ended), and when a
+    // subagent starts or ends its run.
+    const syncBackground = (): void => {
+      const work = agent.backgroundWork();
+      const shown = state.status.background;
+      if (
+        work.jobs === shown.jobs &&
+        work.subagents === shown.subagents &&
+        work.queuedSubagents === shown.queuedSubagents
+      ) {
+        return;
+      }
+      dispatch({ type: 'status', patch: { background: work } });
+    };
+
     const ticker = setInterval(() => {
       if (state.turn !== null || state.subagents.length > 0) scheduler.request();
     }, ANIMATION_MS);
@@ -249,7 +266,10 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       turn = controller;
       const runOptions = {
         signal: controller.signal,
-        onEvent: (event: AgentEvent) => dispatch({ type: 'agent', event, now: Date.now() }),
+        onEvent: (event: AgentEvent) => {
+          dispatch({ type: 'agent', event, now: Date.now() });
+          if (event.type === 'tool:end') syncBackground();
+        },
       };
       (text === null ? agent.runOnBackgroundEvents(runOptions) : agent.run(text, runOptions))
         .then(
@@ -321,12 +341,16 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       },
       notice: (text) => notice('info', text),
     });
-    const stopBackgroundEvents = agent.onBackgroundEvent(() => autoContinue.poke());
+    const stopBackgroundEvents = agent.onBackgroundEvent(() => {
+      syncBackground();
+      autoContinue.poke();
+    });
     // Subagents outlive the turn that started them, so their activity reaches the interface through
     // the agent for as long as the session lasts.
-    const stopSubagentActivity = agent.onSubagentActivity((event) =>
-      dispatch({ type: 'agent', event, now: Date.now() }),
-    );
+    const stopSubagentActivity = agent.onSubagentActivity((event) => {
+      dispatch({ type: 'agent', event, now: Date.now() });
+      if (event.type === 'subagent:start' || event.type === 'subagent:end') syncBackground();
+    });
 
     const updateSlash = (value: string): void => {
       const items = suggestCommands(value).map((c) => ({

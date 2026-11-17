@@ -413,10 +413,15 @@ describe('background jobs', () => {
       announced += 1;
     });
     await agent.run('start it');
+    expect(agent.backgroundWork()).toEqual({ jobs: 1, subagents: 0, queuedSubagents: 0 });
     agent.clear();
+    // The job keeps running after clear, and the interface still counts it.
+    expect(agent.backgroundWork().jobs).toBe(1);
     const deadline = Date.now() + 5_000;
     while (announced === 0 && Date.now() < deadline) await Bun.sleep(20);
     expect(announced).toBe(1);
+    // The announcement comes once the job's end is recorded, so a count read then is current.
+    expect(agent.backgroundWork().jobs).toBe(0);
     expect(agent.hasBackgroundEvents()).toBe(false);
     expect(await agent.runOnBackgroundEvents()).toBeNull();
     expect(provider.calls).toHaveLength(2);

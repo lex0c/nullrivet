@@ -1,4 +1,4 @@
-import type { AgentEndReason, AgentEvent, CompactReason } from '../agent/events.ts';
+import type { AgentEndReason, AgentEvent, BackgroundWork, CompactReason } from '../agent/events.ts';
 import type { ExecutionMode } from '../tools/policy.ts';
 import type { InputState } from './input-editor.ts';
 import { splitSettledMarkdown } from './markdown-stream.ts';
@@ -24,6 +24,8 @@ export interface StatusState {
   // request reports usage, and again after the conversation is cleared.
   contextTokens: number | null;
   totals: UsageTotals;
+  // Kept current by the session controller, since jobs and subagents change outside any turn.
+  background: BackgroundWork;
 }
 
 export interface ActiveTool {
@@ -124,11 +126,16 @@ export const emptyTotals = (): UsageTotals => ({
 });
 
 export const createInitialState = (
-  status: Omit<StatusState, 'totals' | 'contextTokens'>,
+  status: Omit<StatusState, 'totals' | 'contextTokens' | 'background'>,
 ): TuiState => ({
   input: { value: '', cursor: 0 },
   slash: null,
-  status: { ...status, contextTokens: null, totals: emptyTotals() },
+  status: {
+    ...status,
+    contextTokens: null,
+    totals: emptyTotals(),
+    background: { jobs: 0, subagents: 0, queuedSubagents: 0 },
+  },
   turn: null,
   exitArmedAt: null,
   compacting: null,

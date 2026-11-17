@@ -599,6 +599,11 @@ describe('the agent and its subagents', () => {
   test('cancelling stops running and queued subagents, and each reports that', async () => {
     const agent = await agentWithHeldChildren();
     expect(agent.runningSubagents()).toBe(HELD);
+    expect(agent.backgroundWork()).toEqual({
+      jobs: 0,
+      subagents: MAX_RUNNING_SUBAGENTS,
+      queuedSubagents: 1,
+    });
     expect(agent.backgroundStarts()).toBe(HELD);
     expect(agent.cancelSubagents()).toBe(HELD);
     // Those already stopped are not counted again while they wind down.

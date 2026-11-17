@@ -564,6 +564,8 @@ describe('terminal', () => {
     'after /clear and a new prompt, a job of the discarded conversation does not start a turn',
     async () => {
       const session = await sessionWithJob(2);
+      // The footer counts the job while it runs.
+      expect(await session.until(() => session.screen().includes('1 job'))).toBe(true);
       session.type('/clear\r');
       expect(await session.until(() => session.screen().includes('Conversation cleared.'))).toBe(
         true,
@@ -606,6 +608,9 @@ describe('terminal', () => {
       expect(await session.until(() => session.screen().includes('Subagent find the parser'))).toBe(
         true,
       );
+      // The footer counts the subagent and says how to cancel it.
+      expect(await session.until(() => session.screen().includes('1 subagent'))).toBe(true);
+      expect(session.screen()).toContain('esc to cancel subagents');
       session.release();
       expect(await session.turnsEnded(2)).toBe(true);
       const requests = session.parentRequests();

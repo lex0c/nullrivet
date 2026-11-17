@@ -349,6 +349,13 @@ export class SubagentRegistry implements PendingEventSource<SubagentEvent> {
     return { id: task.id, queued: active >= this.maxRunning };
   }
 
+  // Subagents waiting for a slot.
+  queued(): number {
+    let count = 0;
+    for (const task of this.tasks.values()) if (task.state === 'queued') count += 1;
+    return count;
+  }
+
   // Subagents running or waiting for a slot.
   active(): number {
     let count = 0;

@@ -60,6 +60,14 @@ export type AgentEvent =
 
 export type AgentEventListener = (event: AgentEvent) => void;
 
+// Background work in progress, as the interface shows it: jobs running, and subagents running or
+// waiting for a slot.
+export interface BackgroundWork {
+  jobs: number;
+  subagents: number;
+  queuedSubagents: number;
+}
+
 // A source of background events, such as finished jobs or subagents, that waits for the agent to
 // show them to the model. The agent picks a batch from every source and confirms only the events it
 // picked, so an event left out of a batch stays pending.

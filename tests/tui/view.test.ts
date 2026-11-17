@@ -101,6 +101,48 @@ describe('composeLive', () => {
     expect(`${idle}${running}`).not.toContain('\x1b[2m');
   });
 
+  test('background work leads the right side in green, and is the last part dropped', () => {
+    const working = (background: TuiState['status']['background']): TuiState => ({
+      ...base(),
+      status: { ...base().status, background },
+    });
+    const busy = working({ jobs: 2, subagents: 4, queuedSubagents: 1 });
+    const wide = footer(busy, 160);
+    expect(wide).toContain('2 jobs · 4+1 subagents · openrouter/vendor');
+    const colored = composeLive(busy, { ...caps(160), color: 'basic' }, 0).rows;
+    expect(colored[colored.length - 2]).toContain('\x1b[32m2 jobs');
+    const narrow = footer(busy, 70);
+    expect(narrow).toContain('2 jobs');
+    expect(narrow).not.toContain('openrouter');
+    expect(narrow.length).toBeLessThanOrEqual(70);
+    expect(footer(working({ jobs: 1, subagents: 1, queuedSubagents: 0 }), 160)).toContain(
+      '1 job · 1 subagent · ',
+    );
+    expect(footer(base(), 160)).not.toMatch(/job|subagent/);
+  });
+
+  test('with subagents and no task running, the footer says Esc cancels them', () => {
+    const idle: TuiState = {
+      ...base(),
+      status: { ...base().status, background: { jobs: 0, subagents: 0, queuedSubagents: 2 } },
+    };
+    expect(footer(idle, 160)).toContain('auto mode on · esc to cancel subagents');
+    expect(footer(idle, 160)).not.toContain('shift+tab');
+    const running: TuiState = {
+      ...idle,
+      turn: {
+        startedAt: 0,
+        pendingText: '',
+        thinkingSince: null,
+        outputChars: 0,
+        interrupting: false,
+        tools: [],
+      },
+    };
+    expect(footer(running, 160)).toContain('esc to interrupt');
+    expect(footer(running, 160)).not.toContain('esc to cancel subagents');
+  });
+
   test('popover rows carry the frame margin', () => {
     const state = {
       ...base(),
