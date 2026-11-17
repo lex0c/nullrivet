@@ -218,6 +218,27 @@ describe('background jobs', () => {
     expect((await call('bash_background', { command: 'true' })).isError).toBe(false);
   });
 
+  test('starts that overlap cannot pass the limit together', async () => {
+    const results = await Promise.allSettled(
+      Array.from({ length: MAX_RUNNING_JOBS + 1 }, () =>
+        registry.start({ command: 'sleep 30', cwd: dir }),
+      ),
+    );
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(MAX_RUNNING_JOBS);
+    const [refused] = results.filter((r) => r.status === 'rejected');
+    expect(refused?.status === 'rejected' ? refused.reason : undefined).toMatchObject({
+      code: 'job.limit',
+    });
+  });
+
+  test('a long command is shortened in reports', async () => {
+    const { id } = await start({ command: `true # ${'x'.repeat(1_000)}` });
+    const shown = await call('bash_jobs', { id, wait_ms: 5_000 });
+    const line = shown.content.split('\n').find((l) => l.startsWith('command: ')) ?? '';
+    expect(line.length).toBe('command: '.length + 500);
+    expect(line).toEndWith('x…');
+  });
+
   test('ready_pattern is found across chunks, and a later wait waits for the end', async () => {
     const { id } = await start({
       command: "printf 'Rea'; sleep 0.3; printf 'dy now\\n'; sleep 30",

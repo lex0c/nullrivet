@@ -38,6 +38,7 @@ const READY_ESCAPE_ROOM_BYTES = 256;
 const RECENT_OUTPUT_BYTES = 8 * 1024;
 const RECENT_OUTPUT_LINES = 40;
 const LISTED_COMMAND_CHARS = 100;
+const REPORTED_COMMAND_CHARS = 500;
 
 export type JobStatus = 'running' | 'completed' | 'failed' | 'stopped' | 'timed_out';
 type FinishedStatus = Exclude<JobStatus, 'running'>;
@@ -271,17 +272,29 @@ export class JobRegistry {
   private readonly prefix = randomBytes(8).toString('hex');
   private sequence = 0;
   private readonly jobs = new Map<string, Job>();
+  // Jobs between the check of the limit and their registration, which waits for the spawn; counted
+  // so starts that overlap cannot pass the limit together.
+  private starting = 0;
 
   constructor(private readonly logs: OutputFiles = jobLogs) {}
 
   async start(options: JobStartOptions): Promise<Job> {
-    if (this.running() >= MAX_RUNNING_JOBS) {
+    if (this.running() + this.starting >= MAX_RUNNING_JOBS) {
       throw new JobError(
         'job.limit',
         `at most ${MAX_RUNNING_JOBS} background jobs can run at once`,
         'Stop one with bash_kill, or wait for one to end with bash_jobs and wait_ms.',
       );
     }
+    this.starting += 1;
+    try {
+      return await this.spawn(options);
+    } finally {
+      this.starting -= 1;
+    }
+  }
+
+  private async spawn(options: JobStartOptions): Promise<Job> {
     // No job runs without a log to observe it through.
     const log = this.logs.spool('job', 0);
     if (!log.start()) {
@@ -419,7 +432,9 @@ export class JobRegistry {
   }
 }
 
-// The command on one line, for a listing; tool results are stripped of escape sequences later.
+// The command on one line, cut with an ellipsis: the model wrote it and has it in its own tool
+// call, so reports repeat only enough to recognize it. Escape sequences are stripped from tool
+// results later.
 const oneLine = (text: string, max: number): string => {
   const flat = text.replace(/\s+/g, ' ').trim();
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
@@ -446,7 +461,7 @@ const report = (job: Job): string => {
   return [
     `job ${job.id}: ${stateLine(job, Date.now())}`,
     `pid ${job.handle?.pid ?? 'unknown'}, cwd ${job.cwd}`,
-    `command: ${job.command}`,
+    `command: ${oneLine(job.command, REPORTED_COMMAND_CHARS)}`,
     logLine(job),
     recent === ''
       ? '[no output yet]'

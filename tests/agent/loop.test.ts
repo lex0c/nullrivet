@@ -493,6 +493,19 @@ describe('runTurn', () => {
       );
     });
 
+    test('a notice in the latest message survives the compaction for a rejected request', async () => {
+      const h = harness(responder([overflow, () => textTurn('ok')]));
+      prefill(h, 4);
+      const pending = [['job x ended']];
+      h.deps.notices = () => pending.shift() ?? [];
+      expect((await runTurn('next task', h.deps)).reason).toBe('done');
+      expect(h.events.some((e) => e.type === 'context:compact' && e.reason === 'overflow')).toBe(
+        true,
+      );
+      const answered = JSON.stringify(h.provider.calls.at(-1)?.req.messages);
+      expect(answered.match(/<agent-note>job x ended<\/agent-note>/g)).toHaveLength(1);
+    });
+
     test('a second overflow in the same step ends the turn instead of looping', async () => {
       const h = harness(responder([overflow, overflow, () => textTurn('never')]));
       prefill(h, 4);

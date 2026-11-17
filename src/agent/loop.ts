@@ -398,9 +398,9 @@ export const runTurn = async (
       if ((await compactAuto(shape, budget)) === 'aborted') return end('aborted');
       estimate = conversation.estimateTokens(shape);
     }
-    // Added after the automatic compaction, so it cannot fold a new notice into its summary. The
-    // compactions below, for an answer with no room or a rejected request, still can: then the
-    // summary carries the notice instead.
+    // Notices go into the latest message, as text. A compaction keeps that message in its tail and
+    // shortens only tool results there, so no compaction of this step can fold a notice into its
+    // summary: the request carries each one as written.
     const notices = deps.notices?.() ?? [];
     if (notices.length > 0) {
       for (const notice of notices) conversation.appendUser(agentNote(notice));
