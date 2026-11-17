@@ -124,8 +124,44 @@ describe('git tool', () => {
       const result = await git({ subcommand: 'status' }, outside);
       expect(result.isError).toBe(true);
       expect(result.meta?.errorCode).toBe('git.failed');
+      expect(result.content).toContain('not a git repository');
+      expect(savedOutputs(result.content)).toEqual([]);
     } finally {
       await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  test('a long error output is reduced and saved whole', async () => {
+    // git cuts each message at 4 KiB, so a stand-in prints many warnings before the error, as git
+    // does when it fails after warning about many files.
+    const bin = await mkdtemp(join(tmpdir(), 'nullrivet-fake-git-'));
+    await writeFile(
+      join(bin, 'git'),
+      [
+        '#!/bin/sh',
+        'case " $* " in *" config "*) exit 1 ;; esac',
+        "seq 1 20000 | sed 's/^/warning: /' >&2",
+        "echo 'fatal: the error' >&2",
+        'exit 128',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path ?? ''}`;
+    try {
+      const result = await git({ subcommand: 'status' });
+      expect(result.isError).toBe(true);
+      expect(result.content).toStartWith('error [git.failed]: warning: 1\nwarning: 2\n');
+      expect(result.content).toContain('fatal: the error\n[complete stderr (');
+      expect(Buffer.byteLength(result.content, 'utf8')).toBeLessThan(17 * 1024);
+      const warnings = Array.from({ length: 20_000 }, (_, i) => `warning: ${i + 1}\n`).join('');
+      const [parts = []] = savedOutputs(result.content);
+      expect(parts[0]).toContain('-git-stderr.001.txt');
+      expect(readParts(parts).toString()).toBe(`${warnings}fatal: the error\n`);
+    } finally {
+      if (path === undefined) delete process.env.PATH;
+      else process.env.PATH = path;
+      await rm(bin, { recursive: true, force: true });
     }
   });
 

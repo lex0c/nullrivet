@@ -1,5 +1,5 @@
 import { stat } from 'node:fs/promises';
-import { headTailSummary } from '../context/output-reduction.ts';
+import { HEAD_TAIL_DEFAULT_LINES, headTailSummary } from '../context/output-reduction.ts';
 import { errorMessage } from '../errors.ts';
 import {
   InvalidArgumentError,
@@ -10,13 +10,16 @@ import {
   requireNonEmptyString,
 } from './args.ts';
 import { scrubAgentEnv } from './env.ts';
-import { describeSavedOutput, type OutputSpool, outputFiles } from './output-files.ts';
+import { finishOutput, type OutputSpool, outputFiles } from './output-files.ts';
 import { resolvePath } from './paths.ts';
 import { captureInterruption, type ProcessRunResult, runProcess } from './process.ts';
 import { type Tool, type ToolResult, toolError } from './types.ts';
 
 export const GIT_TIMEOUT_MS = 30_000;
 const MODEL_OUTPUT_BYTES = 32 * 1024;
+// git cuts each of its messages at 4 KiB, so a longer error output comes from many warnings before
+// the error, which is at the end.
+const ERROR_OUTPUT_BYTES = 16 * 1024;
 const LOG_DEFAULT_COUNT = 20;
 const LOG_MAX_COUNT = 200;
 
@@ -230,12 +233,21 @@ const formatOutput = (
     headLines: 300,
     tailLines: 50,
   });
-  const interrupted = captureInterruption(run);
-  const saved = spool.finish({
-    keep: summary.reduced,
-    ...(interrupted === undefined ? {} : { interrupted }),
+  const note = finishOutput(spool, summary.reduced, 'output', captureInterruption(run));
+  return note === null ? summary.text : `${summary.text}\n${note}`;
+};
+
+// git's message for a failed command, reduced and saved like the output of a successful one.
+const failureDetail = (run: ProcessRunResult, spool: OutputSpool): string => {
+  const stderr = run.stderr.trim();
+  if (stderr.length === 0) return `exit code ${run.exitCode}`;
+  const summary = headTailSummary(stderr, {
+    maxBytes: ERROR_OUTPUT_BYTES,
+    headLines: HEAD_TAIL_DEFAULT_LINES,
+    tailLines: HEAD_TAIL_DEFAULT_LINES,
   });
-  return saved === null ? summary.text : `${summary.text}\n${describeSavedOutput(saved)}`;
+  const note = finishOutput(spool, summary.reduced, 'stderr', captureInterruption(run));
+  return note === null ? summary.text : `${summary.text}\n${note}`;
 };
 
 export const gitTool: Tool = {
@@ -292,6 +304,7 @@ export const gitTool: Tool = {
 
     const env = gitEnv();
     const spool = outputFiles.spool('git', MODEL_OUTPUT_BYTES);
+    const stderrSpool = outputFiles.spool('git-stderr', ERROR_OUTPUT_BYTES);
     try {
       let run: ProcessRunResult;
       try {
@@ -308,6 +321,7 @@ export const gitTool: Tool = {
           timeoutMs: GIT_TIMEOUT_MS,
           signal: ctx.signal,
           onStdout: (chunk) => spool.push(chunk),
+          onStderr: (chunk) => stderrSpool.push(chunk),
         });
       } catch (error) {
         const message = errorMessage(error);
@@ -322,8 +336,7 @@ export const gitTool: Tool = {
         );
       }
       if (run.exitCode !== 0) {
-        const detail = run.stderr.trim() || `exit code ${run.exitCode}`;
-        return { ...toolError('git.failed', detail), touchedPaths };
+        return { ...toolError('git.failed', failureDetail(run, stderrSpool)), touchedPaths };
       }
       return {
         content: formatOutput(subcommand, run, spool),
@@ -332,8 +345,10 @@ export const gitTool: Tool = {
         touchedPaths,
       };
     } finally {
-      // The output of a failed command is not shown, so its files are discarded.
+      // Discards what the result does not show: the output of a failed command, and the error
+      // output of a successful one.
       spool.finish({ keep: false });
+      stderrSpool.finish({ keep: false });
     }
   },
 };

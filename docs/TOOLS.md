@@ -222,7 +222,9 @@ plain git creates it and the tool does not.
 Output is reduced to 32 KiB, keeping the first 300 and last 50 lines; reduced output is saved
 whole (see [Saved output](#saved-output)). Each call times out after
 30 s. A failing git command (for example, a directory outside a repository) comes back as a
-`git.failed` error with git's message.
+`git.failed` error with git's message. git cuts each message at 4 KiB, so a longer error output
+comes from warnings before the error; it is reduced to 16 KiB, keeping the first and last 80 lines,
+and saved whole.
 
 ## delegate
 
@@ -270,15 +272,15 @@ tools, so this works in `readonly` mode too.
 ```
 
 Paths are quoted with backticks, so punctuation after them is not read as part of the path. The
-line names what was saved: `stdout` or `stderr` for `bash`, `output` for `git`, `report` for
-`delegate`.
+line names what was saved: `stdout` or `stderr` for `bash`, `output` for `git` and `stderr` for
+the message of a failed `git` command, `report` for `delegate`.
 
 - **Location.** A directory created with `mkdtemp` in the system temporary directory (`TMPDIR`,
   usually `/tmp`, resolved to an absolute path) on the first saved output, readable only by the
   user (`0700`, files `0600`), created again if something removes it during the run, and removed
   when nullrivet exits, including on SIGINT, SIGTERM and SIGHUP. File names hold a counter and a
-  fixed label (`bash-stdout`, `bash-stderr`, `git`, `delegate`), never text from the model or a
-  command.
+  fixed label (`bash-stdout`, `bash-stderr`, `git`, `git-stderr`, `delegate`), never text from
+  the model or a command.
 - **Only reduced output is kept.** Output under the reduction limit is never written. Output over
   it is written while the command runs, because whether it will be reduced is known only at the
   end; when it is not (a failing `git` command, whose output is not shown, for example), its files

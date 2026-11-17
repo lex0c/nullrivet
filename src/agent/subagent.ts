@@ -6,7 +6,7 @@ import type { InstructionsLoader } from '../instructions/agents-loader.ts';
 import type { Provider, ProviderEffort } from '../providers/types.ts';
 import { InvalidArgumentError, optionalString, requireNonEmptyString } from '../tools/args.ts';
 import { fileSystemError } from '../tools/file-io.ts';
-import { describeSavedOutput, outputFiles } from '../tools/output-files.ts';
+import { finishOutput, outputFiles } from '../tools/output-files.ts';
 import { displayPath, resolvePath } from '../tools/paths.ts';
 import type { ExecutionMode } from '../tools/policy.ts';
 import { type Tool, type ToolResult, toolError } from '../tools/types.ts';
@@ -124,9 +124,8 @@ const resultContent = (o: Outcome): string => {
   if (!summary.reduced) return `${head}\n\n${summary.text}`;
   const spool = outputFiles.spool('delegate', 0);
   spool.push(Buffer.from(report, 'utf8'));
-  const saved = spool.finish({ keep: true });
-  const note = saved === null ? '' : `\n${describeSavedOutput(saved, 'report')}`;
-  return `${head}\n\n${summary.text}${note}`;
+  const note = finishOutput(spool, true, 'report', undefined);
+  return `${head}\n\n${summary.text}${note === null ? '' : `\n${note}`}`;
 };
 
 const finalAnswer = (conversation: Conversation): string => {

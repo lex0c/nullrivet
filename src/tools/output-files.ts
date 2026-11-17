@@ -22,7 +22,7 @@ const LINE_BUFFER_BYTES = 64 * 1024;
 const NEWLINE = 0x0a;
 
 // Fixed names, so nothing that comes from a provider or a command ends up in a path.
-export type OutputLabel = 'bash-stdout' | 'bash-stderr' | 'git' | 'delegate';
+export type OutputLabel = 'bash-stdout' | 'bash-stderr' | 'git' | 'git-stderr' | 'delegate';
 
 export interface OutputFileSystem {
   mkdtempSync(prefix: string): string;
@@ -443,6 +443,21 @@ export const describeSavedOutput = (saved: SavedOutput, subject = 'output'): str
     return `[interrupted ${subject} (${size}, received before ${saved.interrupted}) ${where}; ${hint}]`;
   }
   return `[complete ${subject} (${size}) ${where}; ${hint}]`;
+};
+
+// Finishes a spool once the caller knows whether it reduced the output, and returns the line naming
+// the saved files for the result, or null when nothing was kept.
+export const finishOutput = (
+  spool: OutputSpool,
+  reduced: boolean,
+  subject: string,
+  interrupted: string | undefined,
+): string | null => {
+  const saved = spool.finish({
+    keep: reduced,
+    ...(interrupted === undefined ? {} : { interrupted }),
+  });
+  return saved === null ? null : describeSavedOutput(saved, subject);
 };
 
 // The files of this process, removed when it exits.

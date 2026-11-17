@@ -3,7 +3,7 @@ import { HEAD_TAIL_DEFAULT_LINES, headTailSummary } from '../context/output-redu
 import { errorMessage } from '../errors.ts';
 import { optionalInteger, optionalString, requireNonEmptyString } from './args.ts';
 import { scrubAgentEnv } from './env.ts';
-import { describeSavedOutput, type OutputSpool, outputFiles } from './output-files.ts';
+import { finishOutput, type OutputSpool, outputFiles } from './output-files.ts';
 import { resolvePath } from './paths.ts';
 import { captureInterruption, type ProcessRunResult, runProcess } from './process.ts';
 import { type Tool, type ToolResult, toolError } from './types.ts';
@@ -43,12 +43,8 @@ const reduceStream = (
     headLines: HEAD_TAIL_DEFAULT_LINES,
     tailLines: HEAD_TAIL_DEFAULT_LINES,
   });
-  const interrupted = captureInterruption(run);
-  const saved = spool.finish({
-    keep: summary.reduced,
-    ...(interrupted === undefined ? {} : { interrupted }),
-  });
-  if (saved !== null) notes.push(describeSavedOutput(saved, subject));
+  const note = finishOutput(spool, summary.reduced, subject, captureInterruption(run));
+  if (note !== null) notes.push(note);
   return summary.text;
 };
 
