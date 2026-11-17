@@ -29,6 +29,8 @@ describe('buildSystemPrompt', () => {
 
   test('the delegation section states how many subagents run at once, and only for the main agent', () => {
     expect(prompt('auto')).toContain('up to 4 run at once and the others wait');
+    // Models were seen sleeping in a loop to wait for a report.
+    expect(prompt('auto')).toContain('until a report arrives, end your turn');
     expect(prompt('auto', 'subagent')).not.toContain('# Delegation');
   });
 

@@ -347,16 +347,27 @@ describe('job events', () => {
     expect(drain()).toEqual([]);
   });
 
-  test('a ready job gives a ready event, then a finished one', async () => {
-    const { id } = await start({ command: 'echo Ready; sleep 0.2', ready_pattern: 'Ready' });
-    expect(await ended(id)).toBe(true);
-    const events = drain();
-    expect(events.map((e) => e.type)).toEqual(['job.ready', 'job.finished']);
-    const [ready] = events;
+  test('a ready job gives a ready event while it runs, then a finished one', async () => {
+    const { id } = await start({ command: 'echo Ready; sleep 0.3', ready_pattern: 'Ready' });
+    expect(
+      await registry.wait(registry.get(id), 5_000, 'ready', new AbortController().signal),
+    ).toBe(true);
+    const [ready, ...rest] = drain();
+    expect(rest).toEqual([]);
     if (ready === undefined) throw new Error('no ready event');
     expect(describeJobEvent(ready)).toStartWith(
       `Background job ${id} is ready: its ready_pattern appeared in its output after `,
     );
+    expect(await ended(id)).toBe(true);
+    expect(drain().map((e) => e.type)).toEqual(['job.finished']);
+  });
+
+  test('a job that ended before its ready event was taken is reported by its end alone', async () => {
+    const { id } = await start({ command: 'echo Ready; sleep 0.2', ready_pattern: 'Ready' });
+    expect(await ended(id)).toBe(true);
+    expect(registry.hasPendingEvents()).toBe(true);
+    expect(drain().map((e) => e.type)).toEqual(['job.finished']);
+    expect(drain()).toEqual([]);
   });
 
   test('what a report showed is not repeated by an event', async () => {

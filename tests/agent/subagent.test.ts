@@ -180,6 +180,7 @@ describe('delegate', () => {
     const first = await tool.execute({ title: 'a', objective: 'a' }, toolContext());
     const second = await tool.execute({ title: 'b', objective: 'b' }, toolContext());
     expect(first.content).toStartWith('Started subagent ');
+    expect(first.content).toContain('If you have nothing else to do until then, end your turn');
     expect(second.content).toStartWith('Queued subagent ');
     expect(second.content).toContain(': 1 are running');
     expect(second.meta).toMatchObject({ queued: true });

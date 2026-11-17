@@ -437,7 +437,9 @@ export class JobRegistry implements PendingEventSource<JobEvent> {
   pendingEvents(): JobEvent[] {
     const events: JobEvent[] = [];
     for (const job of this.jobs.values()) {
-      if (job.readyAt !== null && !job.readyDelivered) {
+      // A job that has ended is reported by its end alone: that it became ready is no longer news.
+      const finishPending = job.finish !== null && !job.finishDelivered;
+      if (job.readyAt !== null && !job.readyDelivered && !finishPending) {
         events.push({
           type: 'job.ready',
           jobId: job.id,
@@ -446,7 +448,7 @@ export class JobRegistry implements PendingEventSource<JobEvent> {
           log: job.log.snapshot(),
         });
       }
-      if (job.finish !== null && !job.finishDelivered) {
+      if (job.finish !== null && finishPending) {
         events.push({
           type: 'job.finished',
           jobId: job.id,

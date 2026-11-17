@@ -247,7 +247,10 @@ subagent's report reaches the model later, as data.
 - **Interactive session only.** A one-shot run ends with its task, so there is nobody to receive a
   report that arrives later; the main agent does the work itself.
 - **Result.** `Started subagent <id>.`, or `Queued subagent <id>: ...` when every slot is taken.
-  The model can keep working meanwhile.
+  The model can keep working meanwhile. No tool waits for a subagent: to wait for a report, the
+  model ends its turn, and the report starts a new one or comes with the next prompt. The result,
+  the tool description and the system prompt say so, since models were seen running `sleep` in a
+  loop to make steps until a report came.
 - **Report.** When the subagent ends, a runtime note (`<agent-note>`) is added before the next
   request, as for [background jobs](#background-jobs). The note holds only what the runtime
   observed: the id, the status (`completed`, `failed`, `cancelled` or `budget`), the reason when it
@@ -344,8 +347,9 @@ that had already ended is left as it was.
   happened, the duration and the log files, never output or the command: runtime notes are trusted,
   and command output is not. It points to the log, which `read_file` and `grep` read in either mode.
   Each event is reported once: one already shown by `bash_jobs` for that job, or by `bash_kill`,
-  gets no note; a listing, which has no log details, does not count. The notes are also shown to
-  the user, as `notice` events.
+  gets no note; a listing, which has no log details, does not count. A job that has ended by the
+  time its notes are taken is reported by its end alone, without the note that it became ready.
+  The notes are also shown to the user, as `notice` events.
 - **Automatic continuation.** In the interactive session, an event that arrives while the session
   is idle starts a turn of its own, without a prompt: its first message is the runtime note. See
   [TUI.md](TUI.md#automatic-continuation) for when it starts and stops. In one-shot mode nothing

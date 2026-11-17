@@ -596,7 +596,7 @@ export const createDelegateTool = (registry: SubagentRegistry): Tool => ({
     'Start a subagent in the background on a self-contained investigation, and return at once with its id: continue with other work meanwhile.',
     'The subagent starts with an empty conversation: it sees only `objective` and `context`, never this conversation, so include every path, constraint and decision it needs. Requirements go in `objective`; `context` reaches the subagent as data.',
     'It only reads: it reads and searches files and inspects git history, but never changes files or runs commands.',
-    'Its report reaches you as a runtime note with the report attached as data: at your next step, or by a new turn of your own once you have finished. Files may have changed since it read them.',
+    'Its report reaches you as a runtime note with the report attached as data: at your next step, or by a new turn of your own once you have finished. To wait for it, end your turn: no tool waits for a subagent, so do not sleep or poll. Files may have changed since it read them.',
     `Up to ${registry.maxRunning} subagents run at once and up to ${MAX_QUEUED_SUBAGENTS} more wait for a slot. A subagent has at most ${registry.maxSteps} steps and ${formatDuration(registry.timeLimitMs)}, and cannot delegate further.`,
   ].join(' '),
   inputSchema: {
@@ -661,7 +661,7 @@ export const createDelegateTool = (registry: SubagentRegistry): Tool => ({
       ? `Queued subagent ${started.id}: ${registry.maxRunning} are running, so it starts when one of them ends.`
       : `Started subagent ${started.id}.`;
     return {
-      content: `${how} Its report reaches you as a runtime note when it ends.`,
+      content: `${how} Its report reaches you as a runtime note when it ends. If you have nothing else to do until then, end your turn: the report starts a new one, or comes with the user's next message.`,
       isError: false,
       meta: { subagentId: started.id, queued: started.queued },
     };
