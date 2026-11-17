@@ -36,7 +36,6 @@ export const createPlainSink = (options: PlainSinkOptions): OutputSink => {
   const red = (s: string): string => (options.color ? `\x1b[31m${s}\x1b[39m` : s);
   const yellow = (s: string): string => (options.color ? `\x1b[33m${s}\x1b[39m` : s);
   let lineOpen = false;
-  const titles = new Map<string, string>();
   const closeLine = (): void => {
     if (lineOpen) {
       options.stdout('\n');
@@ -61,31 +60,8 @@ export const createPlainSink = (options: PlainSinkOptions): OutputSink => {
         case 'tool:start':
           diagnostic(grey(`› ${event.name} ${toolSubject(event.name, event.args)}`));
           return;
-        case 'tool:end': {
-          const summary = event.meta?.summary;
-          const title = titles.get(event.id);
-          titles.delete(event.id);
-          if (typeof summary === 'string') {
-            const label = title === undefined ? '' : `${title}: `;
-            diagnostic((event.isError ? red : grey)(`  ${label}${summary}`));
-          } else if (event.isError) {
-            diagnostic(red(`  ✗ ${errorSummary(event.content, 200)}`));
-          }
-          return;
-        }
-        // Subagents run at the same time, so each line names the delegate call's title.
-        case 'subagent:start':
-          titles.set(event.id, event.title);
-          return;
-        case 'subagent:progress':
-          diagnostic(
-            grey(
-              `  ↳ ${titles.get(event.id) ?? 'subagent'}: ${event.tool.name} ${toolSubject(event.tool.name, event.tool.args)}`,
-            ),
-          );
-          return;
-        // The title stays until the delegate call ends, to label its summary.
-        case 'subagent:end':
+        case 'tool:end':
+          if (event.isError) diagnostic(red(`  ✗ ${errorSummary(event.content, 200)}`));
           return;
         case 'context:compact':
           diagnostic(

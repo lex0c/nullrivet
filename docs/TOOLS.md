@@ -1,7 +1,7 @@
 # Tools
 
 nullrivet exposes eleven tools to the model. Each declares an effect, which decides whether it is
-available in `readonly` mode.
+available in `readonly` mode. `delegate` is offered only in the interactive session.
 
 | Tool | Effect | `auto` | `readonly` |
 |---|---|---|---|
@@ -231,41 +231,56 @@ and saved whole.
 
 ## delegate
 
-Hands a self-contained task to a subagent and returns its report.
+Starts a subagent in the background on a self-contained investigation and returns at once. The
+subagent's report reaches the model later, as data.
 
 | Parameter | Description |
 |---|---|
 | `title` | Short label shown to the user (cut at 80 characters). |
 | `objective` | The task, complete on its own: the subagent cannot see the conversation. |
 | `context` | Reference material: paths, findings, excerpts. It reaches the subagent as data, fenced like piped stdin, because it may hold text copied from files; requirements belong in `objective`. |
-| `mode` | `readonly` (default) or `auto`. |
 | `cwd` | Starting directory of the subagent (default: the starting directory). |
 
-- **Mode.** The subagent runs in the more restrictive of the requested mode and the session's
-  current mode, read again before each of its requests and tool calls. That is why the tool's
-  effect is `read` and it is offered in `readonly`: there, the subagent cannot change anything
-  either. Its ceiling is fixed when it starts: a subagent that started read-only stays read-only
-  when the session switches to `auto`, so the limit of one `auto` subagent at a time holds.
-- **Concurrency.** Adjacent `delegate` calls in one response run at the same time: up to three
-  `readonly` subagents at once, and `auto` subagents one after another. Results keep the order of
-  the calls.
-- **Limits.** 40 steps per subagent. Before the last one, a runtime note asks the subagent to
-  write its report without calling more tools, so a subagent that runs out of steps still reports
-  what it found. The report is reduced to 16 KiB (about 4,096 tokens), keeping its start and end;
-  a reduced report is saved whole (see [Saved output](#saved-output)).
-  There is no time limit of its own: the session's `--timeout`, the stall watchdog and interrupts
-  apply.
-- **Result.** A status line written by the runtime (`completed`, `failed`, `cancelled` or
-  `budget`, steps, tool errors, tokens, and files changed through `edit_file` and `write_file`),
-  followed by the subagent's final reply. When the subagent stopped early, the status line says
-  why. A failed or cancelled subagent is an error result.
-- **Depth.** A subagent cannot delegate.
+- **Read only.** The subagent runs in `readonly` and is offered only the `read` tools, whatever
+  the session's mode: only the main agent changes files or runs commands. That is why the tool's
+  effect is `read` and it is offered in `readonly` too.
+- **Interactive session only.** A one-shot run ends with its task, so there is nobody to receive a
+  report that arrives later; the main agent does the work itself.
+- **Result.** `Started subagent <id>.`, or `Queued subagent <id>: ...` when every slot is taken.
+  The model can keep working meanwhile.
+- **Report.** When the subagent ends, a runtime note (`<agent-note>`) is added before the next
+  request, as for [background jobs](#background-jobs). The note holds only what the runtime
+  observed: the id, the status (`completed`, `failed`, `cancelled` or `budget`), the reason when it
+  stopped early (`cancelled`, `time_limit`, `step_limit`, `context_full`, `output_limit`,
+  `provider_error`, `internal_error`), the steps, tool errors and tokens. The title, any message
+  that came with the stop and the report follow as data, fenced like piped stdin: they are text
+  from models and services, not from the runtime. The session shows a line with the subagent's
+  title and the same facts. While the session is idle, a report starts a turn of its own. Files
+  may have changed since the subagent read them.
+- **Batches.** Each request carries new report data up to a quarter of the context window and at
+  most 32 KiB, and always at least one report; the others wait for the next step or turn. A report
+  longer than that is reduced to it and saved whole, so a small context window is never filled by
+  reports. Job notices never wait for reports. Notes in one request are in the order the events
+  happened.
+- **Concurrency.** Up to three subagents run at once; up to 16 more wait for a slot, in order.
+  Beyond that, `delegate` is refused with `subagent.limit`.
+- **Limits.** 40 steps and 5 minutes per subagent, counted from when it starts running. Before
+  the last step, a runtime note asks the subagent to write its report without calling more tools.
+  After 4 minutes, the next step is the last one, so a subagent that runs out of steps or of time
+  still reports what it found; at 5 minutes it is stopped. The report is reduced to
+  16 KiB (about 4,096 tokens), keeping its start and end; a reduced report is saved whole (see
+  [Saved output](#saved-output)).
+- **Cancellation.** Interrupting a turn (`Esc`, `Ctrl+C`) cancels every subagent, running or
+  waiting; so does `Esc` on an idle session. Each reports that it was cancelled, with the next
+  prompt. `/clear` cancels them and drops their reports. Exiting cancels them. A turn that ends on
+  its own, at a limit or `--timeout` included, leaves them running.
+- **Depth.** A subagent cannot delegate, and it has no background jobs.
 
 ## Background jobs
 
 `bash_background`, `bash_jobs` and `bash_kill` run commands that keep going while the model works
-on something else: a dev server, a watcher, a long build or test run. Only the main agent has them:
-a job would outlive a subagent, and nobody would be told when it ends.
+on something else: a dev server, a watcher, a long build or test run. Only the main agent has them,
+since subagents only read.
 
 ### bash_background
 

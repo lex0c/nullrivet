@@ -217,6 +217,19 @@ describe('background jobs', () => {
   }, 30_000);
 });
 
+describe('subagents', () => {
+  test('a one-shot run does the work itself: delegate is not offered', async () => {
+    server.handle(() => ({ text: 'ok' }));
+    const cli = startCli(['look around'], { env: cliEnv(server), cwd: tempDir() });
+    expect((await cli.finished).code).toBe(0);
+    const request = server.requests[0];
+    const offered = (request?.tools ?? []).map((t) => t.function.name);
+    expect(offered).toContain('grep');
+    expect(offered).not.toContain('delegate');
+    expect(request?.messages[0]?.content).not.toContain('# Delegation');
+  }, 30_000);
+});
+
 describe('readonly mode', () => {
   test('a write or a command requested by the model is refused and has no effect', async () => {
     const cwd = tempDir();
@@ -437,19 +450,9 @@ describe('terminal', () => {
     30_000,
   );
 
-  // Starts a session, sends a prompt whose task starts `sleep <seconds>` in the background, and
-  // waits until that turn has ended on screen, so a slash command typed next is not refused.
-  const sessionWithJob = async (seconds: number) => {
-    server.handle((request) => {
-      const last = request.messages.at(-1);
-      if (last?.role === 'user' && last.content.includes('<agent-note>Background job')) {
-        return { text: 'reacted' };
-      }
-      if (last?.role === 'user' && last.content.includes('hello')) return { text: 'hi' };
-      return toolMessages(request).length === 0
-        ? { toolCalls: [{ name: 'bash_background', args: { command: `sleep ${seconds}` } }] }
-        : { text: 'started' };
-    });
+  // Starts a session, sends `prompt`, and waits until that turn has ended on screen, so a slash
+  // command typed next is not refused.
+  const interactiveSession = async (prompt: string) => {
     const child = Bun.spawn(inTerminal(cliCommand([])), {
       env: { ...cliEnv(server), TERM: 'xterm-256color' },
       cwd: tempDir(),
@@ -483,10 +486,61 @@ describe('terminal', () => {
       return { code, output };
     };
     expect(await until(() => output.includes('Type /help for commands'))).toBe(true);
-    type('start the job\r');
+    type(`${prompt}\r`);
     expect(await turnsEnded(1)).toBe(true);
-    expect(server.requests).toHaveLength(2);
     return { type, until, requests, turnsEnded, exit, screen: () => output };
+  };
+
+  // A session whose first task starts `sleep <seconds>` in the background.
+  const sessionWithJob = async (seconds: number) => {
+    server.handle((request) => {
+      const last = request.messages.at(-1);
+      if (last?.role === 'user' && last.content.includes('<agent-note>Background job')) {
+        return { text: 'reacted' };
+      }
+      if (last?.role === 'user' && last.content.includes('hello')) return { text: 'hi' };
+      return toolMessages(request).length === 0
+        ? { toolCalls: [{ name: 'bash_background', args: { command: `sleep ${seconds}` } }] }
+        : { text: 'started' };
+    });
+    const session = await interactiveSession('start the job');
+    expect(server.requests).toHaveLength(2);
+    return session;
+  };
+
+  const isSubagentRequest = (request: ChatRequest | undefined): boolean =>
+    request?.messages[0]?.role === 'system' && request.messages[0].content.includes('# Subagent');
+
+  // A session whose first task delegates one investigation. The subagent's request is answered
+  // only once `release` is called.
+  const sessionWithSubagent = async () => {
+    const gate = Promise.withResolvers<void>();
+    server.handle(async (request) => {
+      if (isSubagentRequest(request)) {
+        await gate.promise;
+        return { text: 'The parser is in src/parse.ts.' };
+      }
+      const last = request.messages.at(-1);
+      if (last?.role === 'user' && last.content.includes('<agent-note>Subagent')) {
+        return { text: 'reacted' };
+      }
+      if (last?.role === 'user' && last.content.includes('what now')) return { text: 'noted' };
+      return toolMessages(request).length === 0
+        ? {
+            toolCalls: [
+              {
+                name: 'delegate',
+                args: { title: 'find the parser', objective: 'Find the parser.' },
+              },
+            ],
+          }
+        : { text: 'delegated' };
+    });
+    const session = await interactiveSession('look into it');
+    const parentRequests = (): ChatRequest[] =>
+      server.requests.filter((request) => !isSubagentRequest(request));
+    expect(parentRequests()).toHaveLength(2);
+    return { ...session, parentRequests, release: () => gate.resolve() };
   };
 
   test.skipIf(Bun.which('python3') === null)(
@@ -501,7 +555,7 @@ describe('terminal', () => {
       expect(last?.content).not.toContain('start the job');
       const { code, output } = await session.exit();
       expect(code).toBe(0);
-      expect(output).toContain('Continuing on background job events.');
+      expect(output).toContain('Continuing on background events.');
     },
     30_000,
   );
@@ -540,6 +594,54 @@ describe('terminal', () => {
       const last = server.requests[2]?.messages.at(-1);
       expect(last?.content).toContain('what now');
       expect(last?.content).toContain('<agent-note>Background job');
+      expect((await session.exit()).code).toBe(0);
+    },
+    30_000,
+  );
+
+  test.skipIf(Bun.which('python3') === null)(
+    'a subagent that reports while the session is idle starts a turn with its report',
+    async () => {
+      const session = await sessionWithSubagent();
+      expect(await session.until(() => session.screen().includes('Subagent find the parser'))).toBe(
+        true,
+      );
+      session.release();
+      expect(await session.turnsEnded(2)).toBe(true);
+      const requests = session.parentRequests();
+      expect(requests).toHaveLength(3);
+      const last = requests[2]?.messages.at(-1);
+      expect(last?.role).toBe('user');
+      expect(last?.content).toMatch(/^<agent-note>Subagent \S+ completed after 1 step/);
+      expect(last?.content).toContain('Title: find the parser');
+      expect(last?.content).toContain('The parser is in src/parse.ts.');
+      const { code, output } = await session.exit();
+      expect(code).toBe(0);
+      expect(output).toContain('Continuing on background events.');
+    },
+    30_000,
+  );
+
+  test.skipIf(Bun.which('python3') === null)(
+    'Esc on an idle session cancels its subagents without starting a turn',
+    async () => {
+      const session = await sessionWithSubagent();
+      expect(await session.until(() => session.screen().includes('Subagent find the parser'))).toBe(
+        true,
+      );
+      session.type('\x1b');
+      expect(
+        await session.until(() => session.screen().includes('Background subagents cancelled.')),
+      ).toBe(true);
+      await Bun.sleep(1_000);
+      expect(session.parentRequests()).toHaveLength(2);
+      // The cancellation reaches the model with the next prompt.
+      session.type('what now\r');
+      expect(await session.turnsEnded(2)).toBe(true);
+      const last = session.parentRequests()[2]?.messages.at(-1);
+      expect(last?.content).toMatch(/<agent-note>Subagent \S+ cancelled \(cancelled\)/);
+      expect(last?.content).toContain('what now');
+      session.release();
       expect((await session.exit()).code).toBe(0);
     },
     30_000,

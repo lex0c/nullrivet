@@ -138,6 +138,9 @@ export const runCli = async (io: CliIO): Promise<number> => {
     provider: resolved.provider,
     tools: BUILTIN_TOOLS,
     backgroundJobs: interactive ? 'interactive' : 'one-shot',
+    // Subagents run in the background and report when the session is free to listen; a one-shot
+    // run ends with its task, so its main agent does the work itself.
+    delegation: interactive,
     mode: config.mode,
     cwd,
     instructions: config.agentsMd ? new InstructionsLoader() : null,

@@ -9,6 +9,7 @@ import { assembleHistory, emptySummary, SUMMARY_OPEN } from '../../src/context/c
 import { InstructionsLoader } from '../../src/instructions/agents-loader.ts';
 import { ContextOverflowError } from '../../src/providers/errors.ts';
 import type { ProviderMessage, StreamEvent } from '../../src/providers/types.ts';
+import { fenced } from '../../src/sanitize/fence.ts';
 import type { ExecutionMode } from '../../src/tools/policy.ts';
 import type { Tool, ToolEffect, ToolResult } from '../../src/tools/types.ts';
 import {
@@ -177,7 +178,43 @@ describe('runTurn', () => {
     const h = harness(turns, { maxSteps: 3 });
     const result = await runTurn('loop forever', h.deps);
     expect(result.reason).toBe('budget');
+    expect(result.limit).toBe('steps');
     expect(result.message).toContain('3 steps');
+  });
+
+  test('from finalStepAt on, the step in progress is the last, with the final step note', async () => {
+    const turns = Array.from({ length: 5 }, (_, i) =>
+      toolTurn([{ id: `t${i}`, name: 'read_file', args: {} }]),
+    );
+    const h = harness(turns);
+    let now = 0;
+    h.deps.limits = { ...h.deps.limits, finalStepNote: 'write your report now', finalStepAt: 2 };
+    const realNow = Date.now;
+    Date.now = () => now;
+    try {
+      h.deps.emit = (e) => {
+        if (e.type === 'tool:end') now += 1;
+      };
+      const result = await runTurn('work', h.deps);
+      expect(result).toMatchObject({ reason: 'budget', limit: 'time', steps: 3 });
+    } finally {
+      Date.now = realNow;
+    }
+    expect(h.provider.calls).toHaveLength(3);
+    expect(JSON.stringify(h.provider.calls[2]?.req.messages.at(-1))).toContain(
+      'write your report now',
+    );
+    expect(JSON.stringify(h.provider.calls[1]?.req.messages)).not.toContain(
+      'write your report now',
+    );
+  });
+
+  test('a last step set by the time ends the turn normally when the model answers', async () => {
+    const h = harness([textTurn('report')]);
+    h.deps.limits = { ...h.deps.limits, finalStepAt: 0 };
+    const result = await runTurn('work', h.deps);
+    expect(result.reason).toBe('done');
+    expect(result.limit).toBeUndefined();
   });
 
   test('a provider error ends the turn and leaves a valid history', async () => {
@@ -289,7 +326,7 @@ describe('runTurn', () => {
     const h = harness([textTurn('done')]);
     h.deps.conversation.appendUser('earlier task');
     h.deps.conversation.appendAssistant([{ type: 'text', text: 'earlier answer' }]);
-    const pending = [['job x ended']];
+    const pending = [[{ text: 'job x ended' }]];
     h.deps.notices = () => pending.shift() ?? [];
     expect((await runTurn(null, h.deps)).reason).toBe('done');
     expect(h.provider.calls[0]?.req.messages.at(-1)).toEqual({
@@ -301,9 +338,23 @@ describe('runTurn', () => {
     ]);
   });
 
+  test('a notice with data adds the data fenced right after the note', async () => {
+    const h = harness([textTurn('done')]);
+    const pending = [[{ text: 'subagent s1 completed', data: 'Report:\nfound it' }]];
+    h.deps.notices = () => pending.shift() ?? [];
+    await runTurn('go', h.deps);
+    const content = h.provider.calls[0]?.req.messages.at(-1)?.content;
+    const texts = Array.isArray(content)
+      ? content.flatMap((b) => (b.type === 'text' ? [b.text] : []))
+      : [];
+    const note = texts.indexOf('<agent-note>subagent s1 completed</agent-note>');
+    expect(note).toBeGreaterThan(-1);
+    expect(texts[note + 1]).toBe(fenced('input', 'Report:\nfound it'));
+  });
+
   test('runtime notices reach the next request once, as agent notes', async () => {
     const h = harness([toolTurn([{ id: 't1', name: 'read_file', args: {} }]), textTurn('done')]);
-    const pending = [['first notice'], ['second notice']];
+    const pending = [[{ text: 'first notice' }], [{ text: 'second notice' }]];
     h.deps.notices = () => pending.shift() ?? [];
     await runTurn('go', h.deps);
     const [first, second] = h.provider.calls.map((c) => JSON.stringify(c.req.messages));
@@ -403,6 +454,7 @@ describe('runTurn', () => {
     ]);
     const result = await runTurn('write a lot', h.deps);
     expect(result.reason).toBe('budget');
+    expect(result.limit).toBe('output');
     expect(result.message).toContain('output token limit');
   });
 
@@ -471,7 +523,7 @@ describe('runTurn', () => {
     test('runtime notices reach the request intact when the step compacts first', async () => {
       const h = harness(responder([() => textTurn('ok')]));
       prefill(h, 10);
-      const pending = [['job x ended']];
+      const pending = [[{ text: 'job x ended' }]];
       h.deps.notices = () => pending.shift() ?? [];
       const result = await runTurn('next task', h.deps);
       expect(result.reason).toBe('done');
@@ -512,7 +564,7 @@ describe('runTurn', () => {
     test('a notice in the latest message survives the compaction for a rejected request', async () => {
       const h = harness(responder([overflow, () => textTurn('ok')]));
       prefill(h, 4);
-      const pending = [['job x ended']];
+      const pending = [[{ text: 'job x ended' }], [{ text: 'second batch' }]];
       h.deps.notices = () => pending.shift() ?? [];
       expect((await runTurn('next task', h.deps)).reason).toBe('done');
       expect(h.events.some((e) => e.type === 'context:compact' && e.reason === 'overflow')).toBe(
@@ -520,6 +572,8 @@ describe('runTurn', () => {
       );
       const answered = JSON.stringify(h.provider.calls.at(-1)?.req.messages);
       expect(answered.match(/<agent-note>job x ended<\/agent-note>/g)).toHaveLength(1);
+      // The retried request takes no second batch: one batch per request.
+      expect(answered).not.toContain('second batch');
     });
 
     test('a turn without a prompt or notices makes no request, even above the trigger', async () => {
@@ -535,6 +589,7 @@ describe('runTurn', () => {
       prefill(h, 4);
       const result = await runTurn('next task', h.deps);
       expect(result.reason).toBe('budget');
+      expect(result.limit).toBe('context');
       expect(result.message).toContain('does not fit');
     });
 

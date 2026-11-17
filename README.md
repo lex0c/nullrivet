@@ -203,7 +203,10 @@ strictly, and some record prompts. Details: [docs/MODELS.md](docs/MODELS.md).
 | Mode | Tools offered to the model | Enforcement |
 |---|---|---|
 | `auto` (default) | `read_file`, `glob`, `grep`, `git`, `edit_file`, `write_file`, `bash`, `bash_background`, `bash_jobs`, `bash_kill`, `delegate` | None beyond operating system permissions. |
-| `readonly` | `read_file`, `glob`, `grep`, `git`, `delegate` | The other tools are neither offered nor executed, even if the model calls them. Subagents run in `readonly` too. |
+| `readonly` | `read_file`, `glob`, `grep`, `git`, `delegate` | The other tools are neither offered nor executed, even if the model calls them. |
+
+`delegate` is offered only in the interactive session. Subagents always run in `readonly`, in both
+modes: only the main agent changes files or runs commands.
 
 `auto` is **not a sandbox**: commands run with your privileges, and anything the agent reads (files,
 command output, `AGENTS.md`) can carry prompt injection. Run nullrivet as an unprivileged user, and
@@ -224,14 +227,14 @@ in a container or VM for risky work ([trust boundaries](docs/ARCHITECTURE.md#tru
 | `bash_background` | exec | Start a command that keeps running in the background (a dev server, a watcher), with its output in a log file. |
 | `bash_jobs` | exec | List background jobs, show one, or wait for it to end or become ready. |
 | `bash_kill` | exec | Stop a background job and its process group. |
-| `delegate` | read | Hand a self-contained task to a subagent and receive only its report. |
+| `delegate` | read | Start a read-only subagent in the background on a self-contained investigation; only its report enters the conversation. |
 
 Building, testing and git operations that change state go through `bash`. Background jobs run
 until they end, are stopped, or nullrivet exits, and the model is told when one ends or becomes
 ready. A subagent starts with
-an empty conversation and the same model and tools, never runs in a mode above the session's, and
-only its report enters the conversation. Details: [docs/TOOLS.md](docs/TOOLS.md),
-[subagents](docs/ARCHITECTURE.md#subagents).
+an empty conversation, the same model and the read tools only. It runs in the background, up to
+three at once, while the main agent keeps working, and its report reaches the model as data when
+it ends. Details: [docs/TOOLS.md](docs/TOOLS.md), [subagents](docs/ARCHITECTURE.md#subagents).
 
 ## Project instructions
 
@@ -261,12 +264,9 @@ nullrivet --json --permission readonly "List the TODOs in src" | jq -c 'select(.
 | `thinking:delta` | `text` |
 | `tool:start` | `id`, `name`, `args`, `step` (the model request of the turn that made the call) |
 | `tool:end` | `id`, `name`, `content`, `isError`, `meta` |
-| `usage` | `input`, `output`, `cacheRead`, `cacheWrite` (tokens of one model request); `compaction: true` for a summary request; `subagent` (the delegate call id) for a subagent's request |
+| `usage` | `input`, `output`, `cacheRead`, `cacheWrite` (tokens of one model request); `compaction: true` for a summary request |
 | `context:compact:start` | `reason` (`auto`, `manual`, `overflow`) |
 | `context:compact` | `reason`, `strategy` (`llm`, `fallback`), `before`, `after` (estimated tokens) |
-| `subagent:start` | `id` (the delegate call id), `title`, `mode` |
-| `subagent:progress` | `id`, `step`, `tool` (`name`, `args`) |
-| `subagent:end` | `id`, `status` (`completed`, `failed`, `cancelled`, `budget`), `steps` |
 | `notice` | `text`: a runtime note added for the model, such as a background job that ended |
 | `warning` | `message` |
 | `error` | `message` |

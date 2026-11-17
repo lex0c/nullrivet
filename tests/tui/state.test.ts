@@ -191,20 +191,12 @@ describe('reduce', () => {
 });
 
 describe('subagents', () => {
-  test('progress shows on the delegate card, and their usage does not move the context gauge', () => {
+  test('background subagents are tracked without a turn, and their usage does not move the context gauge', () => {
+    const progress = { step: 2, tool: { name: 'grep', args: { pattern: 'TODO' } } };
     const { state } = run([
-      ev({ type: 'agent:start' }),
-      ev({ type: 'tool:start', id: 'd1', name: 'delegate', args: { title: 'scan' }, step: 1 }, 5),
-      ev({ type: 'subagent:start', id: 'd1', title: 'scan', mode: 'readonly' }, 6),
-      ev(
-        {
-          type: 'subagent:progress',
-          id: 'd1',
-          step: 2,
-          tool: { name: 'grep', args: { pattern: 'TODO' } },
-        },
-        7,
-      ),
+      ev({ type: 'subagent:start', id: 's1', title: 'scan' }, 6),
+      ev({ type: 'subagent:start', id: 's2', title: 'read' }, 7),
+      ev({ type: 'subagent:progress', id: 's1', ...progress }, 8),
       ev(
         {
           type: 'usage',
@@ -212,16 +204,27 @@ describe('subagents', () => {
           output: 100,
           cacheRead: 0,
           cacheWrite: 0,
-          subagent: 'd1',
+          subagent: 's1',
         },
-        8,
+        9,
       ),
     ]);
-    expect(state.turn?.tools[0]?.subagent).toEqual({
-      step: 2,
-      tool: { name: 'grep', args: { pattern: 'TODO' } },
-    });
+    expect(state.turn).toBeNull();
+    expect(state.subagents).toEqual([
+      { id: 's1', title: 'scan', startedAt: 6, progress },
+      { id: 's2', title: 'read', startedAt: 7 },
+    ]);
     expect(state.status.contextTokens).toBeNull();
     expect(state.status.totals.input).toBe(900);
+  });
+
+  test('a subagent leaves the list when it ends, whether a turn runs or not', () => {
+    const { state } = run([
+      ev({ type: 'subagent:start', id: 's1', title: 'scan' }, 1),
+      ev({ type: 'agent:start' }, 2),
+      ev({ type: 'subagent:end', id: 's1', status: 'completed', steps: 3 }, 3),
+    ]);
+    expect(state.subagents).toEqual([]);
+    expect(state.turn).not.toBeNull();
   });
 });

@@ -26,8 +26,11 @@ const session = (maxTurns = 3) => {
 const settle = (): Promise<void> => Bun.sleep(DELAY_MS * 6);
 
 // Ends the running automatic turn with `done` and lets the session check again.
-const finishTurn = async (h: ReturnType<typeof session>): Promise<void> => {
-  h.auto.turnEnded('done');
+const finishTurn = async (
+  h: ReturnType<typeof session>,
+  startedBackgroundWork = true,
+): Promise<void> => {
+  h.auto.turnEnded('done', startedBackgroundWork);
   h.s.idle = true;
   h.auto.poke();
   await settle();
@@ -122,6 +125,30 @@ describe('automatic continuation', () => {
     expect(h.s.started).toBe(4);
   });
 
+  test('automatic turns that start no background work are not counted', async () => {
+    const h = session(2);
+    h.auto.poke();
+    await settle();
+    for (let i = 0; i < 4; i++) await finishTurn(h, false);
+    expect(h.s.started).toBe(5);
+    expect(h.s.notices).toEqual([]);
+    // Turns that start work count again, up to the limit.
+    await finishTurn(h, true);
+    await finishTurn(h, true);
+    expect(h.s.started).toBe(6);
+    expect(h.s.notices).toHaveLength(1);
+  });
+
+  test('a turn the user started is never given back', async () => {
+    const h = session(1);
+    h.auto.userPrompted();
+    h.auto.turnEnded('done', false);
+    h.auto.poke();
+    await settle();
+    await finishTurn(h, true);
+    expect(h.s.started).toBe(1);
+  });
+
   test('a pause holds pending events until the next prompt', async () => {
     const h = session();
     h.auto.pause();
@@ -137,13 +164,13 @@ describe('automatic continuation', () => {
   test('a turn that does not end with done suspends, and one that does not', async () => {
     for (const reason of ['aborted', 'error', 'budget'] as const) {
       const h = session();
-      h.auto.turnEnded(reason);
+      h.auto.turnEnded(reason, true);
       h.auto.poke();
       await settle();
       expect(h.s.started).toBe(0);
     }
     const h = session();
-    h.auto.turnEnded('done');
+    h.auto.turnEnded('done', true);
     h.auto.poke();
     await settle();
     expect(h.s.started).toBe(1);

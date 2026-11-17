@@ -31,8 +31,15 @@ export interface ActiveTool {
   name: string;
   args: Record<string, unknown>;
   startedAt: number;
-  // For a delegate call, what its subagent is doing.
-  subagent?: { step: number; tool: { name: string; args: Record<string, unknown> } };
+}
+
+// A subagent running in the background, shown in the live region whether a turn runs or not.
+export interface BackgroundSubagent {
+  id: string;
+  title: string;
+  startedAt: number;
+  // What it is doing now; absent until its first tool call.
+  progress?: { step: number; tool: { name: string; args: Record<string, unknown> } };
 }
 
 export interface TurnState {
@@ -62,6 +69,7 @@ export interface TuiState {
   // When Ctrl+C was pressed on an empty, idle prompt; a second press before it expires exits.
   exitArmedAt: number | null;
   compacting: { reason: CompactReason; since: number } | null;
+  subagents: BackgroundSubagent[];
 }
 
 // Items written once to the scrollback, above the live region.
@@ -124,6 +132,7 @@ export const createInitialState = (
   turn: null,
   exitArmedAt: null,
   compacting: null,
+  subagents: [],
 });
 
 const formatTokenCount = (n: number): string =>
@@ -238,24 +247,30 @@ const reduceAgentEvent = (state: TuiState, event: AgentEvent, now: number): Redu
         permanent: [],
       };
     }
+    // Subagents run in the background, so they are tracked apart from any turn.
+    case 'subagent:start':
+      return {
+        state: {
+          ...state,
+          subagents: [...state.subagents, { id: event.id, title: event.title, startedAt: now }],
+        },
+        permanent: [],
+      };
     case 'subagent:progress': {
-      if (turn === null) return { state, permanent: [] };
       const progress = { step: event.step, tool: event.tool };
       return {
         state: {
           ...state,
-          turn: {
-            ...turn,
-            tools: turn.tools.map((t) => (t.id === event.id ? { ...t, subagent: progress } : t)),
-          },
+          subagents: state.subagents.map((s) => (s.id === event.id ? { ...s, progress } : s)),
         },
         permanent: [],
       };
     }
-    // The delegate call's own tool card shows when a subagent starts and ends.
-    case 'subagent:start':
     case 'subagent:end':
-      return { state, permanent: [] };
+      return {
+        state: { ...state, subagents: state.subagents.filter((s) => s.id !== event.id) },
+        permanent: [],
+      };
     case 'notice':
       return { state, permanent: [{ kind: 'notice', level: 'info', text: event.text }] };
     case 'warning':

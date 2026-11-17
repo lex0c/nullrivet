@@ -80,6 +80,13 @@ const waitUntil = async (check: () => boolean, ms = 3_000): Promise<boolean> => 
 const ended = (id: string): Promise<boolean> =>
   registry.wait(registry.get(id), 5_000, 'exit', new AbortController().signal);
 
+// Takes every pending event, as the agent does when it has room for all of them.
+const drain = () => {
+  const events = registry.pendingEvents();
+  registry.markDelivered(events);
+  return events;
+};
+
 describe('background jobs', () => {
   test('a job runs in the background and its log keeps stdout and stderr in order', async () => {
     const { id, result } = await start({ command: 'echo a; echo b >&2; echo c' });
@@ -327,7 +334,7 @@ describe('job events', () => {
   test('an ended job gives one event, with facts but no output or command', async () => {
     const { id } = await start({ command: 'echo visible-output' });
     expect(await ended(id)).toBe(true);
-    const events = registry.drainEvents();
+    const events = drain();
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ type: 'job.finished', jobId: id, status: 'completed' });
     const note = events.map(describeJobEvent).join('\n');
@@ -337,13 +344,13 @@ describe('job events', () => {
     expect(note).not.toContain('bash_jobs');
     expect(note).not.toContain('visible-output');
     expect(note).not.toContain('echo');
-    expect(registry.drainEvents()).toEqual([]);
+    expect(drain()).toEqual([]);
   });
 
   test('a ready job gives a ready event, then a finished one', async () => {
     const { id } = await start({ command: 'echo Ready; sleep 0.2', ready_pattern: 'Ready' });
     expect(await ended(id)).toBe(true);
-    const events = registry.drainEvents();
+    const events = drain();
     expect(events.map((e) => e.type)).toEqual(['job.ready', 'job.finished']);
     const [ready] = events;
     if (ready === undefined) throw new Error('no ready event');
@@ -363,7 +370,7 @@ describe('job events', () => {
     const killed = await start({ command: 'sleep 30' });
     await call('bash_kill', { id: killed.id });
 
-    expect(registry.drainEvents()).toEqual([]);
+    expect(drain()).toEqual([]);
   });
 
   test('listeners hear of each new event in a microtask, after its state is recorded', async () => {
@@ -414,7 +421,7 @@ describe('job events', () => {
     expect(registry.get(running.id).status).toBe('running');
     expect(await ended(running.id)).toBe(true);
     expect(registry.hasPendingEvents()).toBe(false);
-    expect(registry.drainEvents()).toEqual([]);
+    expect(drain()).toEqual([]);
     expect(registry.list()).toHaveLength(2);
   });
 
@@ -422,14 +429,14 @@ describe('job events', () => {
     const { id } = await start({ command: 'true' });
     expect(await ended(id)).toBe(true);
     expect((await call('bash_jobs', {})).content).toContain(`${id}: completed with exit code 0`);
-    expect(registry.drainEvents().map((e) => e.jobId)).toEqual([id]);
+    expect(drain().map((e) => e.jobId)).toEqual([id]);
   });
 
   test('a wait that runs out of time marks nothing as delivered', async () => {
     const { id } = await start({ command: 'sleep 30', ready_pattern: 'never' });
     await call('bash_jobs', { id, wait_ms: 50, until: 'ready' });
     await registry.kill(registry.get(id));
-    const events = registry.drainEvents();
+    const events = drain();
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ type: 'job.finished', status: 'stopped' });
   });
@@ -444,6 +451,6 @@ describe('job events', () => {
     const ids = registry.list().map((job) => job.id);
     expect(ids).toHaveLength(50);
     expect(ids).toContain(pending.id);
-    expect(registry.drainEvents().map((e) => e.jobId)).toEqual([pending.id]);
+    expect(drain().map((e) => e.jobId)).toEqual([pending.id]);
   });
 });

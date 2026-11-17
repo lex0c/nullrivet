@@ -153,7 +153,7 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       });
 
     const ticker = setInterval(() => {
-      if (state.turn !== null) scheduler.request();
+      if (state.turn !== null || state.subagents.length > 0) scheduler.request();
     }, ANIMATION_MS);
 
     // Every step runs even if an earlier one throws: leaving the terminal in raw mode, with the
@@ -162,8 +162,10 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       if (closed) return;
       closed = true;
       const steps: (() => void)[] = [
-        () => stopJobEvents(),
+        () => stopBackgroundEvents(),
+        () => stopSubagentActivity(),
         () => autoContinue.dispose(),
+        () => agent.cancelSubagents(),
         () => turn?.abort(),
         () => clearInterval(ticker),
         () => exitTimer !== null && clearTimeout(exitTimer),
@@ -239,19 +241,22 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       },
     };
 
-    // A null text starts a turn on the pending background job events alone. The session is
+    // A null text starts a turn on the pending background events alone. The session is
     // reserved (`turn`) before the first await, so nothing else can start a turn meanwhile.
     const startTurn = (text: string | null): void => {
       const controller = new AbortController();
+      const startsBefore = agent.backgroundStarts();
       turn = controller;
       const runOptions = {
         signal: controller.signal,
         onEvent: (event: AgentEvent) => dispatch({ type: 'agent', event, now: Date.now() }),
       };
-      (text === null ? agent.runOnJobEvents(runOptions) : agent.run(text, runOptions))
+      (text === null ? agent.runOnBackgroundEvents(runOptions) : agent.run(text, runOptions))
         .then(
           (result) => {
-            if (result !== null) autoContinue.turnEnded(result.reason);
+            if (result !== null) {
+              autoContinue.turnEnded(result.reason, agent.backgroundStarts() > startsBefore);
+            }
           },
           (error: unknown) => {
             // runTurn reports its own failures; reaching this point means the turn ended without
@@ -261,7 +266,7 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
               event: { type: 'agent:end', reason: 'error', message: errorMessage(error) },
               now: Date.now(),
             });
-            autoContinue.turnEnded('error');
+            autoContinue.turnEnded('error', true);
           },
         )
         .finally(() => {
@@ -274,20 +279,32 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
     const interrupt = (): void => {
       if (turn === null || turn.signal.aborted) return;
       turn.abort();
-      // Interrupting a task means stop: events still pending must not start the agent again on
-      // their own. Cancelling a /compact says nothing about the task.
-      if (!compacting) autoContinue.pause();
+      // Interrupting a task means stop: every background subagent is cancelled, including those
+      // started by earlier turns, and events still pending must not start the agent again on their
+      // own. Cancelling a /compact says nothing about the task.
+      if (!compacting) {
+        autoContinue.pause();
+        agent.cancelSubagents();
+      }
       dispatch({ type: 'interrupting' });
+    };
+
+    // Esc with no task running stops the background subagents. Their cancellations reach the model
+    // with the next prompt; they do not start a turn to announce themselves.
+    const cancelIdleSubagents = (): void => {
+      autoContinue.pause();
+      // A second Esc while the cancelled ones wind down stops nothing new and says nothing.
+      if (agent.cancelSubagents() > 0) notice('info', 'Background subagents cancelled.');
     };
 
     // A command and a turn never overlap: /model and /instructions reload await work that must
     // not change the agent while a turn uses it.
     let commandRunning = false;
 
-    // Starts turns on background job events while the session is idle. The automatic turn is an
-    // ordinary turn: Esc and Ctrl+C interrupt it, the current mode applies, and it is saved. Every
-    // change that can make the session idle pokes it: the end of a turn or a command, an emptied
-    // input, and an exit confirmation that expires.
+    // Starts turns on background events (jobs and subagents that ended) while the session is idle.
+    // The automatic turn is an ordinary turn: Esc and Ctrl+C interrupt it, the current mode
+    // applies, and it is saved. Every change that can make the session idle pokes it: the end of a
+    // turn or a command, an emptied input, and an exit confirmation that expires.
     const autoContinue = createAutoContinue({
       isIdle: () =>
         !closed &&
@@ -295,16 +312,21 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
         !commandRunning &&
         state.input.value.length === 0 &&
         state.exitArmedAt === null,
-      hasEvents: () => agent.hasJobEvents(),
+      hasEvents: () => agent.hasBackgroundEvents(),
       // Called right after hasEvents and isIdle, with no await in between: the events are there.
       start: () => {
-        notice('info', 'Continuing on background job events.');
+        notice('info', 'Continuing on background events.');
         startTurn(null);
         return true;
       },
       notice: (text) => notice('info', text),
     });
-    const stopJobEvents = agent.onJobEvent(() => autoContinue.poke());
+    const stopBackgroundEvents = agent.onBackgroundEvent(() => autoContinue.poke());
+    // Subagents outlive the turn that started them, so their activity reaches the interface through
+    // the agent for as long as the session lasts.
+    const stopSubagentActivity = agent.onSubagentActivity((event) =>
+      dispatch({ type: 'agent', event, now: Date.now() }),
+    );
 
     const updateSlash = (value: string): void => {
       const items = suggestCommands(value).map((c) => ({
@@ -456,6 +478,10 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
         syncStatus();
         notice('info', describeModeChange(agent.mode));
         void agent.checkpoint?.();
+        return;
+      }
+      if (isNamedKey(key, 'escape') && turn === null && agent.runningSubagents() > 0) {
+        cancelIdleSubagents();
         return;
       }
       if (isNamedKey(key, 'escape') && turn !== null) {

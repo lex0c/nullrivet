@@ -29,9 +29,10 @@ slash commands ─────────┘        └──> permanent items 
 - **Reducer** (`src/tui/state.ts`): a pure function from the current state and an action (an
   edit of the input, an agent event, a command result) to the next state plus the items that
   are now final and go to the scrollback.
-- **View** (`src/tui/view.ts`): composes the live region from the state: the pending answer, one
-  card per running tool, a phase indicator, the input box, the command list and the status
-  lines. `src/tui/permanent.ts` formats the scrollback items.
+- **View** (`src/tui/view.ts`): composes the live region from the state: one row per subagent
+  running in the background, with its current step and tool, the pending answer, one card per
+  running tool, a phase indicator, the input box, the command list and the status lines.
+  Subagent rows stay while no turn runs, since a subagent outlives the turn that started it. `src/tui/permanent.ts` formats the scrollback items.
 - **Screen** (`src/tui/screen.ts`): draws frames; it knows nothing about the agent.
 - **Controller** (`src/cli/repl.ts`): wires the terminal, the keys, the agent and the commands
   together and schedules redraws at up to 30 frames per second.
@@ -98,32 +99,41 @@ does not settle it. Any remaining text is settled when a tool call starts or the
 
 ## Automatic continuation
 
-When a background job ends, or becomes ready, while the session is idle, the session starts a turn
-on its own: a line says "Continuing on background job events.", the job's runtime note follows as
-an info line, and the turn runs like any other. Esc and `Ctrl+C` interrupt it, the current mode
+When a background job ends or becomes ready, or a subagent ends, while the session is idle, the
+session starts a turn on its own: a line says "Continuing on background events.", the runtime
+notes follow as info lines (for a subagent, its title and how it ended), and the turn runs like
+any other. Esc and `Ctrl+C` interrupt it, the current mode
 applies, and the session file saves it. Events that arrive within 250 ms of each other share one
 turn. The agent never reads the job's output from the event itself: the note names the log.
 
 - **Idle** means no task and no slash command running, an empty prompt, and no exit armed by
   `Ctrl+C`. While you type, the turn waits; a prompt you send takes the pending events with it, so
   you go first and nothing is lost.
-- **Limit.** At most 5 automatic turns in a row; then a notice says continuation is paused, and
-  the pending events wait for your next prompt. The limit counts turns, not model requests: each
-  turn keeps its own step limit and `--timeout`. Only a prompt you send renews it.
+- **Limit.** At most 5 automatic turns in a row that start background work (a job or a
+  subagent); then a notice says continuation is paused, and the pending events wait for your next
+  prompt. A turn that starts nothing is not counted: it only takes events of work that already
+  exists, which cannot go on forever, so many subagents reporting at different times are all
+  heard. The limit counts turns, not model requests: each turn keeps its own step limit and
+  `--timeout`. Only a prompt you send renews it.
 - **Suspension.** Continuation stops until your next prompt when you interrupt a task (automatic or
-  not) and when a turn ends other than `done` (an error, a limit, an interrupt). Cancelling a
-  `/compact` does not suspend it. Jobs keep running, and their events are delivered with your next
-  prompt.
+  not), when you cancel the subagents with `Esc`, and when a turn ends other than `done` (an
+  error, a limit, an interrupt). Cancelling a `/compact` does not suspend it. Jobs keep running,
+  and their events are delivered with your next prompt.
 - **`/clear`.** Jobs started before it keep running, and `bash_jobs` still shows them, but their
   events are no longer reported: nothing in the new conversation explains them, so they neither
-  reach the model nor start a turn.
+  reach the model nor start a turn. Subagents started before it are cancelled, and their reports
+  dropped.
 - Only the interactive session continues on its own; a one-shot run ends with its task.
 
 ## Interrupting and exiting
 
 - `Esc` or `Ctrl+C` during a task aborts it. The abort reaches the HTTP request and every
   process group started by the tools; completed tool results stay in the conversation. If the
-  task does not stop, a second `Ctrl+C` exits anyway.
+  task does not stop, a second `Ctrl+C` exits anyway. Subagents running in the background, or
+  waiting for a slot, are cancelled too.
+- `Esc` with no task running and subagents in the background cancels them, and a line says
+  "Background subagents cancelled." Their cancellations reach the model with your next prompt;
+  they do not start a turn.
 - A slash command and a task never run at the same time: a prompt submitted while a command such
   as `/model` is still resolving is refused, so the agent is never changed mid-task.
 - If an unexpected error reaches the session, the terminal is restored (raw mode, cursor, key

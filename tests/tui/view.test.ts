@@ -208,29 +208,22 @@ describe('formatTokens', () => {
 });
 
 describe('subagent progress', () => {
-  test('a running delegate call shows what its subagent is doing', () => {
+  test('a background subagent shows what it is doing, with no turn running', () => {
     const state: TuiState = {
       ...base(),
-      turn: {
-        startedAt: 0,
-        pendingText: '',
-        thinkingSince: null,
-        outputChars: 0,
-        interrupting: false,
-        tools: [
-          {
-            id: 'd1',
-            name: 'delegate',
-            args: { title: 'scan the parser' },
-            startedAt: 0,
-            subagent: { step: 3, tool: { name: 'grep', args: { pattern: 'TODO', path: 'src' } } },
-          },
-        ],
-      },
+      subagents: [
+        {
+          id: 's1',
+          title: 'scan the parser',
+          startedAt: 0,
+          progress: { step: 3, tool: { name: 'grep', args: { pattern: 'TODO', path: 'src' } } },
+        },
+      ],
     };
     const rows = composeLive(state, caps(100), 1_000).rows.map(stripAnsi);
-    const card = rows.findIndex((r) => r.includes('Delegating scan the parser'));
+    const card = rows.findIndex((r) => r.includes('Subagent scan the parser'));
     expect(card).toBeGreaterThanOrEqual(0);
+    expect(rows[card]).toContain('[1.0s]');
     expect(rows[card + 1]).toContain('step 3 · Searching TODO in src');
   });
 });

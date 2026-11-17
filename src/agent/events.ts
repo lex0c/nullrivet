@@ -1,5 +1,3 @@
-import type { ExecutionMode } from '../tools/policy.ts';
-
 export type AgentEndReason = 'done' | 'aborted' | 'error' | 'budget';
 
 export type CompactReason = 'auto' | 'manual' | 'overflow';
@@ -42,11 +40,12 @@ export type AgentEvent =
       reportedCostUsd?: number;
       // Set for the requests that summarize the conversation, which do not reflect its size.
       compaction?: true;
-      // Set for requests made by a subagent: the id of the delegate call that started it.
+      // Set for requests made by a subagent: its id, as in the subagent events.
       subagent?: string;
     }
-  // A subagent started by a delegate call; `id` is the id of that call.
-  | { type: 'subagent:start'; id: string; title: string; mode: ExecutionMode }
+  // A background subagent began to run. `id` is given by the subagent registry and named in the
+  // delegate result; it is not the id of the delegate call.
+  | { type: 'subagent:start'; id: string; title: string }
   | {
       type: 'subagent:progress';
       id: string;
@@ -60,3 +59,12 @@ export type AgentEvent =
   | { type: 'error'; message: string };
 
 export type AgentEventListener = (event: AgentEvent) => void;
+
+// A source of background events, such as finished jobs or subagents, that waits for the agent to
+// show them to the model. The agent picks a batch from every source and confirms only the events it
+// picked, so an event left out of a batch stays pending.
+export interface PendingEventSource<T> {
+  // Oldest first; reading them does not deliver them.
+  pendingEvents(): readonly T[];
+  markDelivered(events: readonly T[]): void;
+}

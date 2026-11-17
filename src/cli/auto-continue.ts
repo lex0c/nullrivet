@@ -4,7 +4,8 @@ import type { AgentEndReason } from '../agent/events.ts';
 // other (a job becoming ready and ending, several jobs ending) are handled by one turn.
 export const AUTO_CONTINUE_DELAY_MS = 250;
 // Automatic turns allowed between two prompts of the user; only a prompt renews them. It counts
-// turns, not model requests: each turn keeps its own step and time limits.
+// turns, not model requests: each turn keeps its own step and time limits. Only turns that start
+// background work count, since only they can cause more events, and so more turns.
 export const MAX_AUTOMATIC_TURNS = 5;
 
 export interface AutoContinueOptions {
@@ -29,18 +30,22 @@ export interface AutoContinue {
   // Stops starting turns until the next prompt; pending events stay pending.
   pause(): void;
   // A turn that did not end with `done` (interrupted, failed, out of budget) suspends automatic
-  // turns, so a failing task is not retried on its own.
-  turnEnded(reason: AgentEndReason): void;
+  // turns, so a failing task is not retried on its own. An automatic turn that started no
+  // background work (no job, no subagent) is not counted: it only took events of work that already
+  // existed, which are finite, so many reports arriving apart do not exhaust the limit.
+  turnEnded(reason: AgentEndReason, startedBackgroundWork: boolean): void;
   dispose(): void;
 }
 
-// Decides when the interactive session starts a turn on background job events by itself. It
+// Decides when the interactive session starts a turn on background events by itself. It
 // never reads or takes the events: the turn's loop delivers them to the model.
 export const createAutoContinue = (options: AutoContinueOptions): AutoContinue => {
   const delayMs = options.delayMs ?? AUTO_CONTINUE_DELAY_MS;
   const maxTurns = options.maxTurns ?? MAX_AUTOMATIC_TURNS;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let turns = 0;
+  // Whether the turn running, if any, was started by this scheduler.
+  let automaticTurn = false;
   let paused = false;
   let limitShown = false;
   let disposed = false;
@@ -57,7 +62,10 @@ export const createAutoContinue = (options: AutoContinueOptions): AutoContinue =
       }
       return;
     }
-    if (options.start()) turns += 1;
+    if (options.start()) {
+      turns += 1;
+      automaticTurn = true;
+    }
   };
 
   return {
@@ -68,14 +76,17 @@ export const createAutoContinue = (options: AutoContinueOptions): AutoContinue =
     },
     userPrompted() {
       turns = 0;
+      automaticTurn = false;
       paused = false;
       limitShown = false;
     },
     pause() {
       paused = true;
     },
-    turnEnded(reason) {
+    turnEnded(reason, startedBackgroundWork) {
       if (reason !== 'done') paused = true;
+      if (automaticTurn && !startedBackgroundWork) turns -= 1;
+      automaticTurn = false;
     },
     dispose() {
       disposed = true;

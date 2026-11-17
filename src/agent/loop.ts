@@ -53,6 +53,10 @@ export interface LoopLimits {
   // Added as a runtime note before the last step, so a turn that runs out of steps can still end
   // with an answer instead of a tool call.
   finalStepNote?: string;
+  // Time (as Date.now()) from which the next step is the last one, as at maxSteps: it gets the
+  // final step note and the turn ends after it. It leaves room for an answer before a hard time
+  // limit that would abort the turn.
+  finalStepAt?: number;
 }
 
 export interface TurnDependencies {
@@ -72,15 +76,31 @@ export interface TurnDependencies {
   instructions: InstructionsLoader | null;
   limits: LoopLimits;
   effort?: ProviderEffort;
-  // Runtime notices for the model, such as background jobs that ended, each returned once.
-  notices?: () => string[];
+  // Runtime notices for the model, such as background jobs and subagents that ended. Each call
+  // returns the next batch, and each notice is returned once.
+  notices?: () => RuntimeNotice[];
   emit: AgentEventListener;
   signal: AbortSignal;
 }
 
+// A note from the runtime for the model. `text` holds only facts the runtime produced and is sent
+// as an agent note, which the model trusts; `data` is material from elsewhere, such as a subagent's
+// report, and is fenced as data after it.
+export interface RuntimeNotice {
+  text: string;
+  data?: string;
+  // Shown to the user in place of `text`, when the note as written is meant for the model only.
+  display?: string;
+}
+
+// Which limit ended a turn with `budget`.
+export type TurnLimit = 'steps' | 'time' | 'context' | 'output';
+
 export interface TurnResult {
   reason: AgentEndReason;
   message?: string;
+  // Set when the reason is `budget`.
+  limit?: TurnLimit;
   usage: UsageInfo;
   steps: number;
 }
@@ -246,7 +266,6 @@ const executeToolCalls = async (
       mode: deps.mode(),
       cwd: deps.cwd,
       signal,
-      emit,
       newInstructions: unseenBeforeWrite,
     });
     let content = result.content;
@@ -268,16 +287,7 @@ const executeToolCalls = async (
       ...(result.isError ? { is_error: true } : {}),
     };
   };
-  const concurrent = (call: CollectedToolUse | undefined): boolean =>
-    call !== undefined && deps.tools.get(call.name)?.concurrent === true;
-  // Calls run in order, except that a run of adjacent concurrent calls runs at the same time.
-  // Results keep the order of the calls either way.
-  for (let i = 0; i < calls.length; ) {
-    let end = i + 1;
-    if (concurrent(calls[i])) while (concurrent(calls[end])) end++;
-    results.push(...(await Promise.all(calls.slice(i, end).map(runCall))));
-    i = end;
-  }
+  for (const call of calls) results.push(await runCall(call));
   return results;
 };
 
@@ -303,17 +313,28 @@ export const runTurn = async (
   let usage = emptyUsage();
   let steps = 0;
   let streamRetries = 0;
-  const end = (endReason: AgentEndReason, endMessage?: string): TurnResult => {
+  const end = (
+    endReason: AgentEndReason,
+    endMessage?: string,
+    endLimit?: TurnLimit,
+  ): TurnResult => {
     // A task stopped by its time limit ends at a limit, like the step limit, not as an interrupt.
     const timedOut = endReason === 'aborted' && signal.reason instanceof TimeLimitReached;
     const reason = timedOut ? 'budget' : endReason;
     const message = timedOut ? (signal.reason as TimeLimitReached).message : endMessage;
+    const limit = timedOut ? 'time' : endLimit;
     emit(
       message === undefined
         ? { type: 'agent:end', reason }
         : { type: 'agent:end', reason, message },
     );
-    return message === undefined ? { reason, usage, steps } : { reason, message, usage, steps };
+    return {
+      reason,
+      ...(message === undefined ? {} : { message }),
+      ...(limit === undefined ? {} : { limit }),
+      usage,
+      steps,
+    };
   };
 
   // At most one compaction for an overflow per step, so a prompt that cannot fit even after
@@ -374,13 +395,19 @@ export const runTurn = async (
     return result === 'done' ? 'retry' : 'full';
   };
 
-  // Adds the pending runtime notices to the latest message, shows them, and returns how many.
+  // At most one batch of notices per request: set when a batch is added, cleared when the model
+  // answers. The first request of a turn without a prompt and a retried request take no other, so
+  // the limit the agent puts on a batch holds for each request.
+  let batchPending = false;
+  // Adds the next batch of runtime notices to the latest message, shows them, and returns how many.
   const addNotices = (): number => {
+    if (batchPending) return 0;
     const notices = deps.notices?.() ?? [];
     for (const notice of notices) {
-      conversation.appendUser(agentNote(notice));
-      emit({ type: 'notice', text: notice });
+      conversation.appendUser(agentNote(notice.text), notice.data);
+      emit({ type: 'notice', text: notice.display ?? notice.text });
     }
+    if (notices.length > 0) batchPending = true;
     return notices.length;
   };
 
@@ -392,10 +419,14 @@ export const runTurn = async (
     return end('done');
   }
 
-  while (steps < limits.maxSteps) {
+  // Lowered to the step in progress once finalStepAt has passed, so that step is the last one with
+  // the same rules as at maxSteps: a repeated step stays the last, and none follows it.
+  let maxSteps = limits.maxSteps;
+  while (steps < maxSteps) {
     if (signal.aborted) return end('aborted');
     steps += 1;
-    if (steps === limits.maxSteps && steps > 1 && limits.finalStepNote !== undefined) {
+    if (limits.finalStepAt !== undefined && Date.now() >= limits.finalStepAt) maxSteps = steps;
+    if (steps === maxSteps && steps > 1 && limits.finalStepNote !== undefined) {
       conversation.appendUser(agentNote(limits.finalStepNote));
     }
     // The system prompt states the current mode, but answers given under the previous one stay
@@ -428,7 +459,7 @@ export const runTurn = async (
         deps.provider,
         limits.maxOutputTokens,
       );
-      if (maxTokens < minOutput) return end('budget', CONTEXT_FULL);
+      if (maxTokens < minOutput) return end('budget', CONTEXT_FULL, 'context');
     }
     const request: GenerateRequest = {
       model: deps.provider.id,
@@ -460,7 +491,7 @@ export const runTurn = async (
           steps -= 1;
           continue;
         }
-        return recovery === 'aborted' ? end('aborted') : end('budget', CONTEXT_FULL);
+        return recovery === 'aborted' ? end('aborted') : end('budget', CONTEXT_FULL, 'context');
       }
       const message =
         cause instanceof StepStallError
@@ -487,7 +518,7 @@ export const runTurn = async (
         steps -= 1;
         continue;
       }
-      return recovery === 'aborted' ? end('aborted') : end('budget', CONTEXT_FULL);
+      return recovery === 'aborted' ? end('aborted') : end('budget', CONTEXT_FULL, 'context');
     }
 
     if (isTransientFailure(collected)) {
@@ -518,16 +549,17 @@ export const runTurn = async (
       conversation.recordPromptUsage(u.input + u.cache_read + u.cache_creation, shape);
     }
     conversation.appendAssistant(buildAssistantContent(collected));
+    batchPending = false;
 
     // The answer was cut off by the context window: the text shown so far is kept, its tool calls
     // are not run, and the turn continues on a compacted conversation.
     if (collected.stop_reason === 'model_context_window_exceeded') {
       conversation.appendToolResults(conversation.unansweredToolUses().map(interruptedResult));
-      if (overflowRecovered) return end('budget', CONTEXT_FULL);
+      if (overflowRecovered) return end('budget', CONTEXT_FULL, 'context');
       overflowRecovered = true;
       const result = await compact('overflow', shape, OVERFLOW_TAIL_FACTOR);
       if (result === 'aborted') return end('aborted');
-      if (result === 'skipped') return end('budget', CONTEXT_FULL);
+      if (result === 'skipped') return end('budget', CONTEXT_FULL, 'context');
       conversation.appendUser(
         agentNote(
           'Your previous response was cut off by the context window limit. The conversation was compacted; continue where you left off.',
@@ -549,7 +581,7 @@ export const runTurn = async (
 
     if (collected.tool_uses.length === 0 && invalidCalls.length === 0) {
       if (collected.stop_reason === 'max_tokens') {
-        return end('budget', 'the response reached the output token limit');
+        return end('budget', 'the response reached the output token limit', 'output');
       }
       return end('done');
     }
@@ -564,5 +596,7 @@ export const runTurn = async (
     overflowRecovered = false;
   }
 
-  return end('budget', `stopped after reaching the limit of ${limits.maxSteps} steps`);
+  return maxSteps === limits.maxSteps
+    ? end('budget', `stopped after reaching the limit of ${limits.maxSteps} steps`, 'steps')
+    : end('budget', 'stopped at the time set for its last step', 'time');
 };

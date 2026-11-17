@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import type { PendingEventSource } from '../agent/events.ts';
 import { formatBytes } from '../context/output-reduction.ts';
 import { errorMessage } from '../errors.ts';
 import { stripAnsi } from '../sanitize/ansi.ts';
@@ -210,7 +211,8 @@ class Job {
   }
 }
 
-const markDelivered = (job: Job): void => {
+// Marks every event the job has had so far as delivered.
+const deliverAll = (job: Job): void => {
   if (job.readyAt !== null) job.readyDelivered = true;
   if (job.finish !== null) {
     job.finishDelivered = true;
@@ -270,7 +272,7 @@ export interface JobStartOptions {
   readyPattern?: string;
 }
 
-export class JobRegistry {
+export class JobRegistry implements PendingEventSource<JobEvent> {
   // Ids carry a random prefix of this registry, so an id from an earlier process, still in a
   // resumed conversation, does not name a job of this one.
   private readonly prefix = randomBytes(8).toString('hex');
@@ -283,11 +285,16 @@ export class JobRegistry {
 
   constructor(private readonly logs: OutputFiles = jobLogs) {}
 
+  // How many jobs this registry has started, counting those whose process failed to start.
+  get startedCount(): number {
+    return this.sequence;
+  }
+
   // Calls `listener` whenever an event becomes pending. It carries no event: the loop alone takes
-  // events, with drainEvents, and delivers them. Each call runs in a microtask of its own, after the
-  // job's state is recorded and only while the listener is still subscribed, so it never runs
-  // inside the handling of a process's end. Listeners must not throw; a listener that does is a bug
-  // and is reported as an uncaught error, not swallowed.
+  // events, with pendingEvents and markDelivered, and delivers them. Each call runs in a microtask
+  // of its own, after the job's state is recorded and only while the listener is still subscribed,
+  // so it never runs inside the handling of a process's end. Listeners must not throw; a listener
+  // that does is a bug and is reported as an uncaught error, not swallowed.
   onEvent(listener: () => void): () => void {
     this.listeners.add(listener);
     return () => {
@@ -426,8 +433,8 @@ export class JobRegistry {
     });
   }
 
-  // Events not delivered yet, oldest first; they count as delivered once returned.
-  drainEvents(): JobEvent[] {
+  // Events not delivered yet, oldest first. Reading them does not deliver them.
+  pendingEvents(): JobEvent[] {
     const events: JobEvent[] = [];
     for (const job of this.jobs.values()) {
       if (job.readyAt !== null && !job.readyDelivered) {
@@ -451,15 +458,25 @@ export class JobRegistry {
           log: job.finish.log,
         });
       }
-      markDelivered(job);
+    }
+    return events.sort((a, b) => a.at - b.at);
+  }
+
+  // A finished event also settles the job's ready event, if that one is still pending: once the
+  // job has ended, that it became ready is no longer news.
+  markDelivered(events: readonly JobEvent[]): void {
+    for (const event of events) {
+      const job = this.jobs.get(event.jobId);
+      if (job === undefined) continue;
+      if (event.type === 'job.ready') job.readyDelivered = true;
+      else deliverAll(job);
     }
     this.prune();
-    return events.sort((a, b) => a.at - b.at);
   }
 
   // Records the events a report to the model showed, so no note repeats them.
   markShown(job: Job): void {
-    markDelivered(job);
+    deliverAll(job);
     this.prune();
   }
 

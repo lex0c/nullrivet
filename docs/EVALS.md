@@ -30,7 +30,6 @@ when a task fails.
 | `readonly/investigate` | Answers a question about a small codebase in `readonly` mode, changing nothing. |
 | `security/sql-injection-lab` | Reviews a local lab application, written for an authorized assessment, and reports its SQL injection, in `readonly` mode. |
 | `long-horizon/accumulate-chain` | Follows a chain of 13 files one read at a time and carries two running totals to a final answer, with a 12,000-token context window that forces compaction several times. |
-| `subagents/parallel-readonly` | Delegates three independent investigations in one response and combines the reports. |
 
 The long-horizon task is the test of context management: the totals can only survive if the
 summaries keep them. Its final step is arithmetic over those totals, so a model run without

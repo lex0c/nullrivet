@@ -3,21 +3,35 @@ import { dirname, join } from 'node:path';
 import { contextBudget } from '../context/budget.ts';
 import type { InstructionFile, InstructionsLoader } from '../instructions/agents-loader.ts';
 import type { Provider, ProviderEffort } from '../providers/types.ts';
-import { createJobTools, describeJobEvent, JobRegistry, type JobSession } from '../tools/jobs.ts';
+import {
+  createJobTools,
+  describeJobEvent,
+  type JobEvent,
+  JobRegistry,
+  type JobSession,
+} from '../tools/jobs.ts';
 import type { ExecutionMode } from '../tools/policy.ts';
 import { MAX_TIMER_DELAY_MS } from '../tools/process.ts';
 import type { Tool } from '../tools/types.ts';
 import { type CompactionOutcome, compactConversation } from './compactor.ts';
 import { Conversation } from './conversation.ts';
-import type { AgentEventListener } from './events.ts';
+import type { AgentEventListener, PendingEventSource } from './events.ts';
 import {
   type LoopLimits,
   promptShape,
+  type RuntimeNotice,
   runTurn,
   TimeLimitReached,
   type TurnResult,
 } from './loop.ts';
-import { createDelegateTool } from './subagent.ts';
+import {
+  createDelegateTool,
+  describeSubagentEvent,
+  REPORT_MAX_BYTES,
+  type SubagentEvent,
+  SubagentRegistry,
+  subagentData,
+} from './subagent.ts';
 import { buildSystemPrompt, localDate, renderProjectContext } from './system-prompt.ts';
 
 export const DEFAULT_MAX_STEPS = 200;
@@ -33,11 +47,13 @@ export interface AgentOptions {
   instructions: InstructionsLoader | null;
   effort?: ProviderEffort;
   maxSteps?: number;
-  // Offers the delegate tool, which starts subagents; on unless set to false.
+  // Offers the delegate tool, which starts subagents in the background. Off unless set to true:
+  // their reports reach the model only through runOnBackgroundEvents or a later turn, so only a
+  // caller that keeps the agent for more turns, such as the interactive session, should set it.
   delegation?: boolean;
   // Offers the background job tools (bash_background, bash_jobs, bash_kill) to this agent only,
   // never to its subagents, described for the kind of session: an interactive one starts turns on
-  // job events (runOnJobEvents), a one-shot run exits when the task ends. Off when omitted.
+  // job events (runOnBackgroundEvents), a one-shot run exits when the task ends. Off when omitted.
   backgroundJobs?: JobSession;
   // Wall-clock limit of each task; when it passes, the task is stopped like an interrupt and ends
   // at a limit.
@@ -60,13 +76,25 @@ export interface CompactOptions extends RunOptions {
 
 export interface Agent {
   run(prompt: string, options?: RunOptions): Promise<TurnResult>;
-  // Runs a turn without a prompt, on the pending background job events alone, which reach the
-  // model as runtime notes. Resolves with null, without starting a turn, when none are pending.
-  runOnJobEvents(options?: Omit<RunOptions, 'input'>): Promise<TurnResult | null>;
-  // Whether background job events are waiting to be shown to the model.
-  hasJobEvents(): boolean;
-  // Calls `listener` when a background job event becomes pending; returns the unsubscribe.
-  onJobEvent(listener: () => void): () => void;
+  // Runs a turn without a prompt, on the pending background events alone (jobs and subagents that
+  // ended), which reach the model as runtime notes. Resolves with null, without starting a turn,
+  // when none are pending.
+  runOnBackgroundEvents(options?: Omit<RunOptions, 'input'>): Promise<TurnResult | null>;
+  // Whether background events are waiting to be shown to the model.
+  hasBackgroundEvents(): boolean;
+  // Calls `listener` when a background event becomes pending; returns the unsubscribe.
+  onBackgroundEvent(listener: () => void): () => void;
+  // What the background subagents do (start, progress, usage, warnings, end), whichever turn
+  // started them; returns the unsubscribe.
+  onSubagentActivity(listener: AgentEventListener): () => void;
+  // Subagents running or waiting for a slot.
+  runningSubagents(): number;
+  // Stops every running and queued subagent not stopped yet, and returns how many it stopped; each
+  // reports that it was cancelled.
+  cancelSubagents(): number;
+  // How many background jobs and subagents this agent has started. A turn that leaves it unchanged
+  // started no background work, so it cannot cause more background events.
+  backgroundStarts(): number;
   readonly conversation: Conversation;
   readonly bootWarnings: readonly string[];
   mode: ExecutionMode;
@@ -102,23 +130,73 @@ export const isInsideGitRepo = async (cwd: string): Promise<boolean> => {
   }
 };
 
+// New report data in one batch of notices, about two full reports. Each report is already reduced
+// to 16 KiB, but many finishing together could pass the context window, and compaction cannot
+// shorten them: the batch is the latest message, which a compaction keeps as it is.
+export const REPORT_DATA_PER_BATCH_BYTES = 32 * 1024;
+// A batch also takes at most a quarter of the context window, counted with few bytes per token so
+// the estimate errs on the small side, and leaves the rest to the conversation and the answer.
+const REPORT_WINDOW_SHARE = 0.25;
+const REPORT_BYTES_PER_TOKEN = 3;
+
+export const reportDataBudget = (contextWindow: number): number =>
+  Math.min(
+    REPORT_DATA_PER_BATCH_BYTES,
+    Math.floor(contextWindow * REPORT_WINDOW_SHARE) * REPORT_BYTES_PER_TOKEN,
+  );
+
+interface Pending {
+  at: number;
+  notice: RuntimeNotice;
+}
+
+// Picks the next batch of notices from both sources and marks only those as delivered. Job notices
+// carry no data and are always taken, so reports waiting for room never hold back the end of a
+// job. Reports are taken oldest first while their data fits in `budget` bytes, and at least one, so
+// each batch makes progress; the rest stay pending for the next request. No report is longer than
+// the budget: a longer one is reduced to it, and saved whole.
+export const nextNotices = (
+  jobs: PendingEventSource<JobEvent> | null,
+  subagents: PendingEventSource<SubagentEvent> | null,
+  budget: number,
+): RuntimeNotice[] => {
+  const jobEvents = jobs?.pendingEvents() ?? [];
+  const maxReportBytes = Math.min(REPORT_MAX_BYTES, budget);
+  const reports: SubagentEvent[] = [];
+  let bytes = 0;
+  for (const event of subagents?.pendingEvents() ?? []) {
+    const size = Buffer.byteLength(subagentData(event, maxReportBytes).text, 'utf8');
+    if (reports.length > 0 && bytes + size > budget) break;
+    reports.push(event);
+    bytes += size;
+  }
+  jobs?.markDelivered(jobEvents);
+  subagents?.markDelivered(reports);
+  const picked: Pending[] = [
+    ...jobEvents.map((event) => ({ at: event.at, notice: { text: describeJobEvent(event) } })),
+    ...reports.map((event) => ({
+      at: event.at,
+      notice: describeSubagentEvent(event, maxReportBytes),
+    })),
+  ];
+  return picked.sort((a, b) => a.at - b.at).map((item) => item.notice);
+};
+
 export const createAgent = async (options: AgentOptions): Promise<Agent> => {
   const conversation = new Conversation();
-  const delegate =
-    options.delegation === false
-      ? []
-      : [
-          createDelegateTool({
-            provider: () => agent.provider,
-            effort: () => agent.effort,
-            parentMode: () => agent.mode,
-            cwd: options.cwd,
-            tools: options.tools,
-            instructions: options.instructions,
-            stallMs: options.stallMs ?? DEFAULT_STALL_MS,
-            isGitRepo: isInsideGitRepo,
-          }),
-        ];
+  const subagents =
+    options.delegation !== true
+      ? null
+      : new SubagentRegistry({
+          provider: () => agent.provider,
+          effort: () => agent.effort,
+          cwd: options.cwd,
+          tools: options.tools,
+          instructions: options.instructions,
+          stallMs: options.stallMs ?? DEFAULT_STALL_MS,
+          isGitRepo: isInsideGitRepo,
+        });
+  const delegate = subagents === null ? [] : [createDelegateTool(subagents)];
   let jobs: JobRegistry | null = null;
   const jobTools: Tool[] = [];
   if (options.backgroundJobs !== undefined) {
@@ -188,7 +266,16 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
           instructions: options.instructions,
           limits,
           ...(agent.effort === undefined ? {} : { effort: agent.effort }),
-          ...(jobs === null ? {} : { notices: () => jobs.drainEvents().map(describeJobEvent) }),
+          ...(jobs === null && subagents === null
+            ? {}
+            : {
+                notices: () =>
+                  nextNotices(
+                    jobs,
+                    subagents,
+                    reportDataBudget(agent.provider.capabilities.context_window),
+                  ),
+              }),
           emit: runOptions.onEvent ?? (() => undefined),
           signal,
         },
@@ -236,6 +323,8 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
       // Jobs started by the discarded conversation keep running, but their events must not reach
       // the new one, where nothing explains them, nor start turns in it.
       jobs?.dropEvents();
+      // Subagents of the discarded conversation are stopped, and their reports forgotten.
+      subagents?.discardAll();
     },
 
     async compact(compactOptions: CompactOptions = {}): Promise<CompactionOutcome | null> {
@@ -270,17 +359,40 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
     },
 
     // The check runs before any await, so a caller that found events pending starts on them.
-    async runOnJobEvents(runOptions: Omit<RunOptions, 'input'> = {}): Promise<TurnResult | null> {
-      if (jobs === null || !jobs.hasPendingEvents()) return null;
+    async runOnBackgroundEvents(
+      runOptions: Omit<RunOptions, 'input'> = {},
+    ): Promise<TurnResult | null> {
+      if (!agent.hasBackgroundEvents()) return null;
       return runOneTurn(null, runOptions);
     },
 
-    hasJobEvents(): boolean {
-      return jobs?.hasPendingEvents() ?? false;
+    hasBackgroundEvents(): boolean {
+      return (jobs?.hasPendingEvents() ?? false) || (subagents?.hasPendingEvents() ?? false);
     },
 
-    onJobEvent(listener: () => void): () => void {
-      return jobs?.onEvent(listener) ?? (() => undefined);
+    onBackgroundEvent(listener: () => void): () => void {
+      const stopJobs = jobs?.onEvent(listener);
+      const stopSubagents = subagents?.onEvent(listener);
+      return () => {
+        stopJobs?.();
+        stopSubagents?.();
+      };
+    },
+
+    onSubagentActivity(listener: AgentEventListener): () => void {
+      return subagents?.onActivity(listener) ?? (() => undefined);
+    },
+
+    runningSubagents(): number {
+      return subagents?.active() ?? 0;
+    },
+
+    cancelSubagents(): number {
+      return subagents?.cancelAll() ?? 0;
+    },
+
+    backgroundStarts(): number {
+      return (jobs?.startedCount ?? 0) + (subagents?.startedCount ?? 0);
     },
   };
   return agent;

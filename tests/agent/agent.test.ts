@@ -39,6 +39,7 @@ describe('time limit', () => {
     const events: AgentEvent[] = [];
     const result = await agent.run('go', { onEvent: (e) => events.push(e) });
     expect(result.reason).toBe('budget');
+    expect(result.limit).toBe('time');
     expect(result.message).toBe('time limit of 1s reached');
     expect(events.at(-1)).toEqual({
       type: 'agent:end',
@@ -301,13 +302,9 @@ describe('background jobs', () => {
   const offered = (req: GenerateRequest | undefined): string[] =>
     (req?.tools ?? []).map((t) => t.name);
 
-  test('the job tools are offered in auto mode only, and never to subagents', async () => {
-    const provider = createMockProvider([
-      toolTurn([{ id: 'd1', name: 'delegate', args: { title: 'look', objective: 'look around' } }]),
-      textTurn('report'),
-      textTurn('done'),
-      textTurn('fine'),
-    ]);
+  // That subagents never get them is checked with the subagent tests.
+  test('the job tools are offered in auto mode only', async () => {
+    const provider = createMockProvider([textTurn('done'), textTurn('fine')]);
     const agent = await createAgent({
       provider,
       tools: [],
@@ -317,9 +314,7 @@ describe('background jobs', () => {
       backgroundJobs: 'interactive',
     });
     await agent.run('go');
-    const [parent, child] = provider.calls.map((c) => c.req);
-    for (const name of JOB_TOOLS) expect(offered(parent)).toContain(name);
-    for (const name of JOB_TOOLS) expect(offered(child)).not.toContain(name);
+    for (const name of JOB_TOOLS) expect(offered(provider.calls[0]?.req)).toContain(name);
 
     agent.mode = 'readonly';
     await agent.run('again');
@@ -364,8 +359,8 @@ describe('background jobs', () => {
       instructions: null,
       backgroundJobs: 'interactive',
     });
-    expect(agent.hasJobEvents()).toBe(false);
-    expect(await agent.runOnJobEvents()).toBeNull();
+    expect(agent.hasBackgroundEvents()).toBe(false);
+    expect(await agent.runOnBackgroundEvents()).toBeNull();
     expect(provider.calls).toHaveLength(0);
   });
 
@@ -384,20 +379,20 @@ describe('background jobs', () => {
       backgroundJobs: 'interactive',
     });
     let announced = 0;
-    agent.onJobEvent(() => {
+    agent.onBackgroundEvent(() => {
       announced += 1;
     });
     await agent.run('start it');
     const deadline = Date.now() + 5_000;
-    while (!agent.hasJobEvents() && Date.now() < deadline) await Bun.sleep(20);
+    while (!agent.hasBackgroundEvents() && Date.now() < deadline) await Bun.sleep(20);
     await Promise.resolve();
     expect(announced).toBe(1);
-    expect((await agent.runOnJobEvents())?.reason).toBe('done');
+    expect((await agent.runOnBackgroundEvents())?.reason).toBe('done');
     expect(provider.calls.at(-1)?.req.messages.at(-1)).toMatchObject({ role: 'user' });
     expect(String(provider.calls.at(-1)?.req.messages.at(-1)?.content)).toMatch(
       /^<agent-note>Background job [0-9a-f]{16}-1 completed with exit code 0 after \S+\.[^<]*<\/agent-note>$/,
     );
-    expect(agent.hasJobEvents()).toBe(false);
+    expect(agent.hasBackgroundEvents()).toBe(false);
   });
 
   test('after clear, the events of jobs started before are not reported', async () => {
@@ -414,7 +409,7 @@ describe('background jobs', () => {
       backgroundJobs: 'interactive',
     });
     let announced = 0;
-    agent.onJobEvent(() => {
+    agent.onBackgroundEvent(() => {
       announced += 1;
     });
     await agent.run('start it');
@@ -422,8 +417,8 @@ describe('background jobs', () => {
     const deadline = Date.now() + 5_000;
     while (announced === 0 && Date.now() < deadline) await Bun.sleep(20);
     expect(announced).toBe(1);
-    expect(agent.hasJobEvents()).toBe(false);
-    expect(await agent.runOnJobEvents()).toBeNull();
+    expect(agent.hasBackgroundEvents()).toBe(false);
+    expect(await agent.runOnBackgroundEvents()).toBeNull();
     expect(provider.calls).toHaveLength(2);
   });
 
