@@ -18,7 +18,11 @@ const MODEL_OUTPUT_BYTES = 16 * 1024;
 // every local user through /proc and commands may embed tokens. The variable is unset before the
 // command runs, so neither the command nor its children can read it.
 const COMMAND_ENV_KEY = '__NULLRIVET_COMMAND';
-const BASH_ARGS = ['-c', `eval "unset ${COMMAND_ENV_KEY}; $${COMMAND_ENV_KEY}"`];
+const RUN_COMMAND = `eval "unset ${COMMAND_ENV_KEY}; $${COMMAND_ENV_KEY}"`;
+const BASH_ARGS = ['-c', RUN_COMMAND];
+// For background jobs, stderr goes to the stdout pipe before the command runs, so their single log
+// keeps the order in which the two streams were written.
+export const JOB_BASH_ARGS = ['-c', `exec 2>&1; ${RUN_COMMAND}`];
 
 export const buildChildEnv = (
   base: Record<string, string | undefined>,
@@ -28,6 +32,23 @@ export const buildChildEnv = (
   GIT_TERMINAL_PROMPT: '0',
   [COMMAND_ENV_KEY]: command,
 });
+
+// The directory a command runs in: `cwd` resolved against the session directory, or the session
+// directory itself.
+export const resolveCommandCwd = async (
+  cwdArg: string | undefined,
+  sessionCwd: string,
+): Promise<{ cwd: string } | { error: ToolResult }> => {
+  const cwd = cwdArg === undefined ? sessionCwd : resolvePath(cwdArg, sessionCwd);
+  try {
+    if (!(await stat(cwd)).isDirectory()) {
+      return { error: toolError('fs.not_directory', `cwd is not a directory: ${cwd}`) };
+    }
+  } catch {
+    return { error: toolError('fs.not_found', `cwd does not exist: ${cwd}`) };
+  }
+  return { cwd };
+};
 
 // Reduces a stream for the model. The spool is finished here, once the reduction is known, so its
 // files are kept only for a reduced stream; the line naming them is added to `notes`.
@@ -112,15 +133,9 @@ export const bashTool: Tool = {
         min: BASH_MIN_TIMEOUT_MS,
         max: BASH_MAX_TIMEOUT_MS,
       }) ?? BASH_DEFAULT_TIMEOUT_MS;
-    const cwd = cwdArg === undefined ? ctx.cwd : resolvePath(cwdArg, ctx.cwd);
-
-    try {
-      if (!(await stat(cwd)).isDirectory()) {
-        return toolError('fs.not_directory', `cwd is not a directory: ${cwd}`);
-      }
-    } catch {
-      return toolError('fs.not_found', `cwd does not exist: ${cwd}`);
-    }
+    const resolved = await resolveCommandCwd(cwdArg, ctx.cwd);
+    if ('error' in resolved) return resolved.error;
+    const { cwd } = resolved;
 
     const spools = {
       stdout: outputFiles.spool('bash-stdout', MODEL_OUTPUT_BYTES),

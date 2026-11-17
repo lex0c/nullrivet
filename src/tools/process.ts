@@ -3,6 +3,8 @@ import type { Readable } from 'node:stream';
 import { BoundedCapture } from '../context/bounded-capture.ts';
 
 const KILL_GRACE_MS = 2_000;
+// Timers fire at once when the delay does not fit in a signed 32-bit integer (about 24.8 days).
+export const MAX_TIMER_DELAY_MS = 2_147_483_647;
 // Memory bound per stream while the process runs. The head and the tail are kept because the
 // end of the output (a test summary, the final error) is usually what matters.
 const CAPTURE_LIMIT_BYTES = 4 * 1024 * 1024;
@@ -14,10 +16,13 @@ export interface ProcessRunOptions {
   args: readonly string[];
   cwd: string;
   env: Record<string, string>;
-  timeoutMs: number;
-  signal: AbortSignal;
-  // Memory bound for stdout; defaults to CAPTURE_LIMIT_BYTES.
+  // Terminates the group with the `timeout` termination; no time limit when omitted.
+  timeoutMs?: number;
+  // Terminates the group with the `aborted` termination; not tied to any signal when omitted.
+  signal?: AbortSignal;
+  // Memory bounds for each stream; default to CAPTURE_LIMIT_BYTES.
   stdoutLimitBytes?: number;
+  stderrLimitBytes?: number;
   // Receive every chunk of output, beyond the memory bound. They must not throw.
   onStdout?: (chunk: Buffer) => void;
   onStderr?: (chunk: Buffer) => void;
@@ -74,6 +79,16 @@ const capture = (
   return out;
 };
 
+export interface ProcessHandle {
+  pid: number;
+  // Settles once the process has exited and its output pipes are closed.
+  done: Promise<ProcessRunResult>;
+  // Terminates the whole group: SIGTERM, then SIGKILL after a grace period. Only the first call
+  // has an effect, and none once the process has exited, so the termination reported is the
+  // first one requested before the exit, and a process that exited on its own reports `exited`.
+  terminate(reason: Exclude<Termination, 'exited'>): void;
+}
+
 const waitForClose = (child: ChildProcess, ms: number): Promise<boolean> =>
   new Promise((resolve) => {
     if (child.stdout?.closed !== false && child.stderr?.closed !== false) {
@@ -87,11 +102,13 @@ const waitForClose = (child: ChildProcess, ms: number): Promise<boolean> =>
     });
   });
 
-// Runs a process in its own process group with stdin closed, bounded output capture, a timeout
-// and abort support. Any process left in the group after the main one exits (background jobs)
-// is terminated, so nothing outlives the call and the output pipes can close.
-export const runProcess = (options: ProcessRunOptions): Promise<ProcessRunResult> =>
-  new Promise((resolve, reject) => {
+// Starts a process in its own process group with stdin closed, bounded output capture and the
+// optional timeout and abort. Resolves once the process exists and rejects when it cannot start,
+// so a failure to start is never mistaken for the end of a run. Any process left in the group after
+// the main one exits (background jobs) is terminated, so nothing outlives the run and the output
+// pipes can close.
+export const startProcess = (options: ProcessRunOptions): Promise<ProcessHandle> =>
+  new Promise((resolveStart, rejectStart) => {
     const startedAt = Date.now();
     const child = spawn(options.file, options.args, {
       cwd: options.cwd,
@@ -102,38 +119,56 @@ export const runProcess = (options: ProcessRunOptions): Promise<ProcessRunResult
     const pgid = child.pid;
     if (pgid !== undefined) liveGroups.add(pgid);
     const stdout = capture(child.stdout, options.stdoutLimitBytes, options.onStdout);
-    const stderr = capture(child.stderr, undefined, options.onStderr);
+    const stderr = capture(child.stderr, options.stderrLimitBytes, options.onStderr);
+    const done = Promise.withResolvers<ProcessRunResult>();
+    let started = false;
+    let exited = false;
     let termination: Termination = 'exited';
     let outputCutOff = false;
     let killTimer: ReturnType<typeof setTimeout> | null = null;
+    let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
 
-    const terminate = (reason: Termination): void => {
-      if (pgid === undefined || termination !== 'exited') return;
+    const terminate = (reason: Exclude<Termination, 'exited'>): void => {
+      if (pgid === undefined || exited || termination !== 'exited') return;
       termination = reason;
       signalGroup(pgid, 'SIGTERM');
       killTimer = setTimeout(() => signalGroup(pgid, 'SIGKILL'), KILL_GRACE_MS);
     };
-
-    const timeoutTimer = setTimeout(() => terminate('timeout'), options.timeoutMs);
     const onAbort = (): void => terminate('aborted');
-    if (options.signal.aborted) onAbort();
-    else options.signal.addEventListener('abort', onAbort, { once: true });
 
+    const stopTimers = (): void => {
+      if (timeoutTimer !== null) clearTimeout(timeoutTimer);
+      options.signal?.removeEventListener('abort', onAbort);
+    };
     const cleanup = (): void => {
-      clearTimeout(timeoutTimer);
-      options.signal.removeEventListener('abort', onAbort);
+      stopTimers();
+      if (killTimer !== null) clearTimeout(killTimer);
       if (pgid !== undefined) liveGroups.delete(pgid);
     };
 
+    child.once('spawn', () => {
+      if (pgid === undefined) {
+        rejectStart(new Error('the process started without a pid'));
+        return;
+      }
+      started = true;
+      if (options.timeoutMs !== undefined) {
+        timeoutTimer = setTimeout(() => terminate('timeout'), options.timeoutMs);
+      }
+      if (options.signal?.aborted === true) onAbort();
+      else options.signal?.addEventListener('abort', onAbort, { once: true });
+      resolveStart({ pid: pgid, done: done.promise, terminate });
+    });
+
     child.once('error', (error) => {
       cleanup();
-      if (killTimer !== null) clearTimeout(killTimer);
-      reject(error);
+      if (started) done.reject(error);
+      else rejectStart(error);
     });
 
     child.once('exit', async (exitCode, exitSignal) => {
-      clearTimeout(timeoutTimer);
-      options.signal.removeEventListener('abort', onAbort);
+      exited = true;
+      stopTimers();
       if (pgid !== undefined) {
         signalGroup(pgid, 'SIGTERM');
         if (!(await waitForClose(child, KILL_GRACE_MS))) {
@@ -144,8 +179,7 @@ export const runProcess = (options: ProcessRunOptions): Promise<ProcessRunResult
         }
       }
       cleanup();
-      if (killTimer !== null) clearTimeout(killTimer);
-      resolve({
+      done.resolve({
         exitCode,
         signal: exitSignal,
         termination,
@@ -158,3 +192,9 @@ export const runProcess = (options: ProcessRunOptions): Promise<ProcessRunResult
       });
     });
   });
+
+// Runs a process to its end; see startProcess.
+export const runProcess = async (options: ProcessRunOptions): Promise<ProcessRunResult> => {
+  const handle = await startProcess(options);
+  return handle.done;
+};

@@ -1,6 +1,6 @@
 # Tools
 
-nullrivet exposes eight tools to the model. Each declares an effect, which decides whether it is
+nullrivet exposes eleven tools to the model. Each declares an effect, which decides whether it is
 available in `readonly` mode.
 
 | Tool | Effect | `auto` | `readonly` |
@@ -13,6 +13,9 @@ available in `readonly` mode.
 | `edit_file` | write | yes | no |
 | `write_file` | write | yes | no |
 | `bash` | exec | yes | no |
+| `bash_background` | exec | yes | no |
+| `bash_jobs` | exec | yes | no |
+| `bash_kill` | exec | yes | no |
 
 Common behavior:
 
@@ -257,6 +260,83 @@ Hands a self-contained task to a subagent and returns its report.
   followed by the subagent's final reply. When the subagent stopped early, the status line says
   why. A failed or cancelled subagent is an error result.
 - **Depth.** A subagent cannot delegate.
+
+## Background jobs
+
+`bash_background`, `bash_jobs` and `bash_kill` run commands that keep going while the model works
+on something else: a dev server, a watcher, a long build or test run. Only the main agent has them:
+a job would outlive a subagent, and nobody would be told when it ends.
+
+### bash_background
+
+| Parameter | Description |
+|---|---|
+| `command` | The bash command to run. |
+| `cwd` | Working directory (default: the starting directory). |
+| `max_runtime_ms` | Stop the job after this long, at most 2,147,483,647 (the longest timer delay). Without it, the job runs until it ends or is stopped. |
+| `ready_pattern` | Literal text, 1 to 256 bytes, whose first appearance in the output marks the job as ready. Not a regular expression. It is matched in the output without terminal escape sequences, as the model sees it, so color codes between its words do not prevent a match. |
+
+It returns once the process exists and its log has been created, with the job id, the pid and the
+log path. A job runs like `bash`: its own process group, stdin closed, the same environment without
+the agent's credentials, and the command passed through an environment variable. Unlike `bash`, it
+is not tied to the task: an interrupt or the `--timeout` of a task do not stop it.
+
+### bash_jobs
+
+| Parameter | Description |
+|---|---|
+| `id` | Job to show. Without it, every job is listed with its state. |
+| `wait_ms` | Wait up to this long, 0 to 600,000 ms, for the job. Requires `id`. |
+| `until` | `exit` (default) waits for the end; `ready` waits for readiness or the end, for a job started with `ready_pattern`. Requires `wait_ms`. |
+
+A job is shown with its state, exit code or signal, duration, readiness, log, and up to 40 last
+lines of output, at most 8 KiB, kept in memory. A wait that runs out of time, or that an interrupt
+ends, leaves the job running.
+
+### bash_kill
+
+| Parameter | Description |
+|---|---|
+| `id` | Job to stop. |
+
+The job's process group receives SIGTERM, then SIGKILL after 2 s. The tool waits for the end, at
+most 10 s, and returns the final state; an interrupt ends the wait, and the signals are sent anyway.
+The limit covers a process the kernel cannot kill, such as one stuck on a hung network mount. A job
+that had already ended is left as it was.
+
+### Behavior
+
+- **Ids.** `<prefix>-<n>`: 64 random bits drawn by each process and a counter. An id from an
+  earlier run, still in a resumed session, does not name a job of this one; it is reported as
+  `job.unknown`.
+- **States.** `running`, then `completed` (exit code 0), `failed` (another exit code, or a signal
+  nobody asked for), `stopped` (`bash_kill`) or `timed_out` (`max_runtime_ms`). The first ending is
+  final: a stop or a time limit that arrives after the job ended on its own does not change it.
+- **Log.** stdout and stderr go to one file, in the order they were written, saved like
+  [saved output](#saved-output) in parts of up to 10 MiB. The limits are 64 MiB per job and 256 MiB
+  for all jobs, apart from the limits of tool output; when a job reaches its limit, saving stops and
+  the job keeps running. Logs are kept until nullrivet exits, so once the 256 MiB are used, later
+  jobs still start but save nothing; their last lines remain available through `bash_jobs`. The log
+  is written in whole lines, so an incomplete last line appears when its newline does, while
+  `bash_jobs` already shows it. The log of a running job is never described as complete.
+- **Notices.** When a job ends or becomes ready, a runtime note (`<agent-note>`) is added before the
+  next request: at the next step of a running task, or with the next prompt. It holds the id, what
+  happened, the duration and the log files, never output or the command: runtime notes are trusted,
+  and command output is not. It points to the log, which `read_file` and `grep` read in either mode.
+  Each event is reported once: one already shown by `bash_jobs` for that job, or by `bash_kill`,
+  gets no note; a listing, which has no log details, does not count. nullrivet does not start a
+  task on its own when a job ends.
+- **Limits.** At most 8 jobs run at once. Finished jobs whose events were reported are forgotten
+  beyond the 50 most recent.
+- **Errors.** `job.limit` when 8 jobs are running, `job.unknown` for an id this run does not have,
+  `job.start_failed` when bash cannot start, and `job.log_failed` when the log cannot be created, in
+  which case the job is not started.
+- **Lifetime.** Jobs are stopped when nullrivet exits, including on SIGINT, SIGTERM and SIGHUP. In
+  one-shot mode that is when the task ends; to keep a server running across tasks, use the
+  interactive session. `/clear` does not stop jobs.
+- **readonly.** The job tools are `exec`, so they are not offered in `readonly`. Jobs started
+  before a switch keep running and their notices still arrive, but checking or stopping them needs
+  `auto`.
 
 ## Saved output
 

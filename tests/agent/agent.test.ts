@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { afterAll, describe, expect, test } from 'bun:test';
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,7 +6,9 @@ import { type Agent, createAgent } from '../../src/agent/agent.ts';
 import { Conversation } from '../../src/agent/conversation.ts';
 import type { AgentEvent } from '../../src/agent/events.ts';
 import { InstructionsLoader } from '../../src/instructions/agents-loader.ts';
+import type { GenerateRequest } from '../../src/providers/types.ts';
 import { FENCE } from '../../src/sanitize/fence.ts';
+import { removeOutputFiles } from '../../src/tools/output-files.ts';
 import {
   createMockProvider,
   type MockProvider,
@@ -289,5 +291,66 @@ describe('mode switch', () => {
     agent.conversation.restore(earlier.snapshot());
     await agent.run('try again');
     expect(lastMessage(provider, 0)).toContain('from readonly to auto');
+  });
+});
+
+describe('background jobs', () => {
+  afterAll(() => removeOutputFiles());
+
+  const JOB_TOOLS = ['bash_background', 'bash_jobs', 'bash_kill'];
+  const offered = (req: GenerateRequest | undefined): string[] =>
+    (req?.tools ?? []).map((t) => t.name);
+
+  test('the job tools are offered in auto mode only, and never to subagents', async () => {
+    const provider = createMockProvider([
+      toolTurn([{ id: 'd1', name: 'delegate', args: { title: 'look', objective: 'look around' } }]),
+      textTurn('report'),
+      textTurn('done'),
+      textTurn('fine'),
+    ]);
+    const agent = await createAgent({
+      provider,
+      tools: [],
+      mode: 'auto',
+      cwd: '/tmp',
+      instructions: null,
+      backgroundJobs: true,
+    });
+    await agent.run('go');
+    const [parent, child] = provider.calls.map((c) => c.req);
+    for (const name of JOB_TOOLS) expect(offered(parent)).toContain(name);
+    for (const name of JOB_TOOLS) expect(offered(child)).not.toContain(name);
+
+    agent.mode = 'readonly';
+    await agent.run('again');
+    for (const name of JOB_TOOLS) expect(offered(provider.calls.at(-1)?.req)).not.toContain(name);
+  });
+
+  test('a job that ends after a switch to readonly is still reported', async () => {
+    const provider = createMockProvider([
+      toolTurn([{ id: 't1', name: 'bash_background', args: { command: 'echo hi' } }]),
+      textTurn('started'),
+      ...Array.from({ length: 50 }, () => textTurn('noted')),
+    ]);
+    const agent = await createAgent({
+      provider,
+      tools: [],
+      mode: 'auto',
+      cwd: '/tmp',
+      instructions: null,
+      backgroundJobs: true,
+    });
+    await agent.run('start it');
+    agent.mode = 'readonly';
+    // Asks again until the job has ended, rather than guessing how long that takes.
+    const note = /<agent-note>Background job [0-9a-f]{16}-1 completed with exit code 0/;
+    let last = '';
+    for (let attempt = 0; attempt < 50 && !note.test(last); attempt++) {
+      if (attempt > 0) await Bun.sleep(100);
+      await agent.run('anything new?');
+      last = JSON.stringify(provider.calls.at(-1)?.req.messages);
+    }
+    expect(last).toMatch(note);
+    expect(offered(provider.calls.at(-1)?.req)).not.toContain('bash_jobs');
   });
 });

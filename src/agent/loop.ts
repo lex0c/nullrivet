@@ -72,6 +72,8 @@ export interface TurnDependencies {
   instructions: InstructionsLoader | null;
   limits: LoopLimits;
   effort?: ProviderEffort;
+  // Runtime notices for the model, such as background jobs that ended, each returned once.
+  notices?: () => string[];
   emit: AgentEventListener;
   signal: AbortSignal;
 }
@@ -394,6 +396,14 @@ export const runTurn = async (
     let estimate = conversation.estimateTokens(shape);
     if (shouldCompact(estimate, budget)) {
       if ((await compactAuto(shape, budget)) === 'aborted') return end('aborted');
+      estimate = conversation.estimateTokens(shape);
+    }
+    // Added after the automatic compaction, so it cannot fold a new notice into its summary. The
+    // compactions below, for an answer with no room or a rejected request, still can: then the
+    // summary carries the notice instead.
+    const notices = deps.notices?.() ?? [];
+    if (notices.length > 0) {
+      for (const notice of notices) conversation.appendUser(agentNote(notice));
       estimate = conversation.estimateTokens(shape);
     }
     const minOutput = Math.min(MIN_OUTPUT_TOKENS, limits.maxOutputTokens);

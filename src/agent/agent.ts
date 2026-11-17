@@ -3,7 +3,9 @@ import { dirname, join } from 'node:path';
 import { contextBudget } from '../context/budget.ts';
 import type { InstructionFile, InstructionsLoader } from '../instructions/agents-loader.ts';
 import type { Provider, ProviderEffort } from '../providers/types.ts';
+import { createJobTools, describeJobEvent, JobRegistry } from '../tools/jobs.ts';
 import type { ExecutionMode } from '../tools/policy.ts';
+import { MAX_TIMER_DELAY_MS } from '../tools/process.ts';
 import type { Tool } from '../tools/types.ts';
 import { type CompactionOutcome, compactConversation } from './compactor.ts';
 import { Conversation } from './conversation.ts';
@@ -20,8 +22,7 @@ import { buildSystemPrompt, localDate, renderProjectContext } from './system-pro
 
 export const DEFAULT_MAX_STEPS = 200;
 export const DEFAULT_STALL_MS = 120_000;
-// Timers fire at once when the delay does not fit in a signed 32-bit integer (about 24.8 days).
-export const MAX_TIME_LIMIT_MS = 2_147_483_647;
+export const MAX_TIME_LIMIT_MS = MAX_TIMER_DELAY_MS;
 
 export interface AgentOptions {
   provider: Provider;
@@ -34,6 +35,9 @@ export interface AgentOptions {
   maxSteps?: number;
   // Offers the delegate tool, which starts subagents; on unless set to false.
   delegation?: boolean;
+  // Offers the background job tools (bash_background, bash_jobs, bash_kill) to this agent only,
+  // never to its subagents; off unless set to true.
+  backgroundJobs?: boolean;
   // Wall-clock limit of each task; when it passes, the task is stopped like an interrupt and ends
   // at a limit.
   timeLimitMs?: number;
@@ -107,7 +111,11 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
             isGitRepo: isInsideGitRepo,
           }),
         ];
-  const tools = new Map([...options.tools, ...delegate].map((tool) => [tool.name, tool]));
+  const jobs = options.backgroundJobs === true ? new JobRegistry() : null;
+  const jobTools = jobs === null ? [] : createJobTools(jobs);
+  const tools = new Map(
+    [...options.tools, ...delegate, ...jobTools].map((tool) => [tool.name, tool]),
+  );
   const bootWarnings: string[] = [];
   let bootInstructions: InstructionFile[] = [];
   if (options.instructions !== null) {
@@ -226,6 +234,7 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
             instructions: options.instructions,
             limits,
             ...(agent.effort === undefined ? {} : { effort: agent.effort }),
+            ...(jobs === null ? {} : { notices: () => jobs.drainEvents().map(describeJobEvent) }),
             emit: runOptions.onEvent ?? (() => undefined),
             signal,
           },

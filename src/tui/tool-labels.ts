@@ -9,6 +9,9 @@ const VERBS: Record<string, { running: string; done: string }> = {
   glob: { running: 'Finding', done: 'Found' },
   grep: { running: 'Searching', done: 'Searched' },
   delegate: { running: 'Delegating', done: 'Delegated' },
+  bash_background: { running: 'Starting', done: 'Started' },
+  bash_jobs: { running: 'Checking', done: 'Checked' },
+  bash_kill: { running: 'Stopping', done: 'Stopped' },
 };
 
 export const toolVerb = (name: string, phase: 'running' | 'done'): string =>
@@ -26,7 +29,14 @@ export const toolSubject = (name: string, args: Record<string, unknown>, max = 1
     typeof args[key] === 'string' ? (args[key] as string) : undefined;
   switch (name) {
     case 'bash':
+    case 'bash_background':
       return oneLine(str('command') ?? '', max);
+    case 'bash_jobs': {
+      const id = str('id');
+      return id === undefined ? 'jobs' : oneLine(`job ${id}`, max);
+    }
+    case 'bash_kill':
+      return oneLine(`job ${str('id') ?? ''}`, max);
     case 'git': {
       const paths = Array.isArray(args.paths)
         ? (args.paths as unknown[]).filter((p) => typeof p === 'string')

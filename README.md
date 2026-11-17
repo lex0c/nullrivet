@@ -202,7 +202,7 @@ strictly, and some record prompts. Details: [docs/MODELS.md](docs/MODELS.md).
 
 | Mode | Tools offered to the model | Enforcement |
 |---|---|---|
-| `auto` (default) | `read_file`, `glob`, `grep`, `git`, `edit_file`, `write_file`, `bash`, `delegate` | None beyond operating system permissions. |
+| `auto` (default) | `read_file`, `glob`, `grep`, `git`, `edit_file`, `write_file`, `bash`, `bash_background`, `bash_jobs`, `bash_kill`, `delegate` | None beyond operating system permissions. |
 | `readonly` | `read_file`, `glob`, `grep`, `git`, `delegate` | The other tools are neither offered nor executed, even if the model calls them. Subagents run in `readonly` too. |
 
 `auto` is **not a sandbox**: commands run with your privileges, and anything the agent reads (files,
@@ -221,9 +221,14 @@ in a container or VM for risky work ([trust boundaries](docs/ARCHITECTURE.md#tru
 | `edit_file` | write | Apply exact, all-or-nothing text replacements to a file. |
 | `write_file` | write | Create or replace a file atomically. |
 | `bash` | exec | Run a shell command non-interactively, with a timeout and output limits. |
+| `bash_background` | exec | Start a command that keeps running in the background (a dev server, a watcher), with its output in a log file. |
+| `bash_jobs` | exec | List background jobs, show one, or wait for it to end or become ready. |
+| `bash_kill` | exec | Stop a background job and its process group. |
 | `delegate` | read | Hand a self-contained task to a subagent and receive only its report. |
 
-Building, testing and git operations that change state go through `bash`. A subagent starts with
+Building, testing and git operations that change state go through `bash`. Background jobs run
+until they end, are stopped, or nullrivet exits, and the model is told when one ends or becomes
+ready. A subagent starts with
 an empty conversation and the same model and tools, never runs in a mode above the session's, and
 only its report enters the conversation. Details: [docs/TOOLS.md](docs/TOOLS.md),
 [subagents](docs/ARCHITECTURE.md#subagents).

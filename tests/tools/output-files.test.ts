@@ -302,6 +302,35 @@ describe('output files', () => {
     expect(readParts(second.parts).toString()).toBe('two\n');
   });
 
+  test('start creates the first file at once, even when the limit is used up', () => {
+    const { files } = store({ totalLimitBytes: 4 });
+    save(files, Buffer.from('12345678\n'));
+    const spool = files.spool('job', 0);
+    expect(spool.start()).toBe(true);
+    const [part = ''] = spool.snapshot().parts;
+    expect(statSync(part).size).toBe(0);
+    spool.push(Buffer.from('more\n'));
+    expect(spool.snapshot()).toMatchObject({
+      savedBytes: 0,
+      receivedBytes: 5,
+      stopReason: 'the 4B limit for the output files of this process was reached',
+    });
+  });
+
+  test('a growing output is described as saved so far, never as complete', () => {
+    const one = '/tmp/nullrivet-Ab12/3-job.001.txt';
+    const log = { parts: [one], savedBytes: 2048, receivedBytes: 2048 };
+    expect(describeSavedOutput(log, 'log', { growing: true })).toBe(
+      `[log so far (2KB) saved to \`${one}\`; read it with read_file or search it with grep]`,
+    );
+    expect(describeSavedOutput({ ...log, stopReason: 'disk full' }, 'log', { growing: true })).toBe(
+      `[log so far (2KB) saved to \`${one}\`; saving stopped: disk full; read it with read_file or search it with grep]`,
+    );
+    expect(describeSavedOutput({ ...log, binary: true }, 'log', { growing: true })).toContain(
+      'it contains NUL bytes, which read_file and grep refuse as binary',
+    );
+  });
+
   test('the note names the parts, quoted, and how to read them', () => {
     const one = '/tmp/nullrivet-Ab12/3-git.001.txt';
     const three = ['/tmp/nullrivet-Ab12/3-git.001.txt', '', '/tmp/nullrivet-Ab12/3-git.003.txt'];

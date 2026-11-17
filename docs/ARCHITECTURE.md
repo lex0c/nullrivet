@@ -64,6 +64,7 @@ src/
     glob.ts, grep.ts       file search; grep-search.ts runs in grep-worker.ts
     file-walk.ts           directory listing shared by glob and grep
     process.ts             process groups, timeouts, bounded capture
+    jobs.ts                background jobs: registry, events, and their three tools
     output-files.ts        complete output of reduced results, saved in parts to temporary files
     args.ts, paths.ts, env.ts
   instructions/
@@ -92,8 +93,9 @@ src/
 1. The prompt is appended to the conversation.
 2. A request is built from the system prompt, the conversation and the tools allowed in the
    current mode, with the project instructions of the starting directory at the start of the
-   first user message. The output token limit is reduced to what still fits in the context
-   window.
+   first user message. Runtime notices, such as a background job that ended, are appended as
+   `<agent-note>`s first, after any automatic compaction. The output token limit is reduced to
+   what still fits in the context window.
 3. The provider stream is consumed into a *collected step*: text, reasoning, tool calls, usage and
    stop reason, with the original order of the blocks preserved.
 4. The assistant message is appended. If it has no tool calls, the turn ends.
@@ -293,7 +295,7 @@ is never placed where it would carry the authority of the rules or of the user.
 | User turn | The user's prompts | The user's requests |
 | User turn, fenced block | `AGENTS.md` of the starting directory; text piped on stdin with a prompt, in its own block after the prompt | Data |
 | User turn, first block after a compaction | Notes written by the agent, then the user's requests quoted verbatim | Notes; only the quoted requests are the user's |
-| User turn, `<agent-note>` | Feedback from the runtime, such as a rejected tool call | Runtime |
+| User turn, `<agent-note>` | Feedback from the runtime, such as a rejected tool call or a background job that ended; never command output | Runtime |
 | Tool results | File contents, command output, search results, `AGENTS.md` found later | Data |
 
 - **The rules state the hierarchy.** Instructions come only from the rules and the user. Data can
@@ -404,6 +406,12 @@ Commands run in their own process group with stdin closed. A timeout, an abort o
 command terminates the whole group (SIGTERM, then SIGKILL after 2 s), so background jobs do not
 outlive the call. Every live group is killed when nullrivet exits, including on SIGTERM and on
 SIGHUP (a closed terminal or a lost SSH connection), whose default action would skip it.
+
+Background jobs (`bash_background`) start the same way, but are not tied to a turn: no abort
+signal, and no timeout unless `max_runtime_ms` is given. Their groups are in the same set, so they
+are killed with the rest when nullrivet exits. A registry owned by the main agent tracks them and
+records each event (ready, finished) once; the loop turns the events not yet shown into runtime
+notes. See [TOOLS.md](TOOLS.md#background-jobs).
 
 ## Interactive session
 

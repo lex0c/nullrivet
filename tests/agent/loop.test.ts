@@ -285,6 +285,18 @@ describe('runTurn', () => {
     expect(h.provider.calls).toHaveLength(3);
   });
 
+  test('runtime notices reach the next request once, as agent notes', async () => {
+    const h = harness([toolTurn([{ id: 't1', name: 'read_file', args: {} }]), textTurn('done')]);
+    const pending = [['first notice'], ['second notice']];
+    h.deps.notices = () => pending.shift() ?? [];
+    await runTurn('go', h.deps);
+    const [first, second] = h.provider.calls.map((c) => JSON.stringify(c.req.messages));
+    expect(first).toContain('<agent-note>first notice</agent-note>');
+    expect(first).not.toContain('second notice');
+    expect(second).toContain('<agent-note>second notice</agent-note>');
+    expect(second?.match(/first notice/g)).toHaveLength(1);
+  });
+
   test('an invalid tool call is reported back to the model instead of ending the turn', async () => {
     const broken: StreamEvent[] = [
       { kind: 'start', message_id: 'm' },
@@ -437,6 +449,22 @@ describe('runTurn', () => {
       const head = last?.messages[0]?.content;
       expect(Array.isArray(head) && head[0]?.type === 'text' ? head[0].text : '').toContain(
         '[compacted_history]',
+      );
+    });
+
+    test('runtime notices reach the request intact when the step compacts first', async () => {
+      const h = harness(responder([() => textTurn('ok')]));
+      prefill(h, 10);
+      const pending = [['job x ended']];
+      h.deps.notices = () => pending.shift() ?? [];
+      const result = await runTurn('next task', h.deps);
+      expect(result.reason).toBe('done');
+      expect(h.events.some((e) => e.type === 'context:compact' && e.reason === 'auto')).toBe(true);
+      const summaries = h.provider.calls.filter((c) => c.req.system?.includes('GOAL:') === true);
+      expect(summaries.length).toBeGreaterThan(0);
+      expect(JSON.stringify(summaries.map((c) => c.req.messages))).not.toContain('job x ended');
+      expect(JSON.stringify(h.provider.calls.at(-1)?.req.messages)).toContain(
+        '<agent-note>job x ended</agent-note>',
       );
     });
 

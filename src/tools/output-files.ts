@@ -22,7 +22,7 @@ const LINE_BUFFER_BYTES = 64 * 1024;
 const NEWLINE = 0x0a;
 
 // Fixed names, so nothing that comes from a provider or a command ends up in a path.
-export type OutputLabel = 'bash-stdout' | 'bash-stderr' | 'git' | 'git-stderr' | 'delegate';
+export type OutputLabel = 'bash-stdout' | 'bash-stderr' | 'git' | 'git-stderr' | 'delegate' | 'job';
 
 export interface OutputFileSystem {
   mkdtempSync(prefix: string): string;
@@ -64,8 +64,15 @@ export interface FinishOptions {
 }
 
 export interface OutputSpool {
+  // Creates the first file at once, so its path exists before any output, for a log read while
+  // it grows. False when it could not be created; snapshot gives the reason. An exhausted limit
+  // does not prevent it: the file stays empty and the first write records why.
+  start(): boolean;
   // Never throws: a failure to save stops saving and is reported by finish.
   push(chunk: Buffer): void;
+  // What has been saved so far, without finishing. An incomplete last line is still in memory
+  // and not in the files yet.
+  snapshot(): SavedOutput;
   // Only the first call has an effect; later calls return the same result. Null when nothing was
   // saved: keep was false or the output was empty.
   finish(options: FinishOptions): SavedOutput | null;
@@ -170,6 +177,23 @@ class Spool implements OutputSpool {
     private readonly label: OutputLabel,
     private readonly thresholdBytes: number,
   ) {}
+
+  start(): boolean {
+    if (this.finished || this.stopReason !== undefined) return false;
+    if (this.opened) return true;
+    this.opened = true;
+    return this.openPart();
+  }
+
+  snapshot(): SavedOutput {
+    return {
+      parts: [...this.parts],
+      savedBytes: this.saved,
+      receivedBytes: this.received,
+      ...(this.stopReason === undefined ? {} : { stopReason: this.stopReason }),
+      ...(this.binary ? { binary: true } : {}),
+    };
+  }
 
   push(chunk: Buffer): void {
     if (this.finished || chunk.length === 0) return;
@@ -417,8 +441,12 @@ const quoted = (text: string): string => `\`${text}\``;
 
 // The line naming where the complete output of a reduced result is, for the model. Paths are
 // quoted, so punctuation after them is not taken as part of the path. `subject` names the output,
-// such as stdout.
-export const describeSavedOutput = (saved: SavedOutput, subject = 'output'): string => {
+// such as stdout. A `growing` output is still being written, so it is never called complete.
+export const describeSavedOutput = (
+  saved: SavedOutput,
+  subject = 'output',
+  options: { growing?: boolean } = {},
+): string => {
   const first = saved.parts[0];
   const last = saved.parts.at(-1);
   if (first === undefined || last === undefined) {
@@ -434,6 +462,10 @@ export const describeSavedOutput = (saved: SavedOutput, subject = 'output'): str
       ? 'read it with read_file or search it with grep'
       : `read each part with read_file, or search all of them with grep (path ${quoted(dirname(first))}, glob ${quoted(partGlob(first))})`;
   const size = formatBytes(saved.savedBytes);
+  if (options.growing === true) {
+    const stopped = saved.stopReason === undefined ? '' : `; saving stopped: ${saved.stopReason}`;
+    return `[${subject} so far (${size}) ${where}${stopped}; ${hint}]`;
+  }
   if (saved.stopReason !== undefined) {
     const interrupted =
       saved.interrupted === undefined ? '' : `; the capture also ended early: ${saved.interrupted}`;
@@ -463,4 +495,11 @@ export const finishOutput = (
 // The files of this process, removed when it exits.
 export const outputFiles = new OutputFiles();
 
-export const removeOutputFiles = (): void => outputFiles.removeAll();
+// Logs of background jobs, with a limit of their own, so a verbose job does not use up the room
+// for tool output.
+export const jobLogs = new OutputFiles({ totalLimitBytes: 256 * 1024 * 1024 });
+
+export const removeOutputFiles = (): void => {
+  outputFiles.removeAll();
+  jobLogs.removeAll();
+};

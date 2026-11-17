@@ -195,6 +195,28 @@ describe('saved output', () => {
   }, 30_000);
 });
 
+describe('background jobs', () => {
+  test('a job still running when the task ends is stopped on exit, and its log removed', async () => {
+    const tmp = tempDir();
+    const sleep = uniqueSleep();
+    let started = '';
+    server.handle((request) => {
+      const results = toolMessages(request);
+      if (results.length === 0) {
+        return { toolCalls: [{ name: 'bash_background', args: { command: `echo up; ${sleep}` } }] };
+      }
+      started = results[0]?.content ?? '';
+      return { text: 'done' };
+    });
+    const cli = startCli(['run it'], { env: cliEnv(server, { TMPDIR: tmp }), cwd: tempDir() });
+    const { code } = await cli.finished;
+    expect(code).toBe(0);
+    expect(started).toStartWith('Started background job ');
+    expect(processRunning(sleep)).toBe(false);
+    expect(readdirSync(tmp)).toEqual([]);
+  }, 30_000);
+});
+
 describe('readonly mode', () => {
   test('a write or a command requested by the model is refused and has no effect', async () => {
     const cwd = tempDir();
