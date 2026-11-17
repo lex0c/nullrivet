@@ -1,5 +1,6 @@
 import type { AgentEvent } from '../agent/events.ts';
 import { stripAnsi } from '../sanitize/ansi.ts';
+import { readFileDiff } from '../tools/line-diff.ts';
 import { errorSummary, toolSubject } from '../tui/tool-labels.ts';
 
 export interface OutputSink {
@@ -12,9 +13,22 @@ export interface OutputSink {
 export const NDJSON_VERSION = 1;
 
 // stdout carries only NDJSON so it can be piped into another program; every line is one event.
+// The diff of an edit or write holds lines of the file, among them lines the model never read,
+// such as the content a write replaced. NDJSON often ends up in build logs, so it carries only
+// the counts.
+const withoutDiffLines = (event: AgentEvent): AgentEvent => {
+  if (event.type !== 'tool:end' || event.meta?.diff === undefined) return event;
+  const { diff: _, ...meta } = event.meta;
+  const diff = readFileDiff(event.meta);
+  return {
+    ...event,
+    meta: diff === null ? meta : { ...meta, diff: { added: diff.added, removed: diff.removed } },
+  };
+};
+
 export const createJsonSink = (write: (line: string) => void): OutputSink => ({
   event(event) {
-    write(`${JSON.stringify({ v: NDJSON_VERSION, ...event })}\n`);
+    write(`${JSON.stringify({ v: NDJSON_VERSION, ...withoutDiffLines(event) })}\n`);
   },
   notice(level, message) {
     write(`${JSON.stringify({ v: NDJSON_VERSION, type: level, message })}\n`);
@@ -34,6 +48,7 @@ export const createPlainSink = (options: PlainSinkOptions): OutputSink => {
   // Grey rather than faint, which many xterm configurations draw as plain text.
   const grey = (s: string): string => (options.color ? `\x1b[90m${s}\x1b[39m` : s);
   const red = (s: string): string => (options.color ? `\x1b[31m${s}\x1b[39m` : s);
+  const green = (s: string): string => (options.color ? `\x1b[32m${s}\x1b[39m` : s);
   const yellow = (s: string): string => (options.color ? `\x1b[33m${s}\x1b[39m` : s);
   let lineOpen = false;
   const closeLine = (): void => {
@@ -60,9 +75,17 @@ export const createPlainSink = (options: PlainSinkOptions): OutputSink => {
         case 'tool:start':
           diagnostic(grey(`› ${event.name} ${toolSubject(event.name, event.args)}`));
           return;
-        case 'tool:end':
-          if (event.isError) diagnostic(red(`  ✗ ${errorSummary(event.content, 200)}`));
+        case 'tool:end': {
+          if (event.isError) {
+            diagnostic(red(`  ✗ ${errorSummary(event.content, 200)}`));
+            return;
+          }
+          const diff = readFileDiff(event.meta);
+          if (diff !== null && diff.added + diff.removed > 0) {
+            diagnostic(`  ${green(`+${diff.added}`)} ${red(`-${diff.removed}`)}`);
+          }
           return;
+        }
         case 'context:compact':
           diagnostic(
             grey(

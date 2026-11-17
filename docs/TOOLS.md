@@ -116,6 +116,11 @@ Creates or replaces a file with the given content.
   synced and renamed over the target. A failure never leaves a half-written file.
 - The file mode is preserved. Writing to a symlink writes to its target.
 - Refused: directories, special files and content over 10 MiB.
+- **Diff for display.** The result's `meta.diff` holds the counts of added and removed lines and
+  the first changed region, which the interface shows under the call. The model does not see it.
+  There is no diff when the previous content is binary, unreadable or over 10 MiB; the write does
+  not depend on it. The diff is computed before the write, so a failure in it cannot report a
+  write that happened as failed.
 
 ## edit_file
 
@@ -141,6 +146,20 @@ Applies text replacements to an existing file.
 - **Encoding.** A leading UTF-8 byte order mark is preserved. Files that are binary, not valid
   UTF-8 or over 10 MiB are refused rather than rewritten.
 - `$` sequences in `new_string` are written literally.
+- **Diff for display.** As with `write_file`, the result's `meta.diff` holds the lines the edits
+  changed, for the interface only.
+- **Diff format.** `added` and `removed` count lines over the whole file: the fewest lines removed
+  and added that turn the old content into the new one. `snippet` is the first changed region
+  with up to two unchanged lines around it, at most ten lines, each with its `type` (`add`,
+  `del`, `ctx`), its `text` (cut at 500 characters) and its 1-based `oldLine` and `newLine`.
+  `hiddenChanges` counts the changed lines left out of the snippet.
+- **Diff limits.** The diff runs on the event loop after each call, so its cost is bounded. The
+  unchanged start and end of the file are set aside first. A region between the first and the
+  last change of more than 200 000 lines, counting both sides, or one with changes too many and
+  too spread out to compare within a fixed number of steps, counts as removed and added whole.
+- **Diff in NDJSON.** The lines of a diff can include content the model never read, such as the
+  content `write_file` replaced. In `--json` output, `meta.diff` carries only `added` and
+  `removed`.
 
 ## bash
 

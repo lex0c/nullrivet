@@ -33,7 +33,11 @@ slash commands ─────────┘        └──> permanent items 
   running in the background, with its current step and tool, the pending answer, one card per
   running tool, a phase indicator, the input box, the command list and the status lines.
   Subagent rows stay while no turn runs, since a subagent outlives the turn that started it.
-  `src/tui/permanent.ts` formats the scrollback items.
+  `src/tui/permanent.ts` formats the scrollback items. The card of an `edit_file` or
+  `write_file` call shows the counts of added and removed lines in its head and, under it, the
+  first changed region with line numbers. File content, command lines and messages from tools and
+  providers have escape sequences, control bytes and Unicode bidirectional controls removed
+  before they are drawn, so a row shows the characters it holds, in their order.
 - **Screen** (`src/tui/screen.ts`): draws frames; it knows nothing about the agent.
 - **Controller** (`src/cli/repl.ts`): wires the terminal, the keys, the agent and the commands
   together and schedules redraws at up to 30 frames per second.

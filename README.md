@@ -262,7 +262,7 @@ nullrivet --json --permission readonly "List the TODOs in src" | jq -c 'select(.
 | `text:delta` | `text`; separate text blocks of one response are joined by a blank line |
 | `thinking:delta` | `text` |
 | `tool:start` | `id`, `name`, `args`, `step` (the model request of the turn that made the call) |
-| `tool:end` | `id`, `name`, `content`, `isError`, `meta` |
+| `tool:end` | `id`, `name`, `content`, `isError`, `meta`; for `edit_file` and `write_file`, `meta.diff` holds the counts of lines `added` and `removed`, without the lines themselves (see [docs/TOOLS.md](docs/TOOLS.md#edit_file)) |
 | `usage` | `input`, `output`, `cacheRead`, `cacheWrite` (tokens of one model request); `compaction: true` for a summary request |
 | `context:compact:start` | `reason` (`auto`, `manual`, `overflow`) |
 | `context:compact` | `reason`, `strategy` (`llm`, `fallback`), `before`, `after` (estimated tokens) |

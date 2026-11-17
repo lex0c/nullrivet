@@ -61,6 +61,17 @@ describe('editFileTool: single edit', () => {
       totalReplacements: 1,
       bytesWritten: Buffer.byteLength('const x = 42;\nconst y = 2;\n'),
       written: true,
+      // For the user only: what the edit changed.
+      diff: {
+        added: 1,
+        removed: 1,
+        snippet: [
+          { type: 'del', text: 'const x = 1;', oldLine: 1 },
+          { type: 'add', text: 'const x = 42;', newLine: 1 },
+          { type: 'ctx', text: 'const y = 2;', oldLine: 2, newLine: 2 },
+        ],
+        hiddenChanges: 0,
+      },
     });
     expect(out.touchedPaths).toEqual([path]);
     expect(text(path)).toBe('const x = 42;\nconst y = 2;\n');
