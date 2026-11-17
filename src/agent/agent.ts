@@ -191,6 +191,12 @@ export const nextNotices = (
 
 export const createAgent = async (options: AgentOptions): Promise<Agent> => {
   const conversation = new Conversation();
+  // The limits of each task, which apply to each subagent too.
+  const maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS;
+  const timeLimitMs =
+    options.timeLimitMs === undefined
+      ? undefined
+      : Math.min(options.timeLimitMs, MAX_TIME_LIMIT_MS);
   const subagents =
     options.delegation !== true
       ? null
@@ -201,6 +207,8 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
           tools: options.tools,
           instructions: options.instructions,
           stallMs: options.stallMs ?? DEFAULT_STALL_MS,
+          maxSteps,
+          timeLimitMs,
           isGitRepo: isInsideGitRepo,
         });
   const delegate = subagents === null ? [] : [createDelegateTool(subagents)];
@@ -230,7 +238,7 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
       platform: process.platform,
       date: localDate(),
       isGitRepo,
-      delegation: delegate.length > 0,
+      ...(subagents === null ? {} : { delegation: { maxRunning: subagents.maxRunning } }),
     });
   // Rendered when the instructions are loaded, not for every request.
   let projectContextText = renderProjectContext(bootInstructions);
@@ -241,10 +249,6 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
     if (running) throw new Error('the agent is already running a turn');
     running = true;
     const external = runOptions.signal ?? new AbortController().signal;
-    const timeLimitMs =
-      options.timeLimitMs === undefined
-        ? undefined
-        : Math.min(options.timeLimitMs, MAX_TIME_LIMIT_MS);
     const deadline = timeLimitMs === undefined ? null : new AbortController();
     const timer =
       deadline === null
@@ -253,7 +257,7 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
     const signal = deadline === null ? external : AbortSignal.any([external, deadline.signal]);
     try {
       const limits: LoopLimits = {
-        maxSteps: options.maxSteps ?? DEFAULT_MAX_STEPS,
+        maxSteps,
         maxOutputTokens: contextBudget(agent.provider.capabilities).maxOutput,
         stallMs: options.stallMs ?? DEFAULT_STALL_MS,
       };

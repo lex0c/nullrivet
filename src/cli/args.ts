@@ -41,8 +41,9 @@ Options:
   -C, --cwd <dir>             Starting directory (does not restrict file access)
       --json                  Emit agent events as NDJSON on stdout
       --no-agents             Do not load AGENTS.md project instructions
-      --max-steps <n>         Maximum model requests per task
-      --timeout <time>        Time limit per task: 90s, 30m, 2h (seconds without a unit)
+      --max-steps <n>         Maximum model requests per task and per subagent
+      --timeout <time>        Time limit per task and per subagent: 90s, 30m, 2h (seconds
+                              without a unit)
       --session <file>        Save the conversation to this file, continuing it if it exists
       --context-window <n>    Override the model context window
       --max-output <n>        Override the model output token limit

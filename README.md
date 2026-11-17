@@ -104,8 +104,8 @@ it until end of file, so programs that start nullrivet without piping anything s
 | `-C, --cwd <dir>` | Starting directory for relative paths, commands and `AGENTS.md` lookup. It does not restrict file access. |
 | `--json` | Emit agent events as NDJSON on stdout. |
 | `--no-agents` | Do not load `AGENTS.md` files. |
-| `--max-steps <n>` | Maximum number of model requests for the task (default 200). |
-| `--timeout <time>` | Time limit for the task: `90s`, `30m`, `2h`, or seconds without a unit, at most `596h`. Exit code 3 when reached. No limit by default. |
+| `--max-steps <n>` | Maximum number of model requests for the task, and for each subagent (default 200). |
+| `--timeout <time>` | Time limit for the task, and for each subagent from when it starts running: `90s`, `30m`, `2h`, or seconds without a unit, at most `596h`. Exit code 3 when reached. No limit by default. |
 | `--session <file>` | Save the conversation to this file and continue it if the file already holds one. See [Sessions](#sessions). |
 | `--context-window <n>` | Override the model's context window, in tokens. |
 | `--max-output <n>` | Override the model's output token limit. |
@@ -127,8 +127,8 @@ Flags take precedence over environment variables, which take precedence over the
 | `NULLRIVET_MODEL` | Default model id. |
 | `NULLRIVET_EFFORT` | Default reasoning effort. |
 | `NULLRIVET_PERMISSION` | Default execution mode. |
-| `NULLRIVET_MAX_STEPS` | Default step limit. |
-| `NULLRIVET_TIMEOUT` | Default time limit per task. |
+| `NULLRIVET_MAX_STEPS` | Default step limit, per task and per subagent. |
+| `NULLRIVET_TIMEOUT` | Default time limit per task and per subagent. |
 | `NULLRIVET_<FAMILY>_BASE_URL` | Endpoint of a provider family, e.g. `NULLRIVET_OPENAI_BASE_URL`. |
 
 Provider-specific settings are listed in [docs/MODELS.md](docs/MODELS.md).
@@ -232,7 +232,7 @@ in a container or VM for risky work ([trust boundaries](docs/ARCHITECTURE.md#tru
 Building, testing and git operations that change state go through `bash`. Background jobs run
 until they end, are stopped, or nullrivet exits, and the model is told when one ends or becomes
 ready. A subagent starts with an empty conversation, the same model and the read tools only. It
-runs in the background, up to three at once, while the main agent keeps working, and its report
+runs in the background, up to four at once, while the main agent keeps working, and its report
 reaches the model as data when it ends. Details: [docs/TOOLS.md](docs/TOOLS.md), [subagents](docs/ARCHITECTURE.md#subagents).
 
 ## Project instructions

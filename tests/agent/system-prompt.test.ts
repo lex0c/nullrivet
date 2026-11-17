@@ -9,7 +9,7 @@ const prompt = (mode: 'auto' | 'readonly', role: 'main' | 'subagent' = 'main'): 
     date: '2026-01-02',
     isGitRepo: true,
     role,
-    delegation: role === 'main',
+    ...(role === 'main' ? { delegation: { maxRunning: 4 } } : {}),
   });
 
 describe('buildSystemPrompt', () => {
@@ -25,6 +25,11 @@ describe('buildSystemPrompt', () => {
     expect(readonly).toContain('Use read_file, glob and grep');
     const auto = prompt('auto');
     for (const name of ['edit_file', 'bash']) expect(auto).toContain(name);
+  });
+
+  test('the delegation section states how many subagents run at once, and only for the main agent', () => {
+    expect(prompt('auto')).toContain('up to 4 run at once and the others wait');
+    expect(prompt('auto', 'subagent')).not.toContain('# Delegation');
   });
 
   test('the text before the mode section is the same in both modes', () => {

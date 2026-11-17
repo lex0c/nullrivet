@@ -9,7 +9,7 @@ import type { AgentEvent, PendingEventSource } from '../../src/agent/events.ts';
 import {
   createDelegateTool,
   describeSubagentEvent,
-  SUBAGENT_MAX_STEPS,
+  MAX_RUNNING_SUBAGENTS,
   type SubagentEvent,
   SubagentLimitError,
   SubagentRegistry,
@@ -72,6 +72,9 @@ const fakeTool = (name: string, effect: ToolEffect): Tool => ({
   },
 });
 
+// The session's step limit in these tests; subagents take the session's limits.
+const MAX_STEPS = 12;
+
 const runtimeFor = (
   provider: ReturnType<typeof routedProvider>,
   overrides: Partial<SubagentRuntime> = {},
@@ -82,6 +85,8 @@ const runtimeFor = (
   tools: [fakeTool('read_file', 'read')],
   instructions: null,
   stallMs: 5_000,
+  maxSteps: MAX_STEPS,
+  timeLimitMs: undefined,
   isGitRepo: async () => false,
   ...overrides,
 });
@@ -284,7 +289,7 @@ describe('subagent registry', () => {
       await held(never, signal);
       return textTurn('never');
     });
-    const timed = new SubagentRegistry(runtimeFor(provider), { maxRuntimeMs: 50 });
+    const timed = new SubagentRegistry(runtimeFor(provider, { timeLimitMs: 50 }));
     timed.start(spec);
     expect(await waitUntil(() => timed.hasPendingEvents())).toBe(true);
     expect(drain(timed)[0]).toMatchObject({ status: 'budget', reason: 'time_limit' });
@@ -444,7 +449,7 @@ describe('subagent registry', () => {
     registry.start(spec);
     expect(await waitUntil(() => registry.hasPendingEvents(), 10_000)).toBe(true);
     const [event] = drain(registry);
-    expect(event).toMatchObject({ status: 'completed', steps: SUBAGENT_MAX_STEPS });
+    expect(event).toMatchObject({ status: 'completed', steps: MAX_STEPS });
     expect(event?.report).toBe('final report');
   });
 
@@ -456,12 +461,14 @@ describe('subagent registry', () => {
       await Bun.sleep(40);
       return toolTurn([{ id: `r${req.messages.length}`, name: 'read_file', args: {} }]);
     });
-    const registry = new SubagentRegistry(runtimeFor(provider), { maxRuntimeMs: 1_000 });
+    const registry = new SubagentRegistry(
+      runtimeFor(provider, { maxSteps: 200, timeLimitMs: 1_000 }),
+    );
     registry.start(spec);
     expect(await waitUntil(() => registry.hasPendingEvents())).toBe(true);
     const [event] = drain(registry);
     expect(event).toMatchObject({ status: 'completed', report: 'final report' });
-    expect(event?.steps).toBeLessThan(SUBAGENT_MAX_STEPS);
+    expect(event?.steps).toBeLessThan(200);
   });
 
   test('a listener that throws is reported apart, and the run ends and reports as usual', async () => {
@@ -504,7 +511,53 @@ describe('subagent registry', () => {
 });
 
 describe('the agent and its subagents', () => {
-  // Four delegate calls in one response: three run and one waits, until they are cancelled.
+  test("a subagent takes the session's step and time limits, and the tool states them", async () => {
+    let parentCalls = 0;
+    // When set, the subagent's second request never answers, so only a time limit ends it.
+    let holdSecondStep = false;
+    const provider = routedProvider(async (req, signal) => {
+      if (isChild(req)) {
+        if (holdSecondStep && req.messages.length > 1) await held(never, signal);
+        return toolTurn([{ id: `r${req.messages.length}`, name: 'read_file', args: {} }]);
+      }
+      parentCalls += 1;
+      return parentCalls === 1 ? toolTurn([delegateCall('d1')]) : textTurn('done');
+    });
+    const make = (limits: { maxSteps: number; timeLimitMs?: number }) =>
+      createAgent({
+        provider,
+        tools: [fakeTool('read_file', 'read')],
+        mode: 'auto',
+        cwd: '/tmp',
+        instructions: null,
+        delegation: true,
+        ...limits,
+      });
+    const describeDelegate = (): string =>
+      provider.calls[0]?.req.tools?.find((t) => t.name === 'delegate')?.description ?? '';
+
+    // The subagent keeps calling tools, so it stops at the step limit.
+    const stepped = await make({ maxSteps: 2 });
+    await stepped.run('go');
+    expect(describeDelegate()).toContain('at most 2 steps, and cannot delegate further');
+    expect(await waitUntil(() => stepped.hasBackgroundEvents())).toBe(true);
+    await stepped.runOnBackgroundEvents();
+    expect(JSON.stringify(stepped.conversation.messages())).toContain('budget (step_limit)');
+
+    holdSecondStep = true;
+    parentCalls = 0;
+    provider.calls.length = 0;
+    const timed = await make({ maxSteps: 200, timeLimitMs: 1_000 });
+    await timed.run('go');
+    expect(describeDelegate()).toContain('at most 200 steps and 1s, and cannot delegate further');
+    expect(await waitUntil(() => timed.hasBackgroundEvents())).toBe(true);
+    await timed.runOnBackgroundEvents();
+    expect(JSON.stringify(timed.conversation.messages())).toContain('budget (time_limit)');
+  });
+
+  // One delegate call more than the running limit, in one response: one waits, until they are
+  // all cancelled.
+  const HELD = MAX_RUNNING_SUBAGENTS + 1;
   const agentWithHeldChildren = async () => {
     let parentCalls = 0;
     const provider = routedProvider(async (req, signal) => {
@@ -514,7 +567,7 @@ describe('the agent and its subagents', () => {
       }
       parentCalls += 1;
       return parentCalls === 1
-        ? toolTurn(['d1', 'd2', 'd3', 'd4'].map((id) => delegateCall(id)))
+        ? toolTurn(Array.from({ length: HELD }, (_, i) => delegateCall(`d${i + 1}`)))
         : textTurn('done');
     });
     const agent = await createAgent({
@@ -531,9 +584,9 @@ describe('the agent and its subagents', () => {
 
   test('cancelling stops running and queued subagents, and each reports that', async () => {
     const agent = await agentWithHeldChildren();
-    expect(agent.runningSubagents()).toBe(4);
-    expect(agent.backgroundStarts()).toBe(4);
-    expect(agent.cancelSubagents()).toBe(4);
+    expect(agent.runningSubagents()).toBe(HELD);
+    expect(agent.backgroundStarts()).toBe(HELD);
+    expect(agent.cancelSubagents()).toBe(HELD);
     // Those already stopped are not counted again while they wind down.
     expect(agent.cancelSubagents()).toBe(0);
     expect(await waitUntil(() => agent.runningSubagents() === 0)).toBe(true);
@@ -542,7 +595,7 @@ describe('the agent and its subagents', () => {
     await agent.runOnBackgroundEvents();
     expect(
       JSON.stringify(agent.conversation.messages()).match(/ cancelled \(cancelled\)/g),
-    ).toHaveLength(4);
+    ).toHaveLength(HELD);
   });
 
   test('clear stops the subagents and forgets their reports', async () => {

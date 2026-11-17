@@ -338,17 +338,19 @@ only reads: the main agent is the only one that changes files or runs commands.
 - **Registry.** `SubagentRegistry` owns the runs, as `JobRegistry` owns the jobs; the agent only
   combines the two. `delegate` registers a run and returns its id at once. Ids are a random
   prefix of the registry and a counter, so an id in a resumed conversation never names a run of
-  another process. Three runs make progress at once; up to 16 more wait for a slot in order, and
+  another process. Four runs make progress at once; up to 16 more wait for a slot in order, and
   beyond that `delegate` is refused. The registry owns each run's promise, which never rejects: an
   exception becomes a `failed` outcome, the slot is always released, and the outcome is recorded
   once. An activity listener that throws is reported apart, as an uncaught error, so it changes
   neither the outcome nor the bookkeeping. A run cancelled just as a slot is handed to it gives
   the slot back without starting.
-- **Limits.** 40 steps and 5 minutes from when it starts running. The deadline aborts with the
-  same reason as `--timeout`, so the loop reports a limit, not a cancellation. Before its last
-  step, a runtime note asks for the report without more tool calls. After four fifths of the time,
-  the loop makes the step in progress the last one (`finalStepAt`), so a run that is about to time
-  out still writes its report. The loop returns which limit ended a turn (`limit` in the result),
+- **Limits.** The session's limits for a task, `--max-steps` and `--timeout`, apply to each run,
+  the time counted from when it starts running; without a `--timeout`, a run has only the step
+  limit and the stall watchdog of each request. The deadline aborts with the same reason as
+  `--timeout`, so the loop reports a limit, not a cancellation. Before its last step, a runtime note
+  asks for the report without more tool calls. After four fifths of the time limit, the loop makes
+  the step in progress the last one (`finalStepAt`), so a run that is about to time out still
+  writes its report. The loop returns which limit ended a turn (`limit` in the result),
   and the reason in the note comes from it, never from the text of the loop's message.
 - **Cancellation.** Each run has its own signal, independent of the turn that started it.
   Interrupting a turn, `Esc` on an idle session and exiting cancel every run, running or

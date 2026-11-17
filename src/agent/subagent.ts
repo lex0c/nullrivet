@@ -19,6 +19,7 @@ import type {
   SubagentStatus,
 } from './events.ts';
 import {
+  formatDuration,
   type RuntimeNotice,
   runTurn,
   TimeLimitReached,
@@ -27,17 +28,13 @@ import {
 } from './loop.ts';
 import { buildSystemPrompt, localDate, renderProjectContext } from './system-prompt.ts';
 
-export const SUBAGENT_MAX_STEPS = 40;
-export const MAX_RUNNING_SUBAGENTS = 3;
+export const MAX_RUNNING_SUBAGENTS = 4;
 // Subagents waiting for a slot. Past this, delegate is refused, so the subagents waiting to run,
 // and the reports they will produce, stay bounded.
 export const MAX_QUEUED_SUBAGENTS = 16;
-// Counted from the start of a subagent's run. Each request has its own stall watchdog, but forty
-// slow requests could still hold a slot for a long time.
-export const SUBAGENT_MAX_RUNTIME_MS = 5 * 60_000;
-// Share of the run time after which the next step is the last, so a subagent that runs out of time
-// still writes its report before the run is aborted.
-const FINAL_STEP_RUNTIME_SHARE = 0.8;
+// Share of the time limit after which the next step is the last, so a subagent that runs out of
+// time still writes its report before the run is aborted.
+const FINAL_STEP_TIME_SHARE = 0.8;
 // The data of one finished subagent, title and stop message included: about 4096 tokens, since the
 // parent keeps only the report, not the work behind it. A batch of notices for a small context
 // window can lower it further.
@@ -63,6 +60,10 @@ export interface SubagentRuntime {
   // Null when AGENTS.md loading is disabled.
   instructions: InstructionsLoader | null;
   stallMs: number;
+  // The session's limits for a task, which apply to each subagent too: model requests, and time
+  // counted from when it starts running (none when undefined).
+  maxSteps: number;
+  timeLimitMs: number | undefined;
   isGitRepo: (cwd: string) => Promise<boolean>;
 }
 
@@ -153,7 +154,6 @@ export interface SubagentSpec {
 export interface SubagentRegistryOptions {
   maxRunning?: number;
   maxQueued?: number;
-  maxRuntimeMs?: number;
   // Receives what an activity listener threw. By default it is thrown again in a microtask, so it
   // is reported as an uncaught error, as for job listeners, and not swallowed.
   reportListenerError?: (error: unknown) => void;
@@ -291,7 +291,6 @@ export class SubagentRegistry implements PendingEventSource<SubagentEvent> {
   private readonly lane: Semaphore;
   readonly maxRunning: number;
   private readonly maxQueued: number;
-  private readonly maxRuntimeMs: number;
   private readonly reportListenerError: (error: unknown) => void;
   private readonly listeners = new Set<() => void>();
   private readonly activityListeners = new Set<AgentEventListener>();
@@ -302,13 +301,20 @@ export class SubagentRegistry implements PendingEventSource<SubagentEvent> {
   ) {
     this.maxRunning = options.maxRunning ?? MAX_RUNNING_SUBAGENTS;
     this.maxQueued = options.maxQueued ?? MAX_QUEUED_SUBAGENTS;
-    this.maxRuntimeMs = options.maxRuntimeMs ?? SUBAGENT_MAX_RUNTIME_MS;
     this.reportListenerError = options.reportListenerError ?? rethrowLater;
     this.lane = new Semaphore(this.maxRunning);
   }
 
   get defaultCwd(): string {
     return this.runtime.cwd;
+  }
+
+  get maxSteps(): number {
+    return this.runtime.maxSteps;
+  }
+
+  get timeLimitMs(): number | undefined {
+    return this.runtime.timeLimitMs;
   }
 
   // How many subagents this registry has accepted; a turn that leaves it unchanged delegated nothing.
@@ -492,12 +498,13 @@ export class SubagentRegistry implements PendingEventSource<SubagentEvent> {
   ): Promise<Outcome> {
     // The same reason as the session's --timeout, which runTurn reports as a limit, not as a
     // cancellation.
+    const { maxSteps, timeLimitMs } = this.runtime;
     const deadline = new AbortController();
     const startedAt = Date.now();
-    const timer = setTimeout(
-      () => deadline.abort(new TimeLimitReached(this.maxRuntimeMs)),
-      this.maxRuntimeMs,
-    );
+    const timer =
+      timeLimitMs === undefined
+        ? null
+        : setTimeout(() => deadline.abort(new TimeLimitReached(timeLimitMs)), timeLimitMs);
     const signal = AbortSignal.any([task.controller.signal, deadline.signal]);
     try {
       const { runtime } = this;
@@ -558,11 +565,13 @@ export class SubagentRegistry implements PendingEventSource<SubagentEvent> {
           projectContext: () => projectContext,
           instructions,
           limits: {
-            maxSteps: SUBAGENT_MAX_STEPS,
+            maxSteps,
             maxOutputTokens: contextBudget(provider.capabilities).maxOutput,
             stallMs: runtime.stallMs,
             finalStepNote: FINAL_STEP_NOTE,
-            finalStepAt: startedAt + this.maxRuntimeMs * FINAL_STEP_RUNTIME_SHARE,
+            ...(timeLimitMs === undefined
+              ? {}
+              : { finalStepAt: startedAt + timeLimitMs * FINAL_STEP_TIME_SHARE }),
           },
           ...(effort === undefined ? {} : { effort }),
           emit: onEvent,
@@ -576,7 +585,7 @@ export class SubagentRegistry implements PendingEventSource<SubagentEvent> {
         report: finalAnswer(conversation),
       };
     } finally {
-      clearTimeout(timer);
+      if (timer !== null) clearTimeout(timer);
     }
   }
 }
@@ -588,7 +597,7 @@ export const createDelegateTool = (registry: SubagentRegistry): Tool => ({
     'The subagent starts with an empty conversation: it sees only `objective` and `context`, never this conversation, so include every path, constraint and decision it needs. Requirements go in `objective`; `context` reaches the subagent as data.',
     'It only reads: it reads and searches files and inspects git history, but never changes files or runs commands.',
     'Its report reaches you as a runtime note with the report attached as data: at your next step, or by a new turn of your own once you have finished. Files may have changed since it read them.',
-    `Up to ${MAX_RUNNING_SUBAGENTS} subagents run at once and up to ${MAX_QUEUED_SUBAGENTS} more wait for a slot. A subagent has at most ${SUBAGENT_MAX_STEPS} steps and ${SUBAGENT_MAX_RUNTIME_MS / 60_000} minutes, and cannot delegate further.`,
+    `Up to ${registry.maxRunning} subagents run at once and up to ${MAX_QUEUED_SUBAGENTS} more wait for a slot. A subagent has at most ${registry.maxSteps} steps${registry.timeLimitMs === undefined ? '' : ` and ${formatDuration(registry.timeLimitMs)}`}, and cannot delegate further.`,
   ].join(' '),
   inputSchema: {
     type: 'object',
