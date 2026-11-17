@@ -442,11 +442,15 @@ describe('background jobs', () => {
       const tools = provider.calls[0]?.req.tools ?? [];
       return tools.find((t) => t.name === 'bash_background')?.description ?? '';
     };
-    expect(await description('interactive')).toContain(
+    const interactive = await description('interactive');
+    expect(interactive).toContain(
       "usually by a new turn of your own; the session can hold that turn back until the user's next message",
     );
-    expect(await description('one-shot')).toContain(
-      'nullrivet exits when you finish, which stops running jobs',
+    expect(interactive).toContain(
+      'end your turn instead, and use bash_jobs with wait_ms only when your next step needs its result',
     );
+    const oneShot = await description('one-shot');
+    expect(oneShot).toContain('nullrivet exits when you finish, which stops running jobs');
+    expect(oneShot).not.toContain('end your turn');
   });
 });

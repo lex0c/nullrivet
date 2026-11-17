@@ -91,6 +91,10 @@ describe('background jobs', () => {
   test('a job runs in the background and its log keeps stdout and stderr in order', async () => {
     const { id, result } = await start({ command: 'echo a; echo b >&2; echo c' });
     expect(result.content).toStartWith(`Started background job ${id} (pid `);
+    // The interactive session tells the model to end its turn rather than wait.
+    expect(result.content).toEndWith(
+      'You are told when it ends; if nothing else needs doing until then, end your turn instead of waiting for it.',
+    );
     const path = logPath(result.content);
     const shown = await call('bash_jobs', { id, wait_ms: 5_000 });
     expect(shown.content).toStartWith(`job ${id}: completed with exit code 0 after `);

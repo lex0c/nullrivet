@@ -567,9 +567,17 @@ export type JobSession = 'interactive' | 'one-shot';
 
 const NOTICE_DESCRIPTION: Record<JobSession, string> = {
   interactive:
-    "You are told when the job ends, and when its output first contains ready_pattern (such as a server's listening message): at your next step, or, once you have finished, usually by a new turn of your own; the session can hold that turn back until the user's next message. To block until then, use bash_jobs with wait_ms.",
+    "You are told when the job ends, and when its output first contains ready_pattern (such as a server's listening message): at your next step, or, once you have finished, usually by a new turn of your own; the session can hold that turn back until the user's next message. Waiting holds the session, and the user cannot send a message meanwhile: when nothing else needs doing until the job ends, end your turn instead, and use bash_jobs with wait_ms only when your next step needs its result.",
   'one-shot':
     "You are told at your next step when the job ends, and when its output first contains ready_pattern (such as a server's listening message); to block until then, use bash_jobs with wait_ms. nullrivet exits when you finish, which stops running jobs: wait for any result you still need before finishing.",
+};
+
+// The end of the bash_background result. In the interactive session, a model was seen waiting
+// minutes with bash_jobs for a job it only had to report, which held the session the whole time.
+const AFTER_START: Record<JobSession, string> = {
+  interactive:
+    ' You are told when it ends; if nothing else needs doing until then, end your turn instead of waiting for it.',
+  'one-shot': ' You are told when it ends.',
 };
 
 // The tools that start, inspect and stop the background jobs of one registry.
@@ -627,7 +635,7 @@ export const createJobTools = (registry: JobRegistry, session: JobSession): Tool
         readyPattern === undefined ? '' : ' You are told when ready_pattern appears in its output.';
       return {
         ...jobResult(
-          `Started background job ${job.id} (pid ${job.handle?.pid ?? 'unknown'}). ${logLine(job)}${ready} You are told when it ends.`,
+          `Started background job ${job.id} (pid ${job.handle?.pid ?? 'unknown'}). ${logLine(job)}${ready}${AFTER_START[session]}`,
           job,
         ),
         touchedPaths: [resolved.cwd],

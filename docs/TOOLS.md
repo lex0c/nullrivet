@@ -352,9 +352,12 @@ that had already ended is left as it was.
   The notes are also shown to the user, as `notice` events.
 - **Automatic continuation.** In the interactive session, an event that arrives while the session
   is idle starts a turn of its own, without a prompt: its first message is the runtime note. See
-  [TUI.md](TUI.md#automatic-continuation) for when it starts and stops. In one-shot mode nothing
-  starts on its own: the run ends with the task, so the description of `bash_background` tells the
-  model to wait with `bash_jobs` for any result it still needs.
+  [TUI.md](TUI.md#automatic-continuation) for when it starts and stops. A wait with `bash_jobs`
+  holds the session, so the user cannot send a message meanwhile: the description and the result
+  of `bash_background` tell the model to end its turn when nothing else needs doing, and to wait
+  only when its next step needs the job's result. In one-shot mode nothing starts on its own: the
+  run ends with the task, so the description of `bash_background` tells the model to wait with
+  `bash_jobs` for any result it still needs.
 - **Limits.** At most 8 jobs run at once. Finished jobs whose events were reported are forgotten
   beyond the 50 most recent.
 - **Errors.** `job.limit` when 8 jobs are running, `job.unknown` for an id this run does not have,

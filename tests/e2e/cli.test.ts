@@ -212,6 +212,8 @@ describe('background jobs', () => {
     const { code } = await cli.finished;
     expect(code).toBe(0);
     expect(started).toStartWith('Started background job ');
+    // A one-shot run must wait for what it needs before it ends, so it is not told to end its turn.
+    expect(started).not.toContain('end your turn');
     expect(processRunning(sleep)).toBe(false);
     expect(readdirSync(tmp)).toEqual([]);
   }, 30_000);
