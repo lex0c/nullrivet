@@ -119,12 +119,15 @@ describe('reduce', () => {
       ev({ type: 'warning', message: 'w' }),
       ev({ type: 'error', message: 'e' }),
       { type: 'notice', level: 'info', text: 'i' },
+      ev({ type: 'notice', text: 'Background job x completed' }),
     ]);
     expect(permanent.map((p) => (p.kind === 'notice' ? p.level : p.kind))).toEqual([
       'warning',
       'error',
       'info',
+      'info',
     ]);
+    expect(permanent.at(-1)).toMatchObject({ text: 'Background job x completed' });
   });
 
   test('typing disarms a pending exit', () => {

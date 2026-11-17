@@ -137,7 +137,7 @@ export const runCli = async (io: CliIO): Promise<number> => {
   const agent = await createAgent({
     provider: resolved.provider,
     tools: BUILTIN_TOOLS,
-    backgroundJobs: true,
+    backgroundJobs: interactive ? 'interactive' : 'one-shot',
     mode: config.mode,
     cwd,
     instructions: config.agentsMd ? new InstructionsLoader() : null,

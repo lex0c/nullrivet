@@ -290,11 +290,12 @@ const invalidToolCallFeedback = (errors: readonly CollectedError[]): string =>
     ].join('\n'),
   );
 
-// Runs one user turn: request, stream, execute tool calls, feed results back, until the model
-// answers without tool calls, the turn is aborted, or a limit is reached.
+// Runs one turn: request, stream, execute tool calls, feed results back, until the model answers
+// without tool calls, the turn is aborted, or a limit is reached. A null prompt starts a turn on
+// the pending runtime notices alone, such as background jobs that ended while the session was idle.
 // `input` is material the prompt refers to, such as piped stdin; it is sent as data.
 export const runTurn = async (
-  prompt: string,
+  prompt: string | null,
   deps: TurnDependencies,
   input?: string,
 ): Promise<TurnResult> => {
@@ -373,8 +374,23 @@ export const runTurn = async (
     return result === 'done' ? 'retry' : 'full';
   };
 
+  // Adds the pending runtime notices to the latest message, shows them, and returns how many.
+  const addNotices = (): number => {
+    const notices = deps.notices?.() ?? [];
+    for (const notice of notices) {
+      conversation.appendUser(agentNote(notice));
+      emit({ type: 'notice', text: notice });
+    }
+    return notices.length;
+  };
+
   emit({ type: 'agent:start' });
-  conversation.appendUser(prompt, input);
+  if (prompt !== null) {
+    conversation.appendUser(prompt, input);
+  } else if (addNotices() === 0) {
+    // Nothing to answer: the turn ends before any compaction or request reaches the provider.
+    return end('done');
+  }
 
   while (steps < limits.maxSteps) {
     if (signal.aborted) return end('aborted');
@@ -401,11 +417,7 @@ export const runTurn = async (
     // Notices go into the latest message, as text. A compaction keeps that message in its tail and
     // shortens only tool results there, so no compaction of this step can fold a notice into its
     // summary: the request carries each one as written.
-    const notices = deps.notices?.() ?? [];
-    if (notices.length > 0) {
-      for (const notice of notices) conversation.appendUser(agentNote(notice));
-      estimate = conversation.estimateTokens(shape);
-    }
+    if (addNotices() > 0) estimate = conversation.estimateTokens(shape);
     const minOutput = Math.min(MIN_OUTPUT_TOKENS, limits.maxOutputTokens);
     let maxTokens = outputBudget(estimate, deps.provider, limits.maxOutputTokens);
     if (maxTokens < minOutput) {

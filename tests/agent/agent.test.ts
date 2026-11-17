@@ -314,7 +314,7 @@ describe('background jobs', () => {
       mode: 'auto',
       cwd: '/tmp',
       instructions: null,
-      backgroundJobs: true,
+      backgroundJobs: 'interactive',
     });
     await agent.run('go');
     const [parent, child] = provider.calls.map((c) => c.req);
@@ -338,7 +338,7 @@ describe('background jobs', () => {
       mode: 'auto',
       cwd: '/tmp',
       instructions: null,
-      backgroundJobs: true,
+      backgroundJobs: 'interactive',
     });
     await agent.run('start it');
     agent.mode = 'readonly';
@@ -352,5 +352,101 @@ describe('background jobs', () => {
     }
     expect(last).toMatch(note);
     expect(offered(provider.calls.at(-1)?.req)).not.toContain('bash_jobs');
+  });
+
+  test('a turn on job events starts nothing when none are pending', async () => {
+    const provider = createMockProvider([]);
+    const agent = await createAgent({
+      provider,
+      tools: [],
+      mode: 'auto',
+      cwd: '/tmp',
+      instructions: null,
+      backgroundJobs: 'interactive',
+    });
+    expect(agent.hasJobEvents()).toBe(false);
+    expect(await agent.runOnJobEvents()).toBeNull();
+    expect(provider.calls).toHaveLength(0);
+  });
+
+  test('a job that ends is announced, and a turn without a prompt reports it', async () => {
+    const provider = createMockProvider([
+      toolTurn([{ id: 't1', name: 'bash_background', args: { command: 'echo hi' } }]),
+      textTurn('started'),
+      textTurn('noted'),
+    ]);
+    const agent = await createAgent({
+      provider,
+      tools: [],
+      mode: 'auto',
+      cwd: '/tmp',
+      instructions: null,
+      backgroundJobs: 'interactive',
+    });
+    let announced = 0;
+    agent.onJobEvent(() => {
+      announced += 1;
+    });
+    await agent.run('start it');
+    const deadline = Date.now() + 5_000;
+    while (!agent.hasJobEvents() && Date.now() < deadline) await Bun.sleep(20);
+    await Promise.resolve();
+    expect(announced).toBe(1);
+    expect((await agent.runOnJobEvents())?.reason).toBe('done');
+    expect(provider.calls.at(-1)?.req.messages.at(-1)).toMatchObject({ role: 'user' });
+    expect(String(provider.calls.at(-1)?.req.messages.at(-1)?.content)).toMatch(
+      /^<agent-note>Background job [0-9a-f]{16}-1 completed with exit code 0 after \S+\.[^<]*<\/agent-note>$/,
+    );
+    expect(agent.hasJobEvents()).toBe(false);
+  });
+
+  test('after clear, the events of jobs started before are not reported', async () => {
+    const provider = createMockProvider([
+      toolTurn([{ id: 't1', name: 'bash_background', args: { command: 'sleep 0.3' } }]),
+      textTurn('started'),
+    ]);
+    const agent = await createAgent({
+      provider,
+      tools: [],
+      mode: 'auto',
+      cwd: '/tmp',
+      instructions: null,
+      backgroundJobs: 'interactive',
+    });
+    let announced = 0;
+    agent.onJobEvent(() => {
+      announced += 1;
+    });
+    await agent.run('start it');
+    agent.clear();
+    const deadline = Date.now() + 5_000;
+    while (announced === 0 && Date.now() < deadline) await Bun.sleep(20);
+    expect(announced).toBe(1);
+    expect(agent.hasJobEvents()).toBe(false);
+    expect(await agent.runOnJobEvents()).toBeNull();
+    expect(provider.calls).toHaveLength(2);
+  });
+
+  test('the job tools tell the model what happens once it finishes', async () => {
+    const description = async (session: 'interactive' | 'one-shot'): Promise<string> => {
+      const provider = createMockProvider([textTurn('ok')]);
+      const agent = await createAgent({
+        provider,
+        tools: [],
+        mode: 'auto',
+        cwd: '/tmp',
+        instructions: null,
+        backgroundJobs: session,
+      });
+      await agent.run('go');
+      const tools = provider.calls[0]?.req.tools ?? [];
+      return tools.find((t) => t.name === 'bash_background')?.description ?? '';
+    };
+    expect(await description('interactive')).toContain(
+      "usually by a new turn of your own; the session can hold that turn back until the user's next message",
+    );
+    expect(await description('one-shot')).toContain(
+      'nullrivet exits when you finish, which stops running jobs',
+    );
   });
 });

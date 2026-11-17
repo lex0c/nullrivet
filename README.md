@@ -267,6 +267,7 @@ nullrivet --json --permission readonly "List the TODOs in src" | jq -c 'select(.
 | `subagent:start` | `id` (the delegate call id), `title`, `mode` |
 | `subagent:progress` | `id`, `step`, `tool` (`name`, `args`) |
 | `subagent:end` | `id`, `status` (`completed`, `failed`, `cancelled`, `budget`), `steps` |
+| `notice` | `text`: a runtime note added for the model, such as a background job that ended |
 | `warning` | `message` |
 | `error` | `message` |
 | `agent:end` | `reason` (`done`, `aborted`, `error`, `budget`), `message` |

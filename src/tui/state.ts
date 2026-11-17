@@ -256,6 +256,8 @@ const reduceAgentEvent = (state: TuiState, event: AgentEvent, now: number): Redu
     case 'subagent:start':
     case 'subagent:end':
       return { state, permanent: [] };
+    case 'notice':
+      return { state, permanent: [{ kind: 'notice', level: 'info', text: event.text }] };
     case 'warning':
       return { state, permanent: [{ kind: 'notice', level: 'warning', text: event.message }] };
     case 'error':

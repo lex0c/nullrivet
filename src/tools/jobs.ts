@@ -138,6 +138,8 @@ class Job {
     readonly cwd: string,
     readonly log: OutputSpool,
     readonly readyPattern: string | null,
+    // Called when an event (ready, finished) becomes pending.
+    private readonly announce: () => void,
   ) {}
 
   get status(): JobStatus {
@@ -165,6 +167,7 @@ class Job {
       this.readyAt = Date.now();
       this.readyCarry = Buffer.alloc(0);
       this.notify('ready');
+      this.announce();
       return;
     }
     const keep = Buffer.byteLength(this.readyPattern) - 1 + READY_ESCAPE_ROOM_BYTES;
@@ -197,6 +200,7 @@ class Job {
     this.finish = { at: Date.now(), status, exitCode, signal, log };
     this.notify('ready');
     this.notify('exit');
+    this.announce();
   }
 
   private notify(until: 'exit' | 'ready'): void {
@@ -275,8 +279,47 @@ export class JobRegistry {
   // Jobs between the check of the limit and their registration, which waits for the spawn; counted
   // so starts that overlap cannot pass the limit together.
   private starting = 0;
+  private readonly listeners = new Set<() => void>();
 
   constructor(private readonly logs: OutputFiles = jobLogs) {}
+
+  // Calls `listener` whenever an event becomes pending. It carries no event: the loop alone takes
+  // events, with drainEvents, and delivers them. Each call runs in a microtask of its own, after the
+  // job's state is recorded and only while the listener is still subscribed, so it never runs
+  // inside the handling of a process's end. Listeners must not throw; a listener that does is a bug
+  // and is reported as an uncaught error, not swallowed.
+  onEvent(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  hasPendingEvents(): boolean {
+    for (const job of this.jobs.values()) {
+      if (job.readyAt !== null && !job.readyDelivered) return true;
+      if (job.finish !== null && !job.finishDelivered) return true;
+    }
+    return false;
+  }
+
+  // Stops reporting the events of the current jobs, pending and future, because the conversation
+  // that started them was discarded. The jobs keep running, and bash_jobs still shows them.
+  dropEvents(): void {
+    for (const job of this.jobs.values()) {
+      job.readyDelivered = true;
+      job.finishDelivered = true;
+    }
+    this.prune();
+  }
+
+  private announce(): void {
+    for (const listener of this.listeners) {
+      queueMicrotask(() => {
+        if (this.listeners.has(listener)) listener();
+      });
+    }
+  }
 
   async start(options: JobStartOptions): Promise<Job> {
     if (this.running() + this.starting >= MAX_RUNNING_JOBS) {
@@ -309,6 +352,7 @@ export class JobRegistry {
       options.cwd,
       log,
       options.readyPattern ?? null,
+      () => this.announce(),
     );
     try {
       job.handle = await startProcess({
@@ -498,14 +542,25 @@ const untilArgument = (input: Record<string, unknown>): 'exit' | 'ready' | undef
   throw new InvalidArgumentError(`'until' must be exit or ready, got ${JSON.stringify(until)}`);
 };
 
+// How the session reacts to job events: an interactive session starts a turn on them once the
+// model has finished; a one-shot run exits when the model finishes, stopping its jobs.
+export type JobSession = 'interactive' | 'one-shot';
+
+const NOTICE_DESCRIPTION: Record<JobSession, string> = {
+  interactive:
+    "You are told when the job ends, and when its output first contains ready_pattern (such as a server's listening message): at your next step, or, once you have finished, usually by a new turn of your own; the session can hold that turn back until the user's next message. To block until then, use bash_jobs with wait_ms.",
+  'one-shot':
+    "You are told at your next step when the job ends, and when its output first contains ready_pattern (such as a server's listening message); to block until then, use bash_jobs with wait_ms. nullrivet exits when you finish, which stops running jobs: wait for any result you still need before finishing.",
+};
+
 // The tools that start, inspect and stop the background jobs of one registry.
-export const createJobTools = (registry: JobRegistry): Tool[] => [
+export const createJobTools = (registry: JobRegistry, session: JobSession): Tool[] => [
   {
     name: 'bash_background',
     description: [
       'Start a shell command in the background and return at once, for work that must keep running while you do other things: a dev server, a watcher, a long build or test run. For a command you can wait for, use bash.',
       'stdout and stderr go to one log file, named in the result, that grows as the job writes: read it with read_file and search it with grep.',
-      "You are told at your next step when the job ends, and when its output first contains ready_pattern (such as a server's listening message). To block until then, use bash_jobs with wait_ms.",
+      NOTICE_DESCRIPTION[session],
       `At most ${MAX_RUNNING_JOBS} jobs run at once. Jobs are stopped when nullrivet exits.`,
     ].join(' '),
     inputSchema: {

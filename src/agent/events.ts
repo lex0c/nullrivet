@@ -54,6 +54,8 @@ export type AgentEvent =
       tool: { name: string; args: Record<string, unknown> };
     }
   | { type: 'subagent:end'; id: string; status: SubagentStatus; steps: number }
+  // A runtime notice added to the conversation for the model, such as a background job that ended.
+  | { type: 'notice'; text: string }
   | { type: 'warning'; message: string }
   | { type: 'error'; message: string };
 

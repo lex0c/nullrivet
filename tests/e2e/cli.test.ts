@@ -437,6 +437,114 @@ describe('terminal', () => {
     30_000,
   );
 
+  // Starts a session, sends a prompt whose task starts `sleep <seconds>` in the background, and
+  // waits until that turn has ended on screen, so a slash command typed next is not refused.
+  const sessionWithJob = async (seconds: number) => {
+    server.handle((request) => {
+      const last = request.messages.at(-1);
+      if (last?.role === 'user' && last.content.includes('<agent-note>Background job')) {
+        return { text: 'reacted' };
+      }
+      if (last?.role === 'user' && last.content.includes('hello')) return { text: 'hi' };
+      return toolMessages(request).length === 0
+        ? { toolCalls: [{ name: 'bash_background', args: { command: `sleep ${seconds}` } }] }
+        : { text: 'started' };
+    });
+    const child = Bun.spawn(inTerminal(cliCommand([])), {
+      env: { ...cliEnv(server), TERM: 'xterm-256color' },
+      cwd: tempDir(),
+      stdin: 'pipe',
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    let output = '';
+    const reading = (async () => {
+      const decoder = new TextDecoder();
+      for await (const chunk of child.stdout) output += decoder.decode(chunk, { stream: true });
+    })();
+    const type = (text: string): void => {
+      child.stdin.write(text);
+      child.stdin.flush();
+    };
+    const until = async (check: () => boolean, ms = 10_000): Promise<boolean> => {
+      const deadline = Date.now() + ms;
+      while (!check() && Date.now() < deadline) await Bun.sleep(50);
+      return check();
+    };
+    const requests = (count: number): Promise<boolean> =>
+      until(() => server.requests.length >= count);
+    // `Worked for` closes every turn that ends with done.
+    const turnsEnded = (count: number): Promise<boolean> =>
+      until(() => output.split('Worked for').length - 1 >= count);
+    const exit = async (): Promise<{ code: number; output: string }> => {
+      type('/exit\r');
+      const code = await child.exited;
+      await reading;
+      return { code, output };
+    };
+    expect(await until(() => output.includes('Type /help for commands'))).toBe(true);
+    type('start the job\r');
+    expect(await turnsEnded(1)).toBe(true);
+    expect(server.requests).toHaveLength(2);
+    return { type, until, requests, turnsEnded, exit, screen: () => output };
+  };
+
+  test.skipIf(Bun.which('python3') === null)(
+    'a job that ends while the session is idle starts a turn of its own',
+    async () => {
+      const session = await sessionWithJob(0.5);
+      expect(await session.turnsEnded(2)).toBe(true);
+      expect(server.requests).toHaveLength(3);
+      const last = server.requests[2]?.messages.at(-1);
+      expect(last?.role).toBe('user');
+      expect(last?.content).toMatch(/^<agent-note>Background job \S+ completed with exit code 0/);
+      expect(last?.content).not.toContain('start the job');
+      const { code, output } = await session.exit();
+      expect(code).toBe(0);
+      expect(output).toContain('Continuing on background job events.');
+    },
+    30_000,
+  );
+
+  test.skipIf(Bun.which('python3') === null)(
+    'after /clear and a new prompt, a job of the discarded conversation does not start a turn',
+    async () => {
+      const session = await sessionWithJob(2);
+      session.type('/clear\r');
+      expect(await session.until(() => session.screen().includes('Conversation cleared.'))).toBe(
+        true,
+      );
+      session.type('hello\r');
+      expect(await session.turnsEnded(2)).toBe(true);
+      // The job ends about 2s after it started; a turn would follow within the 250ms delay.
+      await Bun.sleep(2_500);
+      expect(server.requests).toHaveLength(3);
+      expect(JSON.stringify(server.requests[2]?.messages)).not.toContain('Background job');
+      expect((await session.exit()).code).toBe(0);
+    },
+    30_000,
+  );
+
+  test.skipIf(Bun.which('python3') === null)(
+    'text being typed holds back the automatic turn, and the prompt then carries the event',
+    async () => {
+      const session = await sessionWithJob(0.5);
+      session.type('what now');
+      // The job ends about 0.5s after it started, while the text is still in the prompt.
+      await Bun.sleep(1_500);
+      expect(server.requests).toHaveLength(2);
+      session.type('\r');
+      expect(await session.turnsEnded(2)).toBe(true);
+      await Bun.sleep(1_000);
+      expect(server.requests).toHaveLength(3);
+      const last = server.requests[2]?.messages.at(-1);
+      expect(last?.content).toContain('what now');
+      expect(last?.content).toContain('<agent-note>Background job');
+      expect((await session.exit()).code).toBe(0);
+    },
+    30_000,
+  );
+
   test.skipIf(Bun.which('python3') === null)(
     'Shift+Tab switches the session to readonly before the next tool call',
     async () => {

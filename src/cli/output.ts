@@ -94,6 +94,9 @@ export const createPlainSink = (options: PlainSinkOptions): OutputSink => {
             ),
           );
           return;
+        case 'notice':
+          diagnostic(grey(`› note: ${stripAnsi(event.text)}`));
+          return;
         case 'warning':
           diagnostic(yellow(`warning: ${event.message}`));
           return;

@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path';
 import { contextBudget } from '../context/budget.ts';
 import type { InstructionFile, InstructionsLoader } from '../instructions/agents-loader.ts';
 import type { Provider, ProviderEffort } from '../providers/types.ts';
-import { createJobTools, describeJobEvent, JobRegistry } from '../tools/jobs.ts';
+import { createJobTools, describeJobEvent, JobRegistry, type JobSession } from '../tools/jobs.ts';
 import type { ExecutionMode } from '../tools/policy.ts';
 import { MAX_TIMER_DELAY_MS } from '../tools/process.ts';
 import type { Tool } from '../tools/types.ts';
@@ -36,8 +36,9 @@ export interface AgentOptions {
   // Offers the delegate tool, which starts subagents; on unless set to false.
   delegation?: boolean;
   // Offers the background job tools (bash_background, bash_jobs, bash_kill) to this agent only,
-  // never to its subagents; off unless set to true.
-  backgroundJobs?: boolean;
+  // never to its subagents, described for the kind of session: an interactive one starts turns on
+  // job events (runOnJobEvents), a one-shot run exits when the task ends. Off when omitted.
+  backgroundJobs?: JobSession;
   // Wall-clock limit of each task; when it passes, the task is stopped like an interrupt and ends
   // at a limit.
   timeLimitMs?: number;
@@ -59,6 +60,13 @@ export interface CompactOptions extends RunOptions {
 
 export interface Agent {
   run(prompt: string, options?: RunOptions): Promise<TurnResult>;
+  // Runs a turn without a prompt, on the pending background job events alone, which reach the
+  // model as runtime notes. Resolves with null, without starting a turn, when none are pending.
+  runOnJobEvents(options?: Omit<RunOptions, 'input'>): Promise<TurnResult | null>;
+  // Whether background job events are waiting to be shown to the model.
+  hasJobEvents(): boolean;
+  // Calls `listener` when a background job event becomes pending; returns the unsubscribe.
+  onJobEvent(listener: () => void): () => void;
   readonly conversation: Conversation;
   readonly bootWarnings: readonly string[];
   mode: ExecutionMode;
@@ -111,8 +119,12 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
             isGitRepo: isInsideGitRepo,
           }),
         ];
-  const jobs = options.backgroundJobs === true ? new JobRegistry() : null;
-  const jobTools = jobs === null ? [] : createJobTools(jobs);
+  let jobs: JobRegistry | null = null;
+  const jobTools: Tool[] = [];
+  if (options.backgroundJobs !== undefined) {
+    jobs = new JobRegistry();
+    jobTools.push(...createJobTools(jobs, options.backgroundJobs));
+  }
   const tools = new Map(
     [...options.tools, ...delegate, ...jobTools].map((tool) => [tool.name, tool]),
   );
@@ -138,6 +150,58 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
   // Rendered when the instructions are loaded, not for every request.
   let projectContextText = renderProjectContext(bootInstructions);
   const projectContext = (): string => projectContextText;
+
+  // One turn at a time, with or without a prompt.
+  const runOneTurn = async (prompt: string | null, runOptions: RunOptions): Promise<TurnResult> => {
+    if (running) throw new Error('the agent is already running a turn');
+    running = true;
+    const external = runOptions.signal ?? new AbortController().signal;
+    const timeLimitMs =
+      options.timeLimitMs === undefined
+        ? undefined
+        : Math.min(options.timeLimitMs, MAX_TIME_LIMIT_MS);
+    const deadline = timeLimitMs === undefined ? null : new AbortController();
+    const timer =
+      deadline === null
+        ? undefined
+        : setTimeout(() => deadline.abort(new TimeLimitReached(timeLimitMs ?? 0)), timeLimitMs);
+    const signal = deadline === null ? external : AbortSignal.any([external, deadline.signal]);
+    try {
+      const limits: LoopLimits = {
+        maxSteps: options.maxSteps ?? DEFAULT_MAX_STEPS,
+        maxOutputTokens: contextBudget(agent.provider.capabilities).maxOutput,
+        stallMs: options.stallMs ?? DEFAULT_STALL_MS,
+      };
+      return await runTurn(
+        prompt,
+        {
+          provider: agent.provider,
+          conversation,
+          tools,
+          mode: () => agent.mode,
+          cwd: options.cwd,
+          systemPrompt,
+          projectContext,
+          checkpoint: async () => {
+            await agent.checkpoint?.();
+          },
+          instructions: options.instructions,
+          limits,
+          ...(agent.effort === undefined ? {} : { effort: agent.effort }),
+          ...(jobs === null ? {} : { notices: () => jobs.drainEvents().map(describeJobEvent) }),
+          emit: runOptions.onEvent ?? (() => undefined),
+          signal,
+        },
+        runOptions.input,
+      );
+    } finally {
+      clearTimeout(timer);
+      running = false;
+      // Also after an interrupted or failed turn: the conversation is consistent, and calls
+      // left unanswered are answered before the next prompt.
+      await agent.checkpoint?.();
+    }
+  };
 
   const agent: Agent = {
     conversation,
@@ -169,6 +233,9 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
       // Boot instructions are sent with every request; the ones attached to tool results of the
       // discarded conversation must be attached again when needed.
       options.instructions?.retainOnly(new Set(bootInstructions.map((file) => file.path)));
+      // Jobs started by the discarded conversation keep running, but their events must not reach
+      // the new one, where nothing explains them, nor start turns in it.
+      jobs?.dropEvents();
     },
 
     async compact(compactOptions: CompactOptions = {}): Promise<CompactionOutcome | null> {
@@ -198,55 +265,22 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
       }
     },
 
-    async run(prompt: string, runOptions: RunOptions = {}): Promise<TurnResult> {
-      if (running) throw new Error('the agent is already running a turn');
-      running = true;
-      const external = runOptions.signal ?? new AbortController().signal;
-      const timeLimitMs =
-        options.timeLimitMs === undefined
-          ? undefined
-          : Math.min(options.timeLimitMs, MAX_TIME_LIMIT_MS);
-      const deadline = timeLimitMs === undefined ? null : new AbortController();
-      const timer =
-        deadline === null
-          ? undefined
-          : setTimeout(() => deadline.abort(new TimeLimitReached(timeLimitMs ?? 0)), timeLimitMs);
-      const signal = deadline === null ? external : AbortSignal.any([external, deadline.signal]);
-      try {
-        const limits: LoopLimits = {
-          maxSteps: options.maxSteps ?? DEFAULT_MAX_STEPS,
-          maxOutputTokens: contextBudget(agent.provider.capabilities).maxOutput,
-          stallMs: options.stallMs ?? DEFAULT_STALL_MS,
-        };
-        return await runTurn(
-          prompt,
-          {
-            provider: agent.provider,
-            conversation,
-            tools,
-            mode: () => agent.mode,
-            cwd: options.cwd,
-            systemPrompt,
-            projectContext,
-            checkpoint: async () => {
-              await agent.checkpoint?.();
-            },
-            instructions: options.instructions,
-            limits,
-            ...(agent.effort === undefined ? {} : { effort: agent.effort }),
-            ...(jobs === null ? {} : { notices: () => jobs.drainEvents().map(describeJobEvent) }),
-            emit: runOptions.onEvent ?? (() => undefined),
-            signal,
-          },
-          runOptions.input,
-        );
-      } finally {
-        clearTimeout(timer);
-        running = false;
-        // Also after an interrupted or failed turn: the conversation is consistent, and calls
-        // left unanswered are answered before the next prompt.
-        await agent.checkpoint?.();
-      }
+    run(prompt: string, runOptions: RunOptions = {}): Promise<TurnResult> {
+      return runOneTurn(prompt, runOptions);
+    },
+
+    // The check runs before any await, so a caller that found events pending starts on them.
+    async runOnJobEvents(runOptions: Omit<RunOptions, 'input'> = {}): Promise<TurnResult | null> {
+      if (jobs === null || !jobs.hasPendingEvents()) return null;
+      return runOneTurn(null, runOptions);
+    },
+
+    hasJobEvents(): boolean {
+      return jobs?.hasPendingEvents() ?? false;
+    },
+
+    onJobEvent(listener: () => void): () => void {
+      return jobs?.onEvent(listener) ?? (() => undefined);
     },
   };
   return agent;

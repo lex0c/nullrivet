@@ -96,6 +96,29 @@ does not settle it. Any remaining text is settled when a tool call starts or the
 - The editor (`src/tui/input-editor.ts`) is a pure function from the input state and a key to the
   next input state, plus signals for submit, interrupt and end of file.
 
+## Automatic continuation
+
+When a background job ends, or becomes ready, while the session is idle, the session starts a turn
+on its own: a line says "Continuing on background job events.", the job's runtime note follows as
+an info line, and the turn runs like any other. Esc and `Ctrl+C` interrupt it, the current mode
+applies, and the session file saves it. Events that arrive within 250 ms of each other share one
+turn. The agent never reads the job's output from the event itself: the note names the log.
+
+- **Idle** means no task and no slash command running, an empty prompt, and no exit armed by
+  `Ctrl+C`. While you type, the turn waits; a prompt you send takes the pending events with it, so
+  you go first and nothing is lost.
+- **Limit.** At most 5 automatic turns in a row; then a notice says continuation is paused, and
+  the pending events wait for your next prompt. The limit counts turns, not model requests: each
+  turn keeps its own step limit and `--timeout`. Only a prompt you send renews it.
+- **Suspension.** Continuation stops until your next prompt when you interrupt a task (automatic or
+  not) and when a turn ends other than `done` (an error, a limit, an interrupt). Cancelling a
+  `/compact` does not suspend it. Jobs keep running, and their events are delivered with your next
+  prompt.
+- **`/clear`.** Jobs started before it keep running, and `bash_jobs` still shows them, but their
+  events are no longer reported: nothing in the new conversation explains them, so they neither
+  reach the model nor start a turn.
+- Only the interactive session continues on its own; a one-shot run ends with its task.
+
 ## Interrupting and exiting
 
 - `Esc` or `Ctrl+C` during a task aborts it. The abort reaches the HTTP request and every

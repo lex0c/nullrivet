@@ -29,6 +29,7 @@ src/
     args.ts                flags, environment variables, defaults
     run.ts                 resolve the model, create the agent, run one task or the session
     repl.ts                interactive session controller
+    auto-continue.ts       when an idle session starts a turn on background job events
     slash.ts               slash commands
     session-file.ts        session files: loading, validation, atomic saves, attaching
     prompt-history.ts      prompts recalled with the arrow keys
@@ -418,3 +419,13 @@ notes. See [TOOLS.md](TOOLS.md#background-jobs).
 The session keeps one agent, and therefore one conversation, alive between prompts, and saves it
 to a session file when one is attached (see [Sessions](#sessions)). Its rendering, input handling
 and interrupt behavior are described in [TUI.md](TUI.md).
+
+Turns start from two sources: the user's prompts and background job events. The job registry
+only announces that an event is pending; it never hands the event to the session. A small
+scheduler (`cli/auto-continue.ts`) decides when an idle session starts a turn without a prompt
+(`agent.runOnJobEvents`), with a limit of 5 automatic turns per prompt and a suspension after an
+interrupt or a turn that did not end with `done`. The turn's loop alone takes the events and adds
+them as runtime notes, so an event reaches the model exactly once, whichever turn takes it. A turn
+without a prompt that finds no event ends before any compaction or request. Clearing the
+conversation drops the events of the jobs it started, which keep running: nothing in the new
+conversation would explain them.

@@ -285,6 +285,22 @@ describe('runTurn', () => {
     expect(h.provider.calls).toHaveLength(3);
   });
 
+  test('a turn without a prompt opens on the pending notices, shown as notice events', async () => {
+    const h = harness([textTurn('done')]);
+    h.deps.conversation.appendUser('earlier task');
+    h.deps.conversation.appendAssistant([{ type: 'text', text: 'earlier answer' }]);
+    const pending = [['job x ended']];
+    h.deps.notices = () => pending.shift() ?? [];
+    expect((await runTurn(null, h.deps)).reason).toBe('done');
+    expect(h.provider.calls[0]?.req.messages.at(-1)).toEqual({
+      role: 'user',
+      content: '<agent-note>job x ended</agent-note>',
+    });
+    expect(h.events.filter((e) => e.type === 'notice')).toEqual([
+      { type: 'notice', text: 'job x ended' },
+    ]);
+  });
+
   test('runtime notices reach the next request once, as agent notes', async () => {
     const h = harness([toolTurn([{ id: 't1', name: 'read_file', args: {} }]), textTurn('done')]);
     const pending = [['first notice'], ['second notice']];
@@ -504,6 +520,14 @@ describe('runTurn', () => {
       );
       const answered = JSON.stringify(h.provider.calls.at(-1)?.req.messages);
       expect(answered.match(/<agent-note>job x ended<\/agent-note>/g)).toHaveLength(1);
+    });
+
+    test('a turn without a prompt or notices makes no request, even above the trigger', async () => {
+      const h = harness(responder([() => textTurn('never')]));
+      prefill(h, 10);
+      h.deps.notices = () => [];
+      expect((await runTurn(null, h.deps)).reason).toBe('done');
+      expect(h.provider.calls).toHaveLength(0);
     });
 
     test('a second overflow in the same step ends the turn instead of looping', async () => {

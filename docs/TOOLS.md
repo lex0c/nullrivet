@@ -324,8 +324,13 @@ that had already ended is left as it was.
   happened, the duration and the log files, never output or the command: runtime notes are trusted,
   and command output is not. It points to the log, which `read_file` and `grep` read in either mode.
   Each event is reported once: one already shown by `bash_jobs` for that job, or by `bash_kill`,
-  gets no note; a listing, which has no log details, does not count. nullrivet does not start a
-  task on its own when a job ends.
+  gets no note; a listing, which has no log details, does not count. The notes are also shown to
+  the user, as `notice` events.
+- **Automatic continuation.** In the interactive session, an event that arrives while the session
+  is idle starts a turn of its own, without a prompt: its first message is the runtime note. See
+  [TUI.md](TUI.md#automatic-continuation) for when it starts and stops. In one-shot mode nothing
+  starts on its own: the run ends with the task, so the description of `bash_background` tells the
+  model to wait with `bash_jobs` for any result it still needs.
 - **Limits.** At most 8 jobs run at once. Finished jobs whose events were reported are forgotten
   beyond the 50 most recent.
 - **Errors.** `job.limit` when 8 jobs are running, `job.unknown` for an id this run does not have,
@@ -333,7 +338,8 @@ that had already ended is left as it was.
   which case the job is not started.
 - **Lifetime.** Jobs are stopped when nullrivet exits, including on SIGINT, SIGTERM and SIGHUP. In
   one-shot mode that is when the task ends; to keep a server running across tasks, use the
-  interactive session. `/clear` does not stop jobs.
+  interactive session. `/clear` does not stop jobs, but the events of the jobs that exist when it
+  runs are no longer reported.
 - **readonly.** The job tools are `exec`, so they are not offered in `readonly`. Jobs started
   before a switch keep running and their notices still arrive, but checking or stopping them needs
   `auto`.

@@ -20,7 +20,7 @@ let tools: Map<string, Tool>;
 const setUp = (options: OutputFilesOptions = {}): void => {
   logs = new OutputFiles({ root: () => dir, ...options });
   registry = new JobRegistry(logs);
-  tools = new Map(createJobTools(registry).map((tool) => [tool.name, tool]));
+  tools = new Map(createJobTools(registry, 'interactive').map((tool) => [tool.name, tool]));
 };
 
 beforeEach(() => {
@@ -175,7 +175,7 @@ describe('background jobs', () => {
     setUp();
     logs = new OutputFiles({ root: () => join(dir, 'missing') });
     registry = new JobRegistry(logs);
-    tools = new Map(createJobTools(registry).map((tool) => [tool.name, tool]));
+    tools = new Map(createJobTools(registry, 'interactive').map((tool) => [tool.name, tool]));
     const result = await call('bash_background', { command: 'true' });
     expect(result.meta?.errorCode).toBe('job.log_failed');
     expect(result.content).toContain('the job was not started');
@@ -364,6 +364,58 @@ describe('job events', () => {
     await call('bash_kill', { id: killed.id });
 
     expect(registry.drainEvents()).toEqual([]);
+  });
+
+  test('listeners hear of each new event in a microtask, after its state is recorded', async () => {
+    const heard: string[] = [];
+    registry.onEvent(() => {
+      // The ready event can come before start() returns the id.
+      const [job] = registry.list();
+      heard.push(
+        job === undefined ? 'unknown' : `${job.status}${job.readyAt === null ? '' : ', ready'}`,
+      );
+    });
+    const { id } = await start({ command: 'sleep 0.1; echo up; sleep 0.2', ready_pattern: 'up' });
+    expect(await ended(id)).toBe(true);
+    await Promise.resolve();
+    expect(heard).toEqual(['running, ready', 'completed, ready']);
+  });
+
+  test('a listener removed before its microtask runs is not called', async () => {
+    let second = 0;
+    let stopSecond = (): void => undefined;
+    registry.onEvent(() => stopSecond());
+    stopSecond = registry.onEvent(() => {
+      second += 1;
+    });
+    const { id } = await start({ command: 'true' });
+    expect(await ended(id)).toBe(true);
+    await Promise.resolve();
+    expect(second).toBe(0);
+  });
+
+  test('pending events are tracked until a note or a report delivers them', async () => {
+    expect(registry.hasPendingEvents()).toBe(false);
+    const { id } = await start({ command: 'true' });
+    expect(await ended(id)).toBe(true);
+    expect(registry.hasPendingEvents()).toBe(true);
+    await call('bash_jobs', {});
+    expect(registry.hasPendingEvents()).toBe(true);
+    await call('bash_jobs', { id });
+    expect(registry.hasPendingEvents()).toBe(false);
+  });
+
+  test('dropped events stay dropped for jobs that end later, which keep running', async () => {
+    const ended1 = await start({ command: 'true' });
+    expect(await ended(ended1.id)).toBe(true);
+    const running = await start({ command: 'sleep 0.3' });
+    registry.dropEvents();
+    expect(registry.hasPendingEvents()).toBe(false);
+    expect(registry.get(running.id).status).toBe('running');
+    expect(await ended(running.id)).toBe(true);
+    expect(registry.hasPendingEvents()).toBe(false);
+    expect(registry.drainEvents()).toEqual([]);
+    expect(registry.list()).toHaveLength(2);
   });
 
   test('a listing, which has no log details, leaves the events to their notes', async () => {
