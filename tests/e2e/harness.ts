@@ -206,3 +206,12 @@ export const startCli = (
 // Whether a process whose command line contains `marker` is still running.
 export const processRunning = (marker: string): boolean =>
   Bun.spawnSync(['pgrep', '-f', marker]).exitCode === 0;
+
+// Whether every process matching `marker` is gone within `ms`. A signal takes effect after kill()
+// returns, so a process killed as the CLI exits can still be listed for a moment; a process that
+// was not killed at all outlives the wait.
+export const processGone = async (marker: string, ms = 2_000): Promise<boolean> => {
+  const deadline = Date.now() + ms;
+  while (processRunning(marker) && Date.now() < deadline) await Bun.sleep(50);
+  return !processRunning(marker);
+};

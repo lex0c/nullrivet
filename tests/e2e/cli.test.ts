@@ -22,6 +22,7 @@ import {
   type FakeOllama,
   inTerminal,
   isSummaryRequest,
+  processGone,
   processRunning,
   startCli,
   startFakeOllama,
@@ -122,7 +123,7 @@ describe('cancellation', () => {
     cli.child.kill('SIGINT');
     const { code } = await cli.finished;
     expect(code).toBe(130);
-    expect(processRunning(sleep)).toBe(false);
+    expect(await processGone(sleep)).toBe(true);
   }, 30_000);
 
   test('the time limit ends the task at a limit and stops its commands', async () => {
@@ -136,7 +137,7 @@ describe('cancellation', () => {
       reason: 'budget',
       message: 'time limit of 2s reached',
     });
-    expect(processRunning(sleep)).toBe(false);
+    expect(await processGone(sleep)).toBe(true);
   }, 30_000);
 });
 
@@ -190,7 +191,7 @@ describe('saved output', () => {
     cli.child.kill('SIGHUP');
     const { code } = await cli.finished;
     expect(code).toBe(129);
-    expect(processRunning(sleep)).toBe(false);
+    expect(await processGone(sleep)).toBe(true);
     expect(readdirSync(tmp)).toEqual([]);
   }, 30_000);
 });
@@ -214,7 +215,7 @@ describe('background jobs', () => {
     expect(started).toStartWith('Started background job ');
     // A one-shot run must wait for what it needs before it ends, so it is not told to end its turn.
     expect(started).not.toContain('end your turn');
-    expect(processRunning(sleep)).toBe(false);
+    expect(await processGone(sleep)).toBe(true);
     expect(readdirSync(tmp)).toEqual([]);
   }, 30_000);
 });
