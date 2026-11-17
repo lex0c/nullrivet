@@ -41,7 +41,18 @@ describe('writeFileTool', () => {
     const out = await write({ path, content: 'hello' });
     expect(out.isError).toBe(false);
     expect(out.content).toBe(`Wrote 5 bytes to ${path} (new file).`);
-    expect(out.meta).toEqual({ path, bytesWritten: 5, created: true });
+    expect(out.meta).toEqual({
+      path,
+      bytesWritten: 5,
+      created: true,
+      // For the user only: a new file is all added.
+      diff: {
+        added: 1,
+        removed: 0,
+        snippet: [{ type: 'add', text: 'hello', newLine: 1 }],
+        hiddenChanges: 0,
+      },
+    });
     expect(out.touchedPaths).toEqual([path]);
     expect(readFileSync(path, 'utf-8')).toBe('hello');
   });
@@ -51,8 +62,32 @@ describe('writeFileTool', () => {
     writeFileSync(path, 'old content');
     const out = await write({ path: 'b.txt', content: 'new' });
     expect(out.content).toBe(`Wrote 3 bytes to ${path}.`);
-    expect(out.meta).toMatchObject({ created: false, bytesWritten: 3 });
+    expect(out.meta).toMatchObject({
+      created: false,
+      bytesWritten: 3,
+      diff: { added: 1, removed: 1, hiddenChanges: 0 },
+    });
     expect(readFileSync(path, 'utf-8')).toBe('new');
+  });
+
+  test('a binary file it replaces gets no diff, and the write is unaffected', async () => {
+    const path = join(dir, 'blob.bin');
+    writeFileSync(path, Buffer.from([0x00, 0x01, 0x02]));
+    const out = await write({ path: 'blob.bin', content: 'text now' });
+    expect(out.isError).toBe(false);
+    expect(out.meta?.diff).toBeUndefined();
+    expect(readFileSync(path, 'utf-8')).toBe('text now');
+  });
+
+  test.skipIf(isRoot)('a file it cannot read is still written, without a diff', async () => {
+    const path = join(dir, 'w-only.txt');
+    writeFileSync(path, 'secret');
+    chmodSync(path, 0o200);
+    const out = await write({ path: 'w-only.txt', content: 'replaced' });
+    expect(out.isError).toBe(false);
+    expect(out.meta?.diff).toBeUndefined();
+    chmodSync(path, 0o600);
+    expect(readFileSync(path, 'utf-8')).toBe('replaced');
   });
 
   test('counts bytes, not characters', async () => {

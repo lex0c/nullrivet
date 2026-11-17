@@ -1,4 +1,4 @@
-import { stripAnsi } from '../sanitize/ansi.ts';
+import { terminalText } from '../sanitize/display.ts';
 
 const VERBS: Record<string, { running: string; done: string }> = {
   read_file: { running: 'Reading', done: 'Read' },
@@ -17,10 +17,10 @@ const VERBS: Record<string, { running: string; done: string }> = {
 export const toolVerb = (name: string, phase: 'running' | 'done'): string =>
   VERBS[name]?.[phase] ?? (phase === 'running' ? `Calling ${name}` : `Called ${name}`);
 
-// Tool arguments come from the model, so they are flattened to one line without control bytes
-// before being shown.
+// Tool arguments come from the model, so they are cleaned for the terminal and flattened to one
+// line before being shown.
 export const oneLine = (value: string, max: number): string => {
-  const flat = stripAnsi(value).replace(/\s+/g, ' ').trim();
+  const flat = terminalText(value).replace(/\s+/g, ' ').trim();
   return flat.length > max ? `${flat.slice(0, Math.max(0, max - 1))}…` : flat;
 };
 

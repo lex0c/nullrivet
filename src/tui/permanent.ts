@@ -1,6 +1,9 @@
 import wrapAnsi from 'wrap-ansi';
 import { stripAnsi } from '../sanitize/ansi.ts';
+import { terminalText } from '../sanitize/display.ts';
+import { readFileDiff } from '../tools/line-diff.ts';
 import { shortenCwd } from './render/cwd.ts';
+import { diffCounts, diffRows } from './render/diff.ts';
 import { formatChipDuration, formatCoarseDuration } from './render/duration.ts';
 import { frameWidth, padFrame } from './render/frame.ts';
 import { subContentConnector } from './render/glyphs.ts';
@@ -14,9 +17,6 @@ import { errorSummary, subjectWidth, toolSubject, toolVerb } from './tool-labels
 
 const TOOL_DONE_GLYPH = '●';
 
-// Messages from providers, commands and paths can contain escape sequences; printed as they are,
-// the terminal would execute them. Carriage returns would overwrite the start of the row.
-const clean = (text: string): string => stripAnsi(text).replace(/\r/g, '');
 const PROMPT_WIDTH = 2;
 
 const turnEndLine = (
@@ -24,7 +24,7 @@ const turnEndLine = (
   caps: Capabilities,
 ): string => {
   const elapsed = formatCoarseDuration(item.durationMs);
-  const detail = item.message === undefined ? '' : `: ${clean(item.message)}`;
+  const detail = item.message === undefined ? '' : `: ${terminalText(item.message)}`;
   switch (item.reason) {
     case 'done':
       return paint(caps, 'secondary', `Worked for ${elapsed}`);
@@ -42,13 +42,24 @@ const toolLines = (
   item: Extract<PermanentItem, { kind: 'tool' }>,
   caps: Capabilities,
 ): string[] => {
-  const subject = toolSubject(item.name, item.args, subjectWidth(caps));
+  const diff = item.isError ? null : readFileDiff(item.meta);
+  const counts = diff === null ? '' : diffCounts(diff, caps);
+  // The counts take their room from the subject, down to its minimum width.
+  const subject = toolSubject(
+    item.name,
+    item.args,
+    Math.max(10, subjectWidth(caps) - stripAnsi(counts).length),
+  );
   const head = `${TOOL_DONE_GLYPH} ${toolVerb(item.name, 'done')}${subject === '' ? '' : ` ${subject}`}`;
   const exitCode = item.meta?.exitCode;
   const exit =
     typeof exitCode === 'number' && exitCode !== 0 ? paint(caps, 'warn', `  exit ${exitCode}`) : '';
   const metric = paint(caps, 'secondary', `  [${formatChipDuration(item.durationMs)}]`);
-  const lines = ['', `${paint(caps, item.isError ? 'error' : 'secondary', head)}${exit}${metric}`];
+  const lines = [
+    '',
+    `${paint(caps, item.isError ? 'error' : 'secondary', head)}${counts}${exit}${metric}`,
+  ];
+  if (diff !== null) lines.push(...diffRows(diff, caps));
   if (item.isError) {
     lines.push(
       padFrame(
@@ -71,7 +82,7 @@ const noticeLines = (
   const tone = item.level === 'info' ? 'secondary' : item.level === 'warning' ? 'warn' : 'error';
   // Wrapped here so continuation rows keep the margin instead of starting at column 0.
   const width = Math.max(10, frameWidth(caps) - label.length);
-  const lines = clean(item.text)
+  const lines = terminalText(item.text)
     .split('\n')
     .flatMap((line) => wrapAnsi(line, width, { hard: true, trim: false }).split('\n'));
   return [
@@ -88,14 +99,14 @@ export const formatPermanent = (item: PermanentItem, caps: Capabilities): string
   switch (item.kind) {
     case 'banner': {
       const identity = [
-        clean(item.model),
+        terminalText(item.model),
         item.mode,
         ...(item.effort === undefined ? [] : [`effort ${item.effort}`]),
       ].join(' · ');
       const lines = [
         `${paint(caps, 'bold', 'nullrivet')} ${paint(caps, 'secondary', `v${item.version}`)}`,
         paint(caps, 'secondary', identity),
-        paint(caps, 'secondary', clean(shortenCwd(item.cwd, item.home, caps))),
+        paint(caps, 'secondary', terminalText(shortenCwd(item.cwd, item.home, caps))),
       ];
       if (item.instructions > 0) {
         const files = item.instructions === 1 ? 'file' : 'files';

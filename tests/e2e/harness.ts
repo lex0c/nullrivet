@@ -213,5 +213,19 @@ export const processRunning = (marker: string): boolean =>
 export const processGone = async (marker: string, ms = 2_000): Promise<boolean> => {
   const deadline = Date.now() + ms;
   while (processRunning(marker) && Date.now() < deadline) await Bun.sleep(50);
-  return !processRunning(marker);
+  if (!processRunning(marker)) return true;
+  // The parent and process group of what is left tell a process that escaped a group kill (parent
+  // 1, the group of the killed command) from one that was never signalled.
+  const pids = new TextDecoder().decode(Bun.spawnSync(['pgrep', '-f', marker]).stdout).trim();
+  const table = Bun.spawnSync([
+    'ps',
+    '-o',
+    'pid,ppid,pgid,stat,command',
+    '-p',
+    pids.replace(/\s+/g, ','),
+  ]);
+  process.stderr.write(
+    `processes still matching '${marker}':\n${new TextDecoder().decode(table.stdout)}`,
+  );
+  return false;
 };

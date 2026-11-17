@@ -1,7 +1,7 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { startProcess } from '../../src/tools/process.ts';
+import { killAllProcessGroups, startProcess } from '../../src/tools/process.ts';
 import { TempDirs } from './fixtures.ts';
 
 const temp = new TempDirs();
@@ -96,5 +96,33 @@ describe('startProcess', () => {
 
     const timed = await startProcess({ ...bash('sleep 30', cwd), timeoutMs: 100 });
     expect((await timed.done).termination).toBe('timeout');
+  });
+});
+
+describe('killAllProcessGroups', () => {
+  test('kills every running group, repeating the signal for a process forked meanwhile', async () => {
+    const cwd = temp.create('process');
+    const handle = await startProcess(bash('sleep 30', cwd));
+    const kill = spyOn(process, 'kill');
+    killAllProcessGroups();
+    const calls = kill.mock.calls.filter(([pid]) => pid === -handle.pid);
+    kill.mockRestore();
+    expect(calls).toEqual([
+      [-handle.pid, 'SIGKILL'],
+      [-handle.pid, 'SIGKILL'],
+      [-handle.pid, 'SIGKILL'],
+    ]);
+    expect((await handle.done).signal).toBe('SIGKILL');
+  });
+
+  test('with no group running, it signals nothing and does not wait', () => {
+    const kill = spyOn(process, 'kill');
+    const started = performance.now();
+    killAllProcessGroups();
+    const elapsed = performance.now() - started;
+    const calls = kill.mock.calls.length;
+    kill.mockRestore();
+    expect(calls).toBe(0);
+    expect(elapsed).toBeLessThan(5);
   });
 });

@@ -7,6 +7,7 @@ import {
 } from './args.ts';
 import { atomicWrite } from './atomic-write.ts';
 import { fileSystemError, loadTextFileBytes, MAX_FILE_BYTES } from './file-io.ts';
+import { lineDiff } from './line-diff.ts';
 import { pathArgument, resolvePath } from './paths.ts';
 import { type Tool, type ToolResult, toolError } from './types.ts';
 
@@ -605,6 +606,9 @@ export const editFileTool: Tool = {
         `the edited content of ${abs} would be ${formatBytes(outputBytes)}, over the ${formatBytes(MAX_FILE_BYTES)} limit`,
       );
     }
+    // Computed before the write: a failure after it would report an edit that was applied as
+    // failed, and the model could apply it again.
+    const diff = lineDiff(original, working);
     if (ctx.signal.aborted) {
       return toolError('tool.aborted', `edit_file was aborted; ${abs} was not modified`);
     }
@@ -622,7 +626,14 @@ export const editFileTool: Tool = {
         totalReplacements,
       ),
       isError: false,
-      meta: { path: abs, edits: results, totalReplacements, bytesWritten: written, written: true },
+      meta: {
+        path: abs,
+        edits: results,
+        totalReplacements,
+        bytesWritten: written,
+        written: true,
+        diff,
+      },
       touchedPaths: [abs],
     };
   },

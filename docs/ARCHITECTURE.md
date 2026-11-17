@@ -62,6 +62,7 @@ src/
     types.ts, policy.ts    tool contract and execution modes
     bash.ts, git.ts        command tools
     read-file.ts, write-file.ts, edit-file.ts, atomic-write.ts, file-io.ts
+    line-diff.ts           line diff of an edit or write, shown by the interface only
     glob.ts, grep.ts       file search; grep-search.ts runs in grep-worker.ts
     file-walk.ts           directory listing shared by glob and grep
     process.ts             process groups, timeouts, bounded capture
@@ -84,6 +85,7 @@ src/
     keys.ts, input-editor.ts, term.ts, render/
   sanitize/
     ansi.ts                removes terminal escape sequences and control bytes
+    display.ts             cleans text for the terminal, bidirectional controls included
     fence.ts               fences around untrusted text embedded in prompts
 ```
 
