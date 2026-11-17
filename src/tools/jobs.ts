@@ -605,7 +605,7 @@ export const createJobTools = (registry: JobRegistry, session: JobSession): Tool
         },
         ready_pattern: {
           type: 'string',
-          description: `Text whose first appearance in the output marks the job as ready. Matched as is, not as a regular expression, in the output without terminal escape sequences such as colors; up to ${READY_PATTERN_MAX_BYTES} bytes.`,
+          description: `Only for a job that keeps running once it is up, such as a server or a watcher: text whose first appearance in the output marks it as ready, such as a server's listening message. Leave it out for a command that ends on its own; you are told when it ends. Matched as is, not as a regular expression, in the output without terminal escape sequences such as colors; up to ${READY_PATTERN_MAX_BYTES} bytes.`,
         },
       },
       required: ['command'],

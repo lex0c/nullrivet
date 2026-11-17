@@ -297,7 +297,7 @@ since subagents only read.
 | `command` | The bash command to run. |
 | `cwd` | Working directory (default: the starting directory). |
 | `max_runtime_ms` | Stop the job after this long, at most 2,147,483,647 (the longest timer delay). Without it, the job runs until it ends or is stopped. |
-| `ready_pattern` | Literal text, 1 to 256 bytes, whose first appearance in the output marks the job as ready. Not a regular expression. It is matched in the output without terminal escape sequences, as the model sees it, so color codes between its words do not prevent a match. |
+| `ready_pattern` | Literal text, 1 to 256 bytes, whose first appearance in the output marks the job as ready. For a job that keeps running once it is up, such as a server or a watcher; the description tells the model to leave it out for a command that ends on its own, which is reported when it ends, since models were seen setting it to the first line of a short command and getting a note with nothing to wait for. Not a regular expression. It is matched in the output without terminal escape sequences, as the model sees it, so color codes between its words do not prevent a match. |
 
 It returns once the process exists and its log has been created, with the job id, the pid and the
 log path. A job runs like `bash`: its own process group, stdin closed, the same environment without

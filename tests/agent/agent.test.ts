@@ -427,6 +427,26 @@ describe('background jobs', () => {
     expect(provider.calls).toHaveLength(2);
   });
 
+  // Models were seen setting ready_pattern for short commands, which added a note with nothing to
+  // wait for.
+  const readyPatternDescription = async (): Promise<string> => {
+    const provider = createMockProvider([textTurn('ok')]);
+    const agent = await createAgent({
+      provider,
+      tools: [],
+      mode: 'auto',
+      cwd: '/tmp',
+      instructions: null,
+      backgroundJobs: 'interactive',
+    });
+    await agent.run('go');
+    const tool = provider.calls[0]?.req.tools?.find((t) => t.name === 'bash_background');
+    const schema = tool?.input_schema as {
+      properties?: { ready_pattern?: { description?: string } };
+    };
+    return schema.properties?.ready_pattern?.description ?? '';
+  };
+
   test('the job tools tell the model what happens once it finishes', async () => {
     const description = async (session: 'interactive' | 'one-shot'): Promise<string> => {
       const provider = createMockProvider([textTurn('ok')]);
@@ -448,6 +468,9 @@ describe('background jobs', () => {
     );
     expect(interactive).toContain(
       'end your turn instead, and use bash_jobs with wait_ms only when your next step needs its result',
+    );
+    expect(await readyPatternDescription()).toStartWith(
+      'Only for a job that keeps running once it is up, such as a server or a watcher',
     );
     const oneShot = await description('one-shot');
     expect(oneShot).toContain('nullrivet exits when you finish, which stops running jobs');
