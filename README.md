@@ -231,10 +231,9 @@ in a container or VM for risky work ([trust boundaries](docs/ARCHITECTURE.md#tru
 
 Building, testing and git operations that change state go through `bash`. Background jobs run
 until they end, are stopped, or nullrivet exits, and the model is told when one ends or becomes
-ready. A subagent starts with
-an empty conversation, the same model and the read tools only. It runs in the background, up to
-three at once, while the main agent keeps working, and its report reaches the model as data when
-it ends. Details: [docs/TOOLS.md](docs/TOOLS.md), [subagents](docs/ARCHITECTURE.md#subagents).
+ready. A subagent starts with an empty conversation, the same model and the read tools only. It
+runs in the background, up to three at once, while the main agent keeps working, and its report
+reaches the model as data when it ends. Details: [docs/TOOLS.md](docs/TOOLS.md), [subagents](docs/ARCHITECTURE.md#subagents).
 
 ## Project instructions
 

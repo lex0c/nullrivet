@@ -371,9 +371,9 @@ only reads: the main agent is the only one that changes files or runs commands.
   may come from a provider at any length, is cut first, the report gets the room left after the
   title and the name of the file that saves it whole, and the budget has a floor of 2 KiB so that
   room exists. Since one report never exceeds the budget, the rule of at least one report per batch
-  never does either. Compaction cannot shorten text in the latest message, so the budget is what keeps a
-  batch from filling a small window. The batch is in time order. The loop takes at most one batch
-  per request, so a retried request does not take a second one, and earlier reports can be
+  never does either. Compaction cannot shorten text in the latest message, so the budget is what
+  keeps a batch from filling a small window. The batch is in time order. The loop takes at most one
+  batch per request, so a retried request does not take a second one, and earlier reports can be
   compacted once they leave the latest message.
 - **Events.** The subagent's own events are not forwarded: text from two agents would mix. The
   registry emits `subagent:start`, `subagent:progress` (step and current tool) and `subagent:end`

@@ -32,7 +32,8 @@ slash commands ─────────┘        └──> permanent items 
 - **View** (`src/tui/view.ts`): composes the live region from the state: one row per subagent
   running in the background, with its current step and tool, the pending answer, one card per
   running tool, a phase indicator, the input box, the command list and the status lines.
-  Subagent rows stay while no turn runs, since a subagent outlives the turn that started it. `src/tui/permanent.ts` formats the scrollback items.
+  Subagent rows stay while no turn runs, since a subagent outlives the turn that started it.
+  `src/tui/permanent.ts` formats the scrollback items.
 - **Screen** (`src/tui/screen.ts`): draws frames; it knows nothing about the agent.
 - **Controller** (`src/cli/repl.ts`): wires the terminal, the keys, the agent and the commands
   together and schedules redraws at up to 30 frames per second.
@@ -102,9 +103,9 @@ does not settle it. Any remaining text is settled when a tool call starts or the
 When a background job ends or becomes ready, or a subagent ends, while the session is idle, the
 session starts a turn on its own: a line says "Continuing on background events.", the runtime
 notes follow as info lines (for a subagent, its title and how it ended), and the turn runs like
-any other. Esc and `Ctrl+C` interrupt it, the current mode
-applies, and the session file saves it. Events that arrive within 250 ms of each other share one
-turn. The agent never reads the job's output from the event itself: the note names the log.
+any other. Esc and `Ctrl+C` interrupt it, the current mode applies, and the session file saves it.
+Events that arrive within 250 ms of each other share one turn. The agent never reads the job's
+output from the event itself: the note names the log.
 
 - **Idle** means no task and no slash command running, an empty prompt, and no exit armed by
   `Ctrl+C`. While you type, the turn waits; a prompt you send takes the pending events with it, so

@@ -261,8 +261,8 @@ subagent's report reaches the model later, as data.
   (at least 2 KiB) and at most 32 KiB, and always at least one report; the others wait for the
   next step or turn. The data of one report stays within that budget with everything it holds: the
   stop message is cut to 1 KiB, and a report that does not fit is reduced to the room left and
-  saved whole, so a small context window is never filled by reports. Job notices never wait for reports. Notes in one request are in the order the events
-  happened.
+  saved whole, so a small context window is never filled by reports. Job notices never wait for
+  reports. Notes in one request are in the order the events happened.
 - **Concurrency.** Up to three subagents run at once; up to 16 more wait for a slot, in order.
   Beyond that, `delegate` is refused with `subagent.limit`.
 - **Limits.** 40 steps and 5 minutes per subagent, counted from when it starts running. Before
