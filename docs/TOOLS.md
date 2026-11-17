@@ -290,6 +290,12 @@ the message of a failed `git` command, `report` for `delegate`.
   than 64 KiB can be split between parts, and never inside a valid UTF-8 character. Concatenated in
   order, the parts are exactly the bytes received. Because `grep` matches line by line, a match is
   split between parts only in that case.
+- **Long lines.** `read_file` shows at most 2000 characters of a line and `grep` 500, so the middle
+  of a very long line (minified code, a JSON document on one line) is saved but cannot be read with
+  them. In `auto` mode, `bash` can extract any range of it (`cut -c`, `dd`).
+- **Searching a directory.** Inside a git repository, `grep` on a directory follows git's ignore
+  rules. With `TMPDIR` inside a repository whose rules ignore the part names (`*.txt`) but not the
+  directory, a search of the directory finds nothing; searching each part by its path works.
 - **Limits.** 64 MiB per output and 512 MiB per process, because the temporary directory is often
   a tmpfs, which is memory. When a limit is reached, saving stops; files already written are kept
   until nullrivet exits, so a path given to the model stays valid for the whole run.
@@ -297,8 +303,9 @@ the message of a failed `git` command, `report` for `delegate`.
   `truncated` and the reason when a limit or a write error stopped saving, and with `interrupted`
   when the capture ended early: the command timed out, was aborted, or left processes running that
   were killed before their output was read. A truncated output that was also interrupted says both.
-  A failure to save never fails the tool; when nothing could be written, the line says `not saved`
-  and why.
+  The state describes the saving, not the command: the output of a command that failed is complete
+  when every byte of it was saved. A failure to save never fails the tool; when nothing could be
+  written, the line says `not saved` and why.
 - **Binary output.** The bytes are preserved, but `read_file` and `grep` refuse files with a NUL
   byte in their first 8000 bytes. When a part has one, the line says so instead of suggesting those
   tools.
