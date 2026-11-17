@@ -150,15 +150,16 @@ export const createDelegateTool = (runtime: SubagentRuntime): Tool => {
     title: string,
     prompt: string,
     input: string | undefined,
-    requested: ExecutionMode,
+    ceiling: ExecutionMode,
     cwd: string,
     signal: AbortSignal,
     emit: AgentEventListener,
   ): Promise<Outcome> => {
     // The parent's mode is read again before every request and tool call of the subagent, so
-    // switching the session to readonly takes effect inside running subagents too.
+    // switching the session to readonly takes effect inside running subagents too. Switching it
+    // to auto never lifts the subagent above the mode it started with.
     const mode = (): ExecutionMode =>
-      requested === 'auto' && runtime.parentMode() === 'auto' ? 'auto' : 'readonly';
+      ceiling === 'auto' && runtime.parentMode() === 'auto' ? 'auto' : 'readonly';
     const provider = runtime.provider();
     const effort = runtime.effort();
     const instructions = runtime.instructions?.fork() ?? null;
@@ -306,8 +307,12 @@ export const createDelegateTool = (runtime: SubagentRuntime): Tool => {
       const material = context === undefined || context.trim().length === 0 ? undefined : context;
 
       const id = ctx.callId ?? crypto.randomUUID();
-      const lane =
-        requested === 'auto' && runtime.parentMode() === 'auto' ? autoLane : readonlyLane;
+      // The most the subagent may do is fixed with its lane: a subagent in the readonly lane must
+      // stay read-only, or a switch of the session to auto would let several of them write at
+      // once, past the limit of one auto subagent.
+      const ceiling: ExecutionMode =
+        requested === 'auto' && runtime.parentMode() === 'auto' ? 'auto' : 'readonly';
+      const lane = ceiling === 'auto' ? autoLane : readonlyLane;
       const release = await lane.acquire(ctx.signal);
       if (release === null) return toolError('tool.aborted', 'delegate was aborted');
       const emit = ctx.emit ?? (() => undefined);
@@ -319,7 +324,7 @@ export const createDelegateTool = (runtime: SubagentRuntime): Tool => {
       });
       let outcome: Outcome | undefined;
       try {
-        outcome = await run(id, title, objective, material, requested, cwd, ctx.signal, emit);
+        outcome = await run(id, title, objective, material, ceiling, cwd, ctx.signal, emit);
       } finally {
         release();
         emit({

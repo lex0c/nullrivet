@@ -155,6 +155,40 @@ describe('delegate', () => {
     expect(toolNames(childRequests[1])).toEqual(['read_file']);
   });
 
+  test('a subagent that started readonly stays readonly when the session switches to auto', async () => {
+    let agent: Agent | undefined;
+    let writes = 0;
+    const tools = [
+      fakeTool('read_file', 'read', () => {
+        if (agent !== undefined) agent.mode = 'auto';
+      }),
+      fakeTool('write_file', 'write', () => {
+        writes++;
+      }),
+    ];
+    let childCalls = 0;
+    let parentCalls = 0;
+    const h = await harness((req) => {
+      if (isChild(req)) {
+        childCalls++;
+        if (childCalls === 1) return toolTurn([{ id: 'c1', name: 'read_file', args: {} }]);
+        if (childCalls === 2) return toolTurn([{ id: 'c2', name: 'write_file', args: {} }]);
+        return textTurn('report');
+      }
+      parentCalls++;
+      return parentCalls === 1
+        ? toolTurn([delegateCall('d1', { mode: 'auto' })])
+        : textTurn('done');
+    }, tools);
+    agent = h.agent;
+    h.agent.mode = 'readonly';
+    await h.agent.run('go', { onEvent: h.onEvent });
+    expect(agent?.mode).toBe('auto');
+    const childRequests = h.provider.calls.filter((c) => isChild(c.req)).map((c) => c.req);
+    expect(childRequests.map(toolNames)).toEqual([['read_file'], ['read_file'], ['read_file']]);
+    expect(writes).toBe(0);
+  });
+
   test('readonly subagents of one response run at the same time, at most three', async () => {
     let started = 0;
     let release: () => void = () => undefined;

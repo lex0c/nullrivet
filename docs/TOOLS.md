@@ -236,7 +236,8 @@ Hands a self-contained task to a subagent and returns its report.
 - **Mode.** The subagent runs in the more restrictive of the requested mode and the session's
   current mode, read again before each of its requests and tool calls. That is why the tool's
   effect is `read` and it is offered in `readonly`: there, the subagent cannot change anything
-  either.
+  either. Its ceiling is fixed when it starts: a subagent that started read-only stays read-only
+  when the session switches to `auto`, so the limit of one `auto` subagent at a time holds.
 - **Concurrency.** Adjacent `delegate` calls in one response run at the same time: up to three
   `readonly` subagents at once, and `auto` subagents one after another. Results keep the order of
   the calls.

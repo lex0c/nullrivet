@@ -318,7 +318,9 @@ run tests, and only its report comes back.
   without `delegate`, so delegation is one level deep. Its system prompt adds a section that names
   the delegating agent as its user and asks for a report: result, evidence, open issues.
 - **Mode.** The subagent's mode is a function of the parent's, read before each of its requests
-  and tool calls: `auto` only when it asked for `auto` and the session is in `auto`.
+  and tool calls: `auto` only when it asked for `auto`, the session was in `auto` when it started,
+  and still is. The ceiling is fixed together with the semaphore it takes, so subagents in the
+  `readonly` lane never gain write access when the session switches to `auto`.
 - **Concurrency.** `delegate` is a concurrent tool: adjacent calls run at the same time. Two
   semaphores bound them: three `readonly` subagents at once, one `auto` subagent at a time. The
   parent waits for all of them, so it never writes while an `auto` subagent does.
