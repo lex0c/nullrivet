@@ -86,8 +86,6 @@ export const BRACKETED_PASTE_END = `${CSI}201~`;
 
 export const SGR = {
   reset: `${CSI}0m`,
-  // SGR 2 (faint) renders as plain text on many xterm configurations.
-  dim: `${CSI}2m`,
   // SGR 90 (bright black) is a grey that is visible everywhere; used for meta text that
   // must stand apart from content, where faint would disappear.
   secondary: `${CSI}90m`,

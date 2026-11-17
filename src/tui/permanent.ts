@@ -48,14 +48,14 @@ const toolLines = (
   const exit =
     typeof exitCode === 'number' && exitCode !== 0 ? paint(caps, 'warn', `  exit ${exitCode}`) : '';
   const metric = paint(caps, 'secondary', `  [${formatChipDuration(item.durationMs)}]`);
-  const lines = ['', `${paint(caps, item.isError ? 'error' : 'dim', head)}${exit}${metric}`];
+  const lines = ['', `${paint(caps, item.isError ? 'error' : 'secondary', head)}${exit}${metric}`];
   const summary = item.meta?.summary;
   if (typeof summary === 'string') {
     lines.push(
       padFrame(
         paint(
           caps,
-          item.isError ? 'error' : 'dim',
+          item.isError ? 'error' : 'secondary',
           `${subContentConnector(caps)}${oneLine(summary, frameWidth(caps) - 3)}`,
         ),
       ),

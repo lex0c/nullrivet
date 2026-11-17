@@ -56,7 +56,7 @@ const renderInline = (
         const rawLabel = renderInline(node.children, { ...caps, color: 'none' }, []);
         out +=
           node.url !== '' && node.url !== rawLabel
-            ? `${label} ${styled(`(${node.url})`, caps, [...active, 'dim'])}`
+            ? `${label} ${styled(`(${node.url})`, caps, [...active, 'secondary'])}`
             : label;
         break;
       }
@@ -115,7 +115,7 @@ const renderTable = (node: Table, caps: Capabilities, width: number, indent: num
   if (gridWidth <= avail) {
     const out = [gridRow(cellsOf(headerNode, ['bold']))];
     const ruleGlyph = caps.unicode ? '─' : '-';
-    out.push(pad + paint(caps, 'dim', ruleGlyph.repeat(Math.min(gridWidth, avail))));
+    out.push(pad + paint(caps, 'secondary', ruleGlyph.repeat(Math.min(gridWidth, avail))));
     for (const row of body) out.push(gridRow(row));
     return out;
   }
@@ -181,7 +181,7 @@ const renderBlock = (
       );
     case 'code':
       // Indented two columns and dimmed; no syntax highlighting.
-      return node.value.split('\n').map((l) => `${pad}  ${paint(caps, 'dim', l)}`);
+      return node.value.split('\n').map((l) => `${pad}  ${paint(caps, 'secondary', l)}`);
     case 'blockquote': {
       const bar = paint(caps, 'secondary', caps.unicode ? '│ ' : '| ');
       return renderFlow(node.children, caps, Math.max(1, width - indent - 2), 0).map(
@@ -190,7 +190,8 @@ const renderBlock = (
     }
     case 'thematicBreak':
       return [
-        pad + paint(caps, 'dim', (caps.unicode ? '─' : '-').repeat(Math.max(0, width - indent))),
+        pad +
+          paint(caps, 'secondary', (caps.unicode ? '─' : '-').repeat(Math.max(0, width - indent))),
       ];
     case 'list':
       return renderList(node, caps, width, indent);

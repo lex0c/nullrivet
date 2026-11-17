@@ -38,7 +38,7 @@ export const renderInput = (
   const innerWidth = Math.max(1, caps.cols - PREFIX_WIDTH);
   const shown = displayText(input.value);
   if (shown === '' && options.placeholder !== undefined && options.placeholder !== '') {
-    return [PROMPT_PREFIX + paint(caps, 'dim', options.placeholder)];
+    return [PROMPT_PREFIX + paint(caps, 'secondary', options.placeholder)];
   }
   const isSlashLine = shown.startsWith('/') && !shown.includes('\n');
   // The command token (slash and name, up to the first whitespace) is painted `accent` so the

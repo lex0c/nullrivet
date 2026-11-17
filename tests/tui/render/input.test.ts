@@ -30,9 +30,9 @@ describe('renderInput', () => {
     ]);
   });
 
-  test('placeholder is painted dim', () => {
+  test('placeholder is painted grey', () => {
     const out = renderInput({ value: '', cursor: 0 }, colored, { placeholder: 'hint' });
-    expect(out).toEqual([`> ${CSI}2mhint${CSI}0m`]);
+    expect(out).toEqual([`> ${CSI}90mhint${CSI}0m`]);
   });
 
   test('slash command token is painted accent; args keep the normal tone', () => {

@@ -31,7 +31,8 @@ export interface PlainSinkOptions {
 // The answer goes to stdout and everything else (tool activity, warnings, errors) to stderr, so
 // `nullrivet "..." > answer.md` captures only the answer.
 export const createPlainSink = (options: PlainSinkOptions): OutputSink => {
-  const dim = (s: string): string => (options.color ? `\x1b[2m${s}\x1b[22m` : s);
+  // Grey rather than faint, which many xterm configurations draw as plain text.
+  const grey = (s: string): string => (options.color ? `\x1b[90m${s}\x1b[39m` : s);
   const red = (s: string): string => (options.color ? `\x1b[31m${s}\x1b[39m` : s);
   const yellow = (s: string): string => (options.color ? `\x1b[33m${s}\x1b[39m` : s);
   let lineOpen = false;
@@ -58,7 +59,7 @@ export const createPlainSink = (options: PlainSinkOptions): OutputSink => {
           return;
         }
         case 'tool:start':
-          diagnostic(dim(`› ${event.name} ${toolSubject(event.name, event.args)}`));
+          diagnostic(grey(`› ${event.name} ${toolSubject(event.name, event.args)}`));
           return;
         case 'tool:end': {
           const summary = event.meta?.summary;
@@ -66,7 +67,7 @@ export const createPlainSink = (options: PlainSinkOptions): OutputSink => {
           titles.delete(event.id);
           if (typeof summary === 'string') {
             const label = title === undefined ? '' : `${title}: `;
-            diagnostic((event.isError ? red : dim)(`  ${label}${summary}`));
+            diagnostic((event.isError ? red : grey)(`  ${label}${summary}`));
           } else if (event.isError) {
             diagnostic(red(`  ✗ ${errorSummary(event.content, 200)}`));
           }
@@ -78,7 +79,7 @@ export const createPlainSink = (options: PlainSinkOptions): OutputSink => {
           return;
         case 'subagent:progress':
           diagnostic(
-            dim(
+            grey(
               `  ↳ ${titles.get(event.id) ?? 'subagent'}: ${event.tool.name} ${toolSubject(event.tool.name, event.tool.args)}`,
             ),
           );
@@ -88,7 +89,7 @@ export const createPlainSink = (options: PlainSinkOptions): OutputSink => {
           return;
         case 'context:compact':
           diagnostic(
-            dim(
+            grey(
               `› context compacted (${event.strategy}): ${event.before} → ${event.after} estimated tokens`,
             ),
           );

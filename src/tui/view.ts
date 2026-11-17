@@ -26,7 +26,7 @@ export const spinner = (caps: Capabilities, now: number): string => {
 };
 
 const rule = (caps: Capabilities): string =>
-  paint(caps, 'dim', (caps.unicode ? '─' : '-').repeat(Math.max(0, caps.cols)));
+  paint(caps, 'secondary', (caps.unicode ? '─' : '-').repeat(Math.max(0, caps.cols)));
 
 // The pending block is redrawn on every animation frame while its text changes far less often,
 // so the last rendering is reused until the text or the terminal changes.
@@ -48,7 +48,7 @@ const renderPending = (text: string, caps: Capabilities): string[] => {
 };
 
 const compactingChip = (since: number, caps: Capabilities, now: number): string =>
-  `${paint(caps, 'accent', spinner(caps, now))} ${renderShimmer('Compacting context…', caps, now, 'secondary')} ${paint(caps, 'dim', `(${formatChipDuration(now - since)})`)}`;
+  `${paint(caps, 'accent', spinner(caps, now))} ${renderShimmer('Compacting context…', caps, now, 'secondary')} ${paint(caps, 'secondary', `(${formatChipDuration(now - since)})`)}`;
 
 const phaseChip = (state: TuiState, turn: TurnState, caps: Capabilities, now: number): string => {
   if (state.compacting !== null) return compactingChip(state.compacting.since, caps, now);
@@ -63,7 +63,7 @@ const phaseChip = (state: TuiState, turn: TurnState, caps: Capabilities, now: nu
   if (turn.interrupting) details.push('ctrl+c to exit');
   if (turn.outputChars > 0)
     details.push(`↓ ~${formatTokens(Math.ceil(turn.outputChars / 4))} tokens`);
-  return `${paint(caps, 'accent', spinner(caps, now))} ${renderShimmer(label, caps, now, 'secondary')} ${paint(caps, 'dim', `(${details.join(' · ')})`)}`;
+  return `${paint(caps, 'accent', spinner(caps, now))} ${renderShimmer(label, caps, now, 'secondary')} ${paint(caps, 'secondary', `(${details.join(' · ')})`)}`;
 };
 
 const turnRows = (state: TuiState, turn: TurnState, caps: Capabilities, now: number): string[] => {
@@ -83,7 +83,11 @@ const turnRows = (state: TuiState, turn: TurnState, caps: Capabilities, now: num
       const doing = `${toolVerb(inner.name, 'running')} ${toolSubject(inner.name, inner.args, subjectWidth(caps))}`;
       rows.push(
         padFrame(
-          paint(caps, 'dim', `${subContentConnector(caps)}step ${tool.subagent.step} · ${doing}`),
+          paint(
+            caps,
+            'secondary',
+            `${subContentConnector(caps)}step ${tool.subagent.step} · ${doing}`,
+          ),
         ),
       );
     }
@@ -101,8 +105,6 @@ const contextLabel = (state: TuiState, caps: Capabilities): string | null => {
 };
 
 const footerRow = (state: TuiState, caps: Capabilities): string => {
-  // Grey rather than faint: xterm's default configuration draws faint text in the normal
-  // foreground color, which makes the hints indistinguishable from the rest of the row.
   const sep = paint(caps, 'secondary', ' · ');
   let left: string;
   if (state.exitArmedAt !== null) {
@@ -171,7 +173,7 @@ export const composeLive = (state: TuiState, caps: Capabilities, now: number): S
   }
   rows.push(footerRow(state, caps));
   const cwd = stripAnsi(shortenCwd(state.status.cwd, state.status.home, caps));
-  rows.push(padFrame(paint(caps, 'dim', cwd)));
+  rows.push(padFrame(paint(caps, 'secondary', cwd)));
   const cursor = inputCursor(state.input, caps);
   return { rows, cursor: { row: inputTop + cursor.row, col: cursor.col } };
 };
