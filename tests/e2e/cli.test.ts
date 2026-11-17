@@ -202,7 +202,11 @@ describe('context', () => {
 
   test('piped input reaches the model as fenced data after the prompt', async () => {
     server.handle(() => ({ text: 'reviewed' }));
-    const cli = startCli(['review this'], { env: cliEnv(server), stdin: 'the diff' });
+    const cli = startCli(['review this'], {
+      env: cliEnv(server),
+      cwd: tempDir(),
+      stdin: 'the diff',
+    });
     expect((await cli.finished).code).toBe(0);
     const user = server.requests[0]?.messages.find((m) => m.role === 'user')?.content ?? '';
     expect(user).toMatch(/^review this\n\n<input fence="[0-9a-f]{12}">\nthe diff\n<\/input fence=/);

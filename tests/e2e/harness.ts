@@ -142,14 +142,15 @@ export interface RunningCli {
   finished: Promise<{ code: number; stderr: string }>;
 }
 
-// Starts the CLI with --json and parses its stdout as NDJSON while it runs.
+// Starts the CLI with --json and parses its stdout as NDJSON while it runs. The directory is
+// required so no test runs in the checkout, whose AGENTS.md would reach the model.
 export const startCli = (
   args: readonly string[],
-  options: { env: Record<string, string>; cwd?: string; stdin?: string },
+  options: { env: Record<string, string>; cwd: string; stdin?: string },
 ): RunningCli => {
   const child = Bun.spawn(cliCommand(['--json', ...args]), {
     env: options.env,
-    ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+    cwd: options.cwd,
     stdin: options.stdin === undefined ? 'ignore' : 'pipe',
     stdout: 'pipe',
     stderr: 'pipe',
