@@ -101,7 +101,9 @@ const contextLabel = (state: TuiState, caps: Capabilities): string | null => {
 };
 
 const footerRow = (state: TuiState, caps: Capabilities): string => {
-  const sep = paint(caps, 'dim', ' · ');
+  // Grey rather than faint: xterm's default configuration draws faint text in the normal
+  // foreground color, which makes the hints indistinguishable from the rest of the row.
+  const sep = paint(caps, 'secondary', ' · ');
   let left: string;
   if (state.exitArmedAt !== null) {
     left = paint(caps, 'warn', 'Press Ctrl+C again to exit');
@@ -114,8 +116,8 @@ const footerRow = (state: TuiState, caps: Capabilities): string => {
     // in narrow terminals.
     left =
       state.turn !== null
-        ? `${mode}${sep}${paint(caps, 'dim', 'esc to interrupt')}`
-        : `${mode}${paint(caps, 'dim', ' (shift+tab to change)')}`;
+        ? `${mode}${sep}${paint(caps, 'secondary', 'esc to interrupt')}`
+        : `${mode}${paint(caps, 'secondary', ' (shift+tab to change)')}`;
   }
   // Right-side parts in order of importance; the least important are dropped first when the
   // row is too narrow, and the model name is shortened last.

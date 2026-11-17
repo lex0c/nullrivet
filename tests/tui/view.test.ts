@@ -78,6 +78,29 @@ describe('composeLive', () => {
     expect(row).not.toContain('shift+tab');
   });
 
+  test('the footer hints are grey, not faint', () => {
+    const colored = { ...caps(140), color: 'basic' as const };
+    const row = (state: TuiState): string => {
+      const rows = composeLive(state, colored, 0).rows;
+      return rows[rows.length - 2] ?? '';
+    };
+    const idle = row(base());
+    expect(idle).toContain('\x1b[90m (shift+tab to change)');
+    const running = row({
+      ...base(),
+      turn: {
+        startedAt: 0,
+        pendingText: '',
+        thinkingSince: null,
+        outputChars: 0,
+        interrupting: false,
+        tools: [],
+      },
+    });
+    expect(running).toContain('\x1b[90m · \x1b[0m\x1b[90mesc to interrupt');
+    expect(`${idle}${running}`).not.toContain('\x1b[2m');
+  });
+
   test('popover rows carry the frame margin', () => {
     const state = {
       ...base(),
