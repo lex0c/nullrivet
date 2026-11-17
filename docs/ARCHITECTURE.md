@@ -346,7 +346,9 @@ only reads: the main agent is the only one that changes files or runs commands.
   the slot back without starting.
 - **Limits.** The session's limits for a task, `--max-steps` and `--timeout`, apply to each run,
   the time counted from when it starts running; without a `--timeout`, a run has only the step
-  limit and the stall watchdog of each request. The deadline aborts with the same reason as
+  limit and the stall watchdog of each request, so it can hold its slot, and the queue behind it,
+  for as long as its steps take. That is the same budget as the main agent's, chosen over a fixed
+  limit of its own. The deadline aborts with the same reason as
   `--timeout`, so the loop reports a limit, not a cancellation. Before its last step, a runtime note
   asks for the report without more tool calls. After four fifths of the time limit, the loop makes
   the step in progress the last one (`finalStepAt`), so a run that is about to time out still

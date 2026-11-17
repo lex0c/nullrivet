@@ -51,7 +51,8 @@ export interface LoopLimits {
   // Base delay before repeating a step that failed with a transient stream error.
   streamRetryDelayMs?: number;
   // Added as a runtime note before the last step, so a turn that runs out of steps can still end
-  // with an answer instead of a tool call.
+  // with an answer instead of a tool call. With a limit of one step, the first request is the last
+  // and gets it too.
   finalStepNote?: string;
   // Time (as Date.now()) from which the next step is the last one, as at maxSteps: it gets the
   // final step note and the turn ends after it. It leaves room for an answer before a hard time
@@ -426,7 +427,7 @@ export const runTurn = async (
     if (signal.aborted) return end('aborted');
     steps += 1;
     if (limits.finalStepAt !== undefined && Date.now() >= limits.finalStepAt) maxSteps = steps;
-    if (steps === maxSteps && steps > 1 && limits.finalStepNote !== undefined) {
+    if (steps === maxSteps && limits.finalStepNote !== undefined) {
       conversation.appendUser(agentNote(limits.finalStepNote));
     }
     // The system prompt states the current mode, but answers given under the previous one stay

@@ -209,6 +209,16 @@ describe('runTurn', () => {
     );
   });
 
+  test('with a limit of one step, the first request is the last and gets the final step note', async () => {
+    const h = harness([textTurn('report')], { maxSteps: 1 });
+    h.deps.limits = { ...h.deps.limits, finalStepNote: 'write your report now' };
+    const result = await runTurn('work', h.deps);
+    expect(result.reason).toBe('done');
+    expect(JSON.stringify(h.provider.calls[0]?.req.messages.at(-1))).toContain(
+      'write your report now',
+    );
+  });
+
   test('a last step set by the time ends the turn normally when the model answers', async () => {
     const h = harness([textTurn('report')]);
     h.deps.limits = { ...h.deps.limits, finalStepAt: 0 };
