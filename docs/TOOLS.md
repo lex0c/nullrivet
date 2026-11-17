@@ -24,7 +24,8 @@ Common behavior:
 - **Errors** come back to the model as text of the form `error [<code>]: <message>`, followed by a
   `hint:` line when there is one. They never end the task.
 - **Output** has terminal escape sequences and control bytes removed before it enters the
-  conversation.
+  conversation. When `bash`, `git` or `delegate` reduce a result, the complete output is saved to
+  files named in the result (see [Saved output](#saved-output)).
 
 ## read_file
 
@@ -155,8 +156,9 @@ Runs a command with `bash -c`.
   the background are terminated as well, so nothing outlives the call.
 - **Output.** stdout and stderr are captured separately in bounded memory (the first and last
   2 MiB of each). Each stream is then reduced to 16 KiB for the model, keeping the first and last
-  80 lines. The result ends with the exit code, or with a note that the command timed out or was
-  aborted.
+  80 lines. A reduced stream is also saved whole, beyond the memory bound, to its own files (see
+  [Saved output](#saved-output)). The result ends with the exit code, or with a note that the
+  command timed out or was aborted, followed by a line naming the files of each saved stream.
 - **Exit status.** A non-zero exit code is reported but is not a tool error: a failing test run is
   information the model needs. A timeout or abort is a tool error.
 - **Credentials.** The API keys nullrivet uses (`OPENROUTER_API_KEY` and the keys of the other
@@ -217,7 +219,8 @@ plain git creates it and the tool does not.
 
 ### Output and limits
 
-Output is reduced to 32 KiB, keeping the first 300 and last 50 lines. Each call times out after
+Output is reduced to 32 KiB, keeping the first 300 and last 50 lines; reduced output is saved
+whole (see [Saved output](#saved-output)). Each call times out after
 30 s. A failing git command (for example, a directory outside a repository) comes back as a
 `git.failed` error with git's message.
 
@@ -243,7 +246,8 @@ Hands a self-contained task to a subagent and returns its report.
   the calls.
 - **Limits.** 40 steps per subagent. Before the last one, a runtime note asks the subagent to
   write its report without calling more tools, so a subagent that runs out of steps still reports
-  what it found. The report is reduced to 16 KiB (about 4,096 tokens), keeping its start and end.
+  what it found. The report is reduced to 16 KiB (about 4,096 tokens), keeping its start and end;
+  a reduced report is saved whole (see [Saved output](#saved-output)).
   There is no time limit of its own: the session's `--timeout`, the stall watchdog and interrupts
   apply.
 - **Result.** A status line written by the runtime (`completed`, `failed`, `cancelled` or
@@ -252,3 +256,52 @@ Hands a self-contained task to a subagent and returns its report.
   why. A failed or cancelled subagent is an error result.
 - **Depth.** A subagent cannot delegate.
 
+## Saved output
+
+When `bash`, `git` or `delegate` reduce a result, the complete output is also written to files,
+and a line at the end of the result names them. It comes last because compaction keeps the start
+and the end of older results, so the line survives it. The model reads the omitted part with
+`read_file` or searches it with `grep` instead of running the command again. Both are `read`
+tools, so this works in `readonly` mode too.
+
+```
+[complete stdout (2.3MB) saved to `/tmp/nullrivet-Ab12Cd/3-bash-stdout.001.txt`; read it with read_file or search it with grep]
+[complete output (23.4MB) saved in 3 parts, `/tmp/nullrivet-Ab12Cd/4-git.001.txt` to `/tmp/nullrivet-Ab12Cd/4-git.003.txt`; read each part with read_file, or search all of them with grep (path `/tmp/nullrivet-Ab12Cd`, glob `4-git.*.txt`)]
+```
+
+Paths are quoted with backticks, so punctuation after them is not read as part of the path. The
+line names what was saved: `stdout` or `stderr` for `bash`, `output` for `git`, `report` for
+`delegate`.
+
+- **Location.** A directory created with `mkdtemp` in the system temporary directory (`TMPDIR`,
+  usually `/tmp`, resolved to an absolute path) on the first saved output, readable only by the
+  user (`0700`, files `0600`), created again if something removes it during the run, and removed
+  when nullrivet exits, including on SIGINT, SIGTERM and SIGHUP. File names hold a counter and a
+  fixed label (`bash-stdout`, `bash-stderr`, `git`, `delegate`), never text from the model or a
+  command.
+- **Only reduced output is kept.** Output under the reduction limit is never written. Output over
+  it is written while the command runs, because whether it will be reduced is known only at the
+  end; when it is not (a failing `git` command, whose output is not shown, for example), its files
+  are removed as soon as the call ends.
+- **Parts.** A file holds at most 10 MiB, the largest file `read_file` and `grep` accept, so a
+  larger output is split into numbered parts. Parts end at line boundaries; only a line longer
+  than 64 KiB can be split between parts, and never inside a valid UTF-8 character. Concatenated in
+  order, the parts are exactly the bytes received. Because `grep` matches line by line, a match is
+  split between parts only in that case.
+- **Limits.** 64 MiB per output and 512 MiB per process, because the temporary directory is often
+  a tmpfs, which is memory. When a limit is reached, saving stops; files already written are kept
+  until nullrivet exits, so a path given to the model stays valid for the whole run.
+- **States.** The line starts with `complete` when every byte received was saved, with
+  `truncated` and the reason when a limit or a write error stopped saving, and with `interrupted`
+  when the capture ended early: the command timed out, was aborted, or left processes running that
+  were killed before their output was read. A truncated output that was also interrupted says both.
+  A failure to save never fails the tool; when nothing could be written, the line says `not saved`
+  and why.
+- **Binary output.** The bytes are preserved, but `read_file` and `grep` refuse files with a NUL
+  byte in their first 8000 bytes. When a part has one, the line says so instead of suggesting those
+  tools.
+- **Privacy and lifetime.** Even without `--session`, tool output is written to disk for the
+  duration of the run. When `TMPDIR` points to persistent storage, the files are there until
+  nullrivet exits; a process killed with SIGKILL or by the OOM killer leaves its directory behind.
+  A resumed session can name files of an earlier run that no longer exist; `read_file` reports them
+  as not found.

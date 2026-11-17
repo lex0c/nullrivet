@@ -6,8 +6,10 @@ inspecting git repositories.
 
 - **Ephemeral.** The conversation lives in memory. nullrivet writes no database, history, logs,
   caches or configuration; a conversation is saved only to a file you name with
-  [`--session`](#sessions). Commands the agent runs and the model provider may keep their own
-  records.
+  [`--session`](#sessions). The one exception is the complete output of tool results reduced for
+  the model, kept in private temporary files while nullrivet runs and removed when it exits
+  ([saved output](docs/TOOLS.md#saved-output)). Commands the agent runs and the model provider may
+  keep their own records.
 - **Two execution modes.** `auto` runs every tool without confirmation; `readonly` exposes only
   read tools and is enforced by the executor, not just by the prompt.
 - **Not confined to a directory.** `--cwd` is only the starting point. Tools can reach any path the

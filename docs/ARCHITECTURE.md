@@ -9,7 +9,8 @@ file.
 
 - **Ephemeral.** No state is written by nullrivet itself: no database, history, logs, caches or
   configuration. The only persistent effects are the ones tools produce on purpose, and a session
-  file when the user names one.
+  file when the user names one. The complete output of reduced tool results is the one exception:
+  it is kept in private temporary files for the duration of the run and removed when it ends.
 - **Provider-agnostic core.** The agent speaks one canonical message and stream format; adapters
   translate it to each provider's API.
 - **Events, not callbacks into the UI.** The core publishes `AgentEvent`s. The plain output, the
@@ -63,6 +64,7 @@ src/
     glob.ts, grep.ts       file search; grep-search.ts runs in grep-worker.ts
     file-walk.ts           directory listing shared by glob and grep
     process.ts             process groups, timeouts, bounded capture
+    output-files.ts        complete output of reduced results, saved in parts to temporary files
     args.ts, paths.ts, env.ts
   instructions/
     agents-loader.ts       AGENTS.md discovery and rendering
@@ -153,8 +155,9 @@ The in-memory conversation keeps the invariants that provider APIs require:
 
 ## Context management
 
-Everything lives in memory: there is no log to recover discarded content from, so the conversation
-is reduced conservatively and never with pointers to data that no longer exists.
+Everything lives in memory, apart from the saved output of reduced tool results, which lasts
+until the process exits. There is no log to recover discarded content from, so the conversation is
+reduced conservatively and never with pointers to data that no longer exists.
 
 ### Measuring
 
@@ -220,6 +223,14 @@ with a note to the model. Only one recovery happens per step: a second overflow 
 
 Tool output is reduced before it enters the conversation: large results keep their first and last
 lines (or bytes, for very long lines) with a marker showing how much was dropped.
+
+When `bash`, `git` or `delegate` reduce a result, the complete output is also written to private
+temporary files, split into parts no larger than what `read_file` and `grep` accept, and a line
+below the reduced text names them. Reduction then affects what the model sees first, not what it
+can recover: it reads the omitted part with the read tools, in either mode, instead of running the
+command again. The files are removed when nullrivet exits and never before, so a path in the
+conversation stays valid for the whole run. Limits and states are described in
+[TOOLS.md](TOOLS.md#saved-output).
 
 ## Tools and the execution policy
 
@@ -329,7 +340,8 @@ run tests, and only its report comes back.
   terminated like the parent's.
 - **Result.** A status line built by the runtime from what it observed (status, steps, tool
   errors, tokens, files changed through `edit_file` and `write_file` relative to the session
-  directory, and why it stopped early), then the subagent's last answer, reduced to 16 KiB. Before
+  directory, and why it stopped early), then the subagent's last answer, reduced to 16 KiB and
+  saved whole when it was reduced. Before
   its last step, a runtime note asks for the report without more tool calls. It enters the
   parent's conversation as one tool result, which is data like any other.
 - **Events.** The subagent's own events are not forwarded: text from two agents would mix. The
@@ -390,7 +402,8 @@ version.
 
 Commands run in their own process group with stdin closed. A timeout, an abort or the end of the
 command terminates the whole group (SIGTERM, then SIGKILL after 2 s), so background jobs do not
-outlive the call. Every live group is killed when nullrivet exits.
+outlive the call. Every live group is killed when nullrivet exits, including on SIGTERM and on
+SIGHUP (a closed terminal or a lost SSH connection), whose default action would skip it.
 
 ## Interactive session
 

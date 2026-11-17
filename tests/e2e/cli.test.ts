@@ -6,12 +6,14 @@ import {
   mkdirSync,
   mkdtempSync,
   openSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { savedOutputs } from '../helpers/saved-output.ts';
 import {
   type ChatRequest,
   cliCommand,
@@ -135,6 +137,61 @@ describe('cancellation', () => {
       message: 'time limit of 2s reached',
     });
     expect(processRunning(sleep)).toBe(false);
+  }, 30_000);
+});
+
+describe('saved output', () => {
+  test('a reduced result names files that exist during the run and are removed at exit', async () => {
+    const tmp = tempDir();
+    let named: string[] = [];
+    let existedDuringRun = false;
+    server.handle((request) => {
+      const results = toolMessages(request);
+      if (results.length === 0) {
+        return { toolCalls: [{ name: 'bash', args: { command: 'seq 1 100000' } }] };
+      }
+      named = savedOutputs(results[0]?.content ?? '')[0] ?? [];
+      existedDuringRun = named.length > 0 && named.every((part) => existsSync(part));
+      return { text: 'done' };
+    });
+    const cli = startCli(['run it'], { env: cliEnv(server, { TMPDIR: tmp }), cwd: tempDir() });
+    const { code } = await cli.finished;
+    expect(code).toBe(0);
+    expect(named).toHaveLength(1);
+    expect(named[0]?.startsWith(join(tmp, 'nullrivet-'))).toBe(true);
+    expect(existedDuringRun).toBe(true);
+    expect(readdirSync(tmp)).toEqual([]);
+  }, 30_000);
+
+  test('the files are removed when an interrupt ends the run', async () => {
+    const tmp = tempDir();
+    const sleep = uniqueSleep();
+    server.handle(toolsThenText([{ name: 'bash', args: { command: `seq 1 100000; ${sleep}` } }]));
+    const cli = startCli(['run it'], { env: cliEnv(server, { TMPDIR: tmp }), cwd: tempDir() });
+    await cli.waitFor((e) => e.type === 'tool:start');
+    const deadline = Date.now() + 10_000;
+    while (readdirSync(tmp).length === 0 && Date.now() < deadline) await Bun.sleep(20);
+    expect(readdirSync(tmp)).toHaveLength(1);
+    cli.child.kill('SIGINT');
+    const { code } = await cli.finished;
+    expect(code).toBe(130);
+    expect(readdirSync(tmp)).toEqual([]);
+  }, 30_000);
+
+  test('a hangup stops running commands and removes the files', async () => {
+    const tmp = tempDir();
+    const sleep = uniqueSleep();
+    server.handle(toolsThenText([{ name: 'bash', args: { command: `seq 1 100000; ${sleep}` } }]));
+    const cli = startCli(['run it'], { env: cliEnv(server, { TMPDIR: tmp }), cwd: tempDir() });
+    await cli.waitFor((e) => e.type === 'tool:start');
+    const deadline = Date.now() + 10_000;
+    while (readdirSync(tmp).length === 0 && Date.now() < deadline) await Bun.sleep(20);
+    expect(processRunning(sleep)).toBe(true);
+    cli.child.kill('SIGHUP');
+    const { code } = await cli.finished;
+    expect(code).toBe(129);
+    expect(processRunning(sleep)).toBe(false);
+    expect(readdirSync(tmp)).toEqual([]);
   }, 30_000);
 });
 

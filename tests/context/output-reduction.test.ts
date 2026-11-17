@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test';
-import { HEAD_TAIL_DEFAULT_LINES, headTailSummary } from '../../src/context/output-reduction.ts';
+import {
+  HEAD_TAIL_DEFAULT_LINES,
+  headTailSummary,
+  utf8CompleteLength,
+} from '../../src/context/output-reduction.ts';
 
 describe('headTailSummary', () => {
   test('passes through when input is at or below maxBytes', () => {
@@ -107,5 +111,23 @@ describe('headTailSummary', () => {
     expect(Buffer.byteLength(out.text, 'utf8')).toBeLessThan(16 * 1024 + 100);
     expect(out.text.startsWith('0:x')).toBe(true);
     expect(out.text.endsWith('x'.repeat(100))).toBe(true);
+  });
+});
+
+describe('utf8CompleteLength', () => {
+  test('leaves out only a character the buffer ends in the middle of', () => {
+    const emoji = Buffer.from('😀');
+    const accent = Buffer.from('é');
+    expect(utf8CompleteLength(Buffer.from('abc'))).toBe(3);
+    expect(utf8CompleteLength(Buffer.concat([Buffer.from('a'), accent]))).toBe(3);
+    expect(utf8CompleteLength(Buffer.concat([Buffer.from('a'), accent.subarray(0, 1)]))).toBe(1);
+    expect(utf8CompleteLength(Buffer.concat([Buffer.from('ab'), emoji]))).toBe(6);
+    for (const cut of [1, 2, 3]) {
+      expect(utf8CompleteLength(Buffer.concat([Buffer.from('ab'), emoji.subarray(0, cut)]))).toBe(
+        2,
+      );
+    }
+    expect(utf8CompleteLength(Buffer.alloc(0))).toBe(0);
+    expect(utf8CompleteLength(Buffer.from([0x80, 0x80, 0x80, 0x80]))).toBe(4);
   });
 });

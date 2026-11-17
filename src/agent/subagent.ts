@@ -6,6 +6,7 @@ import type { InstructionsLoader } from '../instructions/agents-loader.ts';
 import type { Provider, ProviderEffort } from '../providers/types.ts';
 import { InvalidArgumentError, optionalString, requireNonEmptyString } from '../tools/args.ts';
 import { fileSystemError } from '../tools/file-io.ts';
+import { describeSavedOutput, outputFiles } from '../tools/output-files.ts';
 import { displayPath, resolvePath } from '../tools/paths.ts';
 import type { ExecutionMode } from '../tools/policy.ts';
 import { type Tool, type ToolResult, toolError } from '../tools/types.ts';
@@ -113,15 +114,19 @@ const summaryLine = (o: Outcome): string => {
 // parent can rely on it even when the answer is missing or wrong.
 const resultContent = (o: Outcome): string => {
   const head = `[subagent ${summaryLine(o)}]`;
-  const report =
-    o.report.trim().length > 0
-      ? headTailSummary(o.report.trim(), {
-          maxBytes: REPORT_MAX_BYTES,
-          headLines: 400,
-          tailLines: 100,
-        }).text
-      : '(the subagent gave no final answer)';
-  return `${head}\n\n${report}`;
+  const report = o.report.trim();
+  if (report.length === 0) return `${head}\n\n(the subagent gave no final answer)`;
+  const summary = headTailSummary(report, {
+    maxBytes: REPORT_MAX_BYTES,
+    headLines: 400,
+    tailLines: 100,
+  });
+  if (!summary.reduced) return `${head}\n\n${summary.text}`;
+  const spool = outputFiles.spool('delegate', 0);
+  spool.push(Buffer.from(report, 'utf8'));
+  const saved = spool.finish({ keep: true });
+  const note = saved === null ? '' : `\n${describeSavedOutput(saved, 'report')}`;
+  return `${head}\n\n${summary.text}${note}`;
 };
 
 const finalAnswer = (conversation: Conversation): string => {

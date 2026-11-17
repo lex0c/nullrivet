@@ -1,10 +1,12 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { chmod, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { listFiles } from '../../src/tools/file-walk.ts';
 import { gitTool } from '../../src/tools/git.ts';
+import { removeOutputFiles } from '../../src/tools/output-files.ts';
 import type { ToolContext } from '../../src/tools/types.ts';
+import { readParts, savedOutputs } from '../helpers/saved-output.ts';
 
 let dir: string;
 
@@ -41,6 +43,8 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
+afterAll(() => removeOutputFiles());
+
 describe('git tool', () => {
   test('is a read tool', () => {
     expect(gitTool.effect).toBe('read');
@@ -65,6 +69,26 @@ describe('git tool', () => {
     expect(between.content).toContain('a.txt | 1 +');
     const filtered = await git({ subcommand: 'diff', staged: true, paths: ['missing.txt'] });
     expect(filtered.content).toBe('[no changes]');
+  });
+
+  test('a large diff is reduced and saved whole to a file', async () => {
+    sh('seq 1 20000 > big.txt && git add big.txt && git commit -qm big');
+    sh("seq 1 20000 | sed 's/$/ changed/' > big.txt");
+    const result = await git({ subcommand: 'diff' });
+    expect(result.content).toContain('lines elided');
+    const outputs = savedOutputs(result.content);
+    expect(outputs).toHaveLength(1);
+    expect(outputs[0]?.[0]).toContain('-git.001.txt');
+    expect(readParts(outputs[0] ?? []).toString()).toBe(
+      sh('git --no-pager diff --no-ext-diff --no-textconv --ignore-submodules=all'),
+    );
+  });
+
+  test('a small diff is not saved', async () => {
+    sh('echo four >> a.txt');
+    const result = await git({ subcommand: 'diff' });
+    expect(result.content).toContain('+four');
+    expect(savedOutputs(result.content)).toEqual([]);
   });
 
   test('log honours max_count and oneline', async () => {

@@ -1,6 +1,7 @@
 #!/usr/bin/env -S bun --no-env-file --config=/dev/null
 import { runCli } from './cli/run.ts';
 import { BoundedCapture } from './context/bounded-capture.ts';
+import { removeOutputFiles } from './tools/output-files.ts';
 import { killAllProcessGroups } from './tools/process.ts';
 
 const controller = new AbortController();
@@ -18,12 +19,19 @@ process.on('SIGINT', () => {
   killAllProcessGroups();
   process.exit(130);
 });
-process.on('SIGTERM', () => {
+const terminate = (code: number) => (): void => {
   controller.abort();
   killAllProcessGroups();
-  process.exit(143);
+  process.exit(code);
+};
+process.on('SIGTERM', terminate(143));
+// A closed terminal or a lost SSH connection sends SIGHUP, whose default action ends the process
+// without the exit handler, which would leave commands running and saved output on disk.
+process.on('SIGHUP', terminate(129));
+process.on('exit', () => {
+  killAllProcessGroups();
+  removeOutputFiles();
 });
-process.on('exit', killAllProcessGroups);
 
 // Piped input is read in bounded memory, and an interrupt stops waiting for an input that never
 // ends (a parent process that leaves stdin open).

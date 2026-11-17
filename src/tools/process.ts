@@ -18,6 +18,9 @@ export interface ProcessRunOptions {
   signal: AbortSignal;
   // Memory bound for stdout; defaults to CAPTURE_LIMIT_BYTES.
   stdoutLimitBytes?: number;
+  // Receive every chunk of output, beyond the memory bound. They must not throw.
+  onStdout?: (chunk: Buffer) => void;
+  onStderr?: (chunk: Buffer) => void;
 }
 
 export interface ProcessRunResult {
@@ -29,7 +32,18 @@ export interface ProcessRunResult {
   stdoutBytes: number;
   stderrBytes: number;
   durationMs: number;
+  // True when processes left in the group kept the output pipes open past the grace period and
+  // were killed, so output still in the pipes was not read.
+  outputCutOff: boolean;
 }
+
+// Why the output of a run ended before the command finished writing it, if it did.
+export const captureInterruption = (run: ProcessRunResult): string | undefined => {
+  if (run.termination === 'timeout') return 'the command timed out';
+  if (run.termination === 'aborted') return 'the command was aborted';
+  if (run.outputCutOff) return 'the processes the command left running were killed';
+  return undefined;
+};
 
 // Process groups still running, so they can be killed when the agent exits.
 const liveGroups = new Set<number>();
@@ -47,9 +61,16 @@ export const killAllProcessGroups = (): void => {
   liveGroups.clear();
 };
 
-const capture = (stream: Readable | null, limit = CAPTURE_LIMIT_BYTES): BoundedCapture => {
+const capture = (
+  stream: Readable | null,
+  limit = CAPTURE_LIMIT_BYTES,
+  onChunk?: (chunk: Buffer) => void,
+): BoundedCapture => {
   const out = new BoundedCapture(limit);
-  stream?.on('data', (chunk: Buffer) => out.push(chunk));
+  stream?.on('data', (chunk: Buffer) => {
+    out.push(chunk);
+    onChunk?.(chunk);
+  });
   return out;
 };
 
@@ -80,9 +101,10 @@ export const runProcess = (options: ProcessRunOptions): Promise<ProcessRunResult
     });
     const pgid = child.pid;
     if (pgid !== undefined) liveGroups.add(pgid);
-    const stdout = capture(child.stdout, options.stdoutLimitBytes);
-    const stderr = capture(child.stderr);
+    const stdout = capture(child.stdout, options.stdoutLimitBytes, options.onStdout);
+    const stderr = capture(child.stderr, undefined, options.onStderr);
     let termination: Termination = 'exited';
+    let outputCutOff = false;
     let killTimer: ReturnType<typeof setTimeout> | null = null;
 
     const terminate = (reason: Termination): void => {
@@ -118,6 +140,7 @@ export const runProcess = (options: ProcessRunOptions): Promise<ProcessRunResult
           signalGroup(pgid, 'SIGKILL');
           child.stdout?.destroy();
           child.stderr?.destroy();
+          outputCutOff = true;
         }
       }
       cleanup();
@@ -131,6 +154,7 @@ export const runProcess = (options: ProcessRunOptions): Promise<ProcessRunResult
         stdoutBytes: stdout.totalBytes,
         stderrBytes: stderr.totalBytes,
         durationMs: Date.now() - startedAt,
+        outputCutOff,
       });
     });
   });

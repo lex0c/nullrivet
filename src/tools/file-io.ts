@@ -12,7 +12,7 @@ export const MAX_FILE_BYTES = 10 * 1024 * 1024;
 // Git uses the same window to classify a file as binary. A NUL byte never occurs in UTF-8 text,
 // and images, object files and archives contain one near the start. UTF-16 text is also
 // classified as binary; it would decode to unreadable text anyway.
-const BINARY_SCAN_BYTES = 8000;
+export const BINARY_SCAN_BYTES = 8000;
 
 // Offset of the first NUL byte in the leading bytes, the same heuristic git and grep use to tell
 // binary files from text; -1 for text.

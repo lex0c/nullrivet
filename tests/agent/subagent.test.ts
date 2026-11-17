@@ -1,11 +1,15 @@
-import { describe, expect, test } from 'bun:test';
+import { afterAll, describe, expect, test } from 'bun:test';
 import { mkdir } from 'node:fs/promises';
 import { type Agent, createAgent } from '../../src/agent/agent.ts';
 import type { AgentEvent } from '../../src/agent/events.ts';
 import type { GenerateRequest, StreamEvent } from '../../src/providers/types.ts';
 import { FENCE } from '../../src/sanitize/fence.ts';
+import { removeOutputFiles } from '../../src/tools/output-files.ts';
 import type { Tool, ToolEffect } from '../../src/tools/types.ts';
 import { createMockProvider, textTurn, toolTurn } from '../helpers/mock-provider.ts';
+import { readParts, savedOutputs } from '../helpers/saved-output.ts';
+
+afterAll(() => removeOutputFiles());
 
 const isChild = (req: GenerateRequest): boolean => req.system?.includes('# Subagent') === true;
 
@@ -258,10 +262,11 @@ describe('delegate', () => {
     });
   });
 
-  test('a subagent cannot delegate, and a long report is cut', async () => {
+  test('a subagent cannot delegate, and a long report is cut and saved whole', async () => {
+    const report = `start\n${'line\n'.repeat(10_000)}end`;
     let parentCalls = 0;
     const h = await harness((req) => {
-      if (isChild(req)) return textTurn(`start\n${'line\n'.repeat(10_000)}end`);
+      if (isChild(req)) return textTurn(report);
       parentCalls++;
       return parentCalls === 1 ? toolTurn([delegateCall('d1', {})]) : textTurn('done');
     });
@@ -271,7 +276,24 @@ describe('delegate', () => {
     const [result] = toolResults(h.provider.calls.at(-1)?.req);
     expect(Buffer.byteLength(result?.content ?? '', 'utf8')).toBeLessThan(17 * 1024);
     expect(result?.content).toContain('start');
-    expect(result?.content).toEndWith('end');
+    expect(result?.content).toContain('line\nend\n[complete report (');
+    const outputs = savedOutputs(result?.content ?? '');
+    expect(outputs).toHaveLength(1);
+    expect(outputs[0]?.[0]).toContain('-delegate.001.txt');
+    expect(readParts(outputs[0] ?? []).toString()).toBe(report);
+  });
+
+  test('a short report is returned whole and not saved', async () => {
+    let parentCalls = 0;
+    const h = await harness((req) => {
+      if (isChild(req)) return textTurn('short report');
+      parentCalls++;
+      return parentCalls === 1 ? toolTurn([delegateCall('d1', {})]) : textTurn('done');
+    });
+    await h.agent.run('go', { onEvent: h.onEvent });
+    const [result] = toolResults(h.provider.calls.at(-1)?.req);
+    expect(result?.content).toEndWith('\n\nshort report');
+    expect(savedOutputs(result?.content ?? '')).toEqual([]);
   });
 
   test('a subagent at its step limit is asked for its report on the last step', async () => {
