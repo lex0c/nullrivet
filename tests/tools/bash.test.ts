@@ -168,6 +168,10 @@ describe('bash tool', () => {
 });
 
 describe('bash tool output files', () => {
+  // The seq of macOS writes numbers from a million on in exponent notation (1e+06) unless it is
+  // given a format.
+  const numbers = (count: number): string => `seq -f %.0f 1 ${count}`;
+
   test('a small output is returned whole and not saved', async () => {
     const result = await bashTool.execute({ command: 'seq 1 100' }, ctx());
     expect(savedOutputs(result.content)).toEqual([]);
@@ -175,7 +179,7 @@ describe('bash tool output files', () => {
   });
 
   test('the complete output is saved, beyond the memory bound of the capture', async () => {
-    const result = await bashTool.execute({ command: 'seq 1 1000000' }, ctx());
+    const result = await bashTool.execute({ command: numbers(1_000_000) }, ctx());
     const outputs = savedOutputs(result.content);
     expect(outputs).toHaveLength(1);
     expect(outputs[0]).toHaveLength(1);
@@ -184,8 +188,10 @@ describe('bash tool output files', () => {
   });
 
   test('output reduced by its decoding but small in bytes is saved too', async () => {
+    // In a UTF-8 locale, the tr of macOS writes \377 as the character ÿ, which decodes cleanly; in
+    // the C locale it writes the single byte.
     const result = await bashTool.execute(
-      { command: "head -c 8000 /dev/zero | tr '\\0' '\\377'" },
+      { command: "head -c 8000 /dev/zero | LC_ALL=C tr '\\0' '\\377'" },
       ctx(),
     );
     expect(result.content).toContain('dropped');
@@ -194,7 +200,7 @@ describe('bash tool output files', () => {
   });
 
   test('an output over the file size limit is split into parts read_file and grep accept', async () => {
-    const result = await bashTool.execute({ command: 'seq 1 2000000' }, ctx());
+    const result = await bashTool.execute({ command: numbers(2_000_000) }, ctx());
     const [parts = []] = savedOutputs(result.content);
     expect(parts).toHaveLength(2);
     const [first = '', last = ''] = parts;
