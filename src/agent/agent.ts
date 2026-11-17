@@ -30,7 +30,7 @@ import {
   REPORT_MAX_BYTES,
   type SubagentEvent,
   SubagentRegistry,
-  subagentData,
+  subagentDataBytes,
 } from './subagent.ts';
 import { buildSystemPrompt, localDate, renderProjectContext } from './system-prompt.ts';
 
@@ -138,11 +138,17 @@ export const REPORT_DATA_PER_BATCH_BYTES = 32 * 1024;
 // the estimate errs on the small side, and leaves the rest to the conversation and the answer.
 const REPORT_WINDOW_SHARE = 0.25;
 const REPORT_BYTES_PER_TOKEN = 3;
+// Below this, the lines around a report (its title, stop message and the name of its saved file)
+// would not fit. A context window that small cannot hold a conversation anyway.
+const REPORT_DATA_MIN_BYTES = 2 * 1024;
 
 export const reportDataBudget = (contextWindow: number): number =>
-  Math.min(
-    REPORT_DATA_PER_BATCH_BYTES,
-    Math.floor(contextWindow * REPORT_WINDOW_SHARE) * REPORT_BYTES_PER_TOKEN,
+  Math.max(
+    REPORT_DATA_MIN_BYTES,
+    Math.min(
+      REPORT_DATA_PER_BATCH_BYTES,
+      Math.floor(contextWindow * REPORT_WINDOW_SHARE) * REPORT_BYTES_PER_TOKEN,
+    ),
   );
 
 interface Pending {
@@ -153,19 +159,20 @@ interface Pending {
 // Picks the next batch of notices from both sources and marks only those as delivered. Job notices
 // carry no data and are always taken, so reports waiting for room never hold back the end of a
 // job. Reports are taken oldest first while their data fits in `budget` bytes, and at least one, so
-// each batch makes progress; the rest stay pending for the next request. No report is longer than
-// the budget: a longer one is reduced to it, and saved whole.
+// each batch makes progress; the rest stay pending for the next request. The data of one report,
+// its title and stop message included, never exceeds the budget, so neither does the batch: a
+// longer report is reduced to fit, and saved whole.
 export const nextNotices = (
   jobs: PendingEventSource<JobEvent> | null,
   subagents: PendingEventSource<SubagentEvent> | null,
   budget: number,
 ): RuntimeNotice[] => {
   const jobEvents = jobs?.pendingEvents() ?? [];
-  const maxReportBytes = Math.min(REPORT_MAX_BYTES, budget);
+  const maxDataBytes = Math.min(REPORT_MAX_BYTES, budget);
   const reports: SubagentEvent[] = [];
   let bytes = 0;
   for (const event of subagents?.pendingEvents() ?? []) {
-    const size = Buffer.byteLength(subagentData(event, maxReportBytes).text, 'utf8');
+    const size = subagentDataBytes(event, maxDataBytes);
     if (reports.length > 0 && bytes + size > budget) break;
     reports.push(event);
     bytes += size;
@@ -176,7 +183,7 @@ export const nextNotices = (
     ...jobEvents.map((event) => ({ at: event.at, notice: { text: describeJobEvent(event) } })),
     ...reports.map((event) => ({
       at: event.at,
-      notice: describeSubagentEvent(event, maxReportBytes),
+      notice: describeSubagentEvent(event, maxDataBytes),
     })),
   ];
   return picked.sort((a, b) => a.at - b.at).map((item) => item.notice);

@@ -339,9 +339,11 @@ only reads: the main agent is the only one that changes files or runs commands.
   combines the two. `delegate` registers a run and returns its id at once. Ids are a random
   prefix of the registry and a counter, so an id in a resumed conversation never names a run of
   another process. Three runs make progress at once; up to 16 more wait for a slot in order, and
-  beyond that `delegate` is refused. The registry owns each run's promise: an exception becomes a
-  `failed` outcome, the slot is always released, and the outcome is recorded once. A run cancelled
-  just as a slot is handed to it gives the slot back without starting.
+  beyond that `delegate` is refused. The registry owns each run's promise, which never rejects: an
+  exception becomes a `failed` outcome, the slot is always released, and the outcome is recorded
+  once. An activity listener that throws is reported apart, as an uncaught error, so it changes
+  neither the outcome nor the bookkeeping. A run cancelled just as a slot is handed to it gives
+  the slot back without starting.
 - **Limits.** 40 steps and 5 minutes from when it starts running. The deadline aborts with the
   same reason as `--timeout`, so the loop reports a limit, not a cancellation. Before its last
   step, a runtime note asks for the report without more tool calls. After four fifths of the time,
@@ -365,8 +367,11 @@ only reads: the main agent is the only one that changes files or runs commands.
   job event and the reports in the order they ended, while their data fits a budget of a quarter
   of the context window and at most 32 KiB, and always at least one report; the rest stay pending
   for the next request. The registry keeps each report whole, and its data is built when it is
-  sent: reduced to the budget (and never above 16 KiB), with the whole report saved to a file when
-  reduced. Compaction cannot shorten text in the latest message, so the budget is what keeps a
+  sent, within the budget and never above 16 KiB, with everything it holds: the stop message, which
+  may come from a provider at any length, is cut first, the report gets the room left after the
+  title and the name of the file that saves it whole, and the budget has a floor of 2 KiB so that
+  room exists. Since one report never exceeds the budget, the rule of at least one report per batch
+  never does either. Compaction cannot shorten text in the latest message, so the budget is what keeps a
   batch from filling a small window. The batch is in time order. The loop takes at most one batch
   per request, so a retried request does not take a second one, and earlier reports can be
   compacted once they leave the latest message.

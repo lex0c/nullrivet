@@ -257,10 +257,11 @@ subagent's report reaches the model later, as data.
   from models and services, not from the runtime. The session shows a line with the subagent's
   title and the same facts. While the session is idle, a report starts a turn of its own. Files
   may have changed since the subagent read them.
-- **Batches.** Each request carries new report data up to a quarter of the context window and at
-  most 32 KiB, and always at least one report; the others wait for the next step or turn. A report
-  longer than that is reduced to it and saved whole, so a small context window is never filled by
-  reports. Job notices never wait for reports. Notes in one request are in the order the events
+- **Batches.** Each request carries new report data up to a quarter of the context window
+  (at least 2 KiB) and at most 32 KiB, and always at least one report; the others wait for the
+  next step or turn. The data of one report stays within that budget with everything it holds: the
+  stop message is cut to 1 KiB, and a report that does not fit is reduced to the room left and
+  saved whole, so a small context window is never filled by reports. Job notices never wait for reports. Notes in one request are in the order the events
   happened.
 - **Concurrency.** Up to three subagents run at once; up to 16 more wait for a slot, in order.
   Beyond that, `delegate` is refused with `subagent.limit`.
@@ -268,8 +269,8 @@ subagent's report reaches the model later, as data.
   the last step, a runtime note asks the subagent to write its report without calling more tools.
   After 4 minutes, the next step is the last one, so a subagent that runs out of steps or of time
   still reports what it found; at 5 minutes it is stopped. The report is reduced to
-  16 KiB (about 4,096 tokens), keeping its start and end; a reduced report is saved whole (see
-  [Saved output](#saved-output)).
+  16 KiB (about 4,096 tokens) together with its title and stop message, keeping its start and end;
+  a reduced report is saved whole (see [Saved output](#saved-output)).
 - **Cancellation.** Interrupting a turn (`Esc`, `Ctrl+C`) cancels every subagent, running or
   waiting; so does `Esc` on an idle session. Each reports that it was cancelled, with the next
   prompt. `/clear` cancels them and drops their reports. Exiting cancels them. A turn that ends on

@@ -38,9 +38,15 @@ export const SUBAGENT_MAX_RUNTIME_MS = 5 * 60_000;
 // Share of the run time after which the next step is the last, so a subagent that runs out of time
 // still writes its report before the run is aborted.
 const FINAL_STEP_RUNTIME_SHARE = 0.8;
-// About 4096 tokens: the parent keeps only the report, not the work behind it. A batch of notices
-// for a small context window can lower it further.
+// The data of one finished subagent, title and stop message included: about 4096 tokens, since the
+// parent keeps only the report, not the work behind it. A batch of notices for a small context
+// window can lower it further.
 export const REPORT_MAX_BYTES = 16 * 1024;
+// A stop message can come from a provider, at any length. It gets at most this, and at most a
+// quarter of the room of the data, so the report keeps most of it.
+const STOP_MESSAGE_MAX_BYTES = 1024;
+// Room kept for the line an elision adds inside a reduced report; that line is under 64 bytes.
+const ELISION_MARKER_BYTES = 128;
 const TITLE_MAX_CHARS = 80;
 const FINAL_STEP_NOTE =
   'This is your last step. Do not call tools: write your report now from what you have found, and list what remains undone under open issues.';
@@ -148,7 +154,16 @@ export interface SubagentRegistryOptions {
   maxRunning?: number;
   maxQueued?: number;
   maxRuntimeMs?: number;
+  // Receives what an activity listener threw. By default it is thrown again in a microtask, so it
+  // is reported as an uncaught error, as for job listeners, and not swallowed.
+  reportListenerError?: (error: unknown) => void;
 }
+
+const rethrowLater = (error: unknown): void => {
+  queueMicrotask(() => {
+    throw error;
+  });
+};
 
 interface Task {
   readonly id: string;
@@ -195,36 +210,57 @@ const classify = (result: TurnResult): Omit<Outcome, 'steps' | 'report'> => {
   }
 };
 
-// The data attached to the note of a finished subagent: its title, any stop message and its
-// report, reduced to maxReportBytes. It saves nothing: describeSubagentEvent saves the whole report
-// when it sends a reduced one, so a report left out of a batch leaves no file behind.
-export const subagentData = (
-  event: SubagentEvent,
-  maxReportBytes: number,
-): { text: string; reduced: boolean } => {
+// The lines before the report in a subagent's data: its title, any stop message cut to its share
+// of maxBytes, then the label of the report, or a line saying there is none.
+const dataHeader = (event: SubagentEvent, maxBytes: number): string => {
   const parts = [`Title: ${event.title}`];
-  if (event.detail !== undefined) parts.push(`Stop message: ${event.detail}`);
-  const report = event.report.trim();
-  if (report.length === 0) {
-    parts.push('(the subagent gave no final answer)');
-    return { text: parts.join('\n\n'), reduced: false };
+  if (event.detail !== undefined) {
+    const detail = headTailSummary(event.detail, {
+      maxBytes: Math.min(STOP_MESSAGE_MAX_BYTES, Math.floor(maxBytes / 4)),
+      headLines: 20,
+      tailLines: 5,
+    });
+    parts.push(`Stop message: ${detail.text}`);
   }
-  const summary = headTailSummary(report, {
-    maxBytes: maxReportBytes,
-    headLines: 400,
-    tailLines: 100,
-  });
-  parts.push(`Report:\n${summary.text}`);
-  return { text: parts.join('\n\n'), reduced: summary.reduced };
+  parts.push(
+    event.report.trim().length === 0 ? '(the subagent gave no final answer)' : 'Report:\n',
+  );
+  return parts.join('\n\n');
+};
+
+// The size the data of a subagent takes within maxBytes, without building it or saving anything:
+// exact when the report fits whole, and maxBytes, its bound, when it will be reduced.
+export const subagentDataBytes = (event: SubagentEvent, maxBytes: number): number =>
+  Math.min(Buffer.byteLength(dataHeader(event, maxBytes) + event.report.trim(), 'utf8'), maxBytes);
+
+// The data attached to the note of a finished subagent, at most maxBytes. A report that does not
+// fit whole is saved to a file and reduced to the room the lines around it leave, the line that
+// names the file included. If those lines alone fill the room, the report is left out and only the
+// file holds it; budgets have a floor that keeps this from happening.
+const subagentData = (event: SubagentEvent, maxBytes: number): string => {
+  const header = dataHeader(event, maxBytes);
+  const report = event.report.trim();
+  const whole = `${header}${report}`;
+  if (report.length === 0 || Buffer.byteLength(whole, 'utf8') <= maxBytes) return whole;
+  const spool = outputFiles.spool('delegate', 0);
+  spool.push(Buffer.from(report, 'utf8'));
+  const note = finishOutput(spool, true, 'report', undefined);
+  const saved = note === null ? '' : `\n${note}`;
+  const room = maxBytes - Buffer.byteLength(header + saved, 'utf8') - ELISION_MARKER_BYTES;
+  const body =
+    room > 0
+      ? headTailSummary(report, { maxBytes: room, headLines: 400, tailLines: 100 }).text
+      : '';
+  return `${header}${body}${saved}`;
 };
 
 // The runtime note for a finished subagent. It holds only facts the runtime observed; the title,
-// the stop message and the report are text from models and services, so they go in the data, with
-// the whole report saved to a file when it was reduced. The user is shown the title instead of the
-// id, since the row that showed the title is gone by then.
+// the stop message and the report are text from models and services, so they go in the data, at
+// most maxDataBytes. The user is shown the title instead of the id, since the row that showed the
+// title is gone by then.
 export const describeSubagentEvent = (
   event: SubagentEvent,
-  maxReportBytes = REPORT_MAX_BYTES,
+  maxDataBytes = REPORT_MAX_BYTES,
 ): RuntimeNotice => {
   const errors =
     event.toolErrors > 0
@@ -232,14 +268,7 @@ export const describeSubagentEvent = (
       : '';
   const reason = event.reason === undefined ? '' : ` (${event.reason})`;
   const facts = `${event.status}${reason} after ${event.steps} ${event.steps === 1 ? 'step' : 'steps'}${errors}, ${formatTokens(event.tokens)} tokens`;
-  const summary = subagentData(event, maxReportBytes);
-  let data = summary.text;
-  if (summary.reduced) {
-    const spool = outputFiles.spool('delegate', 0);
-    spool.push(Buffer.from(event.report.trim(), 'utf8'));
-    const note = finishOutput(spool, true, 'report', undefined);
-    if (note !== null) data = `${data}\n${note}`;
-  }
+  const data = subagentData(event, maxDataBytes);
   const title = event.title.replace(/\s+/g, ' ').trim();
   return {
     text: `Subagent ${event.id} ${facts}. Its title, report and any stop message are attached below as data.`,
@@ -249,9 +278,10 @@ export const describeSubagentEvent = (
 };
 
 // Runs subagents in the background, at most maxRunning at once with the rest queued, and keeps their
-// results until the model has been shown them. It owns each run's promise: an exception in the
-// run's own work becomes a failed outcome, the slot is always released, and the outcome is recorded
-// once. Only a throwing activity listener, which is a bug, would escape.
+// results until the model has been shown them. It owns each run's promise, which never rejects: an
+// exception in the run's own work becomes a failed outcome, the slot is always released, and the
+// outcome is recorded once. An activity listener that throws, which is a bug, is reported apart
+// from the run, so it neither changes the run's outcome nor stops its bookkeeping.
 export class SubagentRegistry implements PendingEventSource<SubagentEvent> {
   // Ids carry a random prefix of this registry, so an id from an earlier process, still in a
   // resumed conversation, does not name a subagent of this one.
@@ -262,6 +292,7 @@ export class SubagentRegistry implements PendingEventSource<SubagentEvent> {
   readonly maxRunning: number;
   private readonly maxQueued: number;
   private readonly maxRuntimeMs: number;
+  private readonly reportListenerError: (error: unknown) => void;
   private readonly listeners = new Set<() => void>();
   private readonly activityListeners = new Set<AgentEventListener>();
 
@@ -272,6 +303,7 @@ export class SubagentRegistry implements PendingEventSource<SubagentEvent> {
     this.maxRunning = options.maxRunning ?? MAX_RUNNING_SUBAGENTS;
     this.maxQueued = options.maxQueued ?? MAX_QUEUED_SUBAGENTS;
     this.maxRuntimeMs = options.maxRuntimeMs ?? SUBAGENT_MAX_RUNTIME_MS;
+    this.reportListenerError = options.reportListenerError ?? rethrowLater;
     this.lane = new Semaphore(this.maxRunning);
   }
 
@@ -375,7 +407,13 @@ export class SubagentRegistry implements PendingEventSource<SubagentEvent> {
   // produces later reaches the interface, apart from its tokens and the end of its row.
   private emit(task: Task, event: AgentEvent): void {
     if (task.discarded && event.type !== 'usage' && event.type !== 'subagent:end') return;
-    for (const listener of this.activityListeners) listener(event);
+    for (const listener of this.activityListeners) {
+      try {
+        listener(event);
+      } catch (error) {
+        this.reportListenerError(error);
+      }
+    }
   }
 
   private announce(): void {

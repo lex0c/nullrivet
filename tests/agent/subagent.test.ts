@@ -416,7 +416,7 @@ describe('subagent registry', () => {
     registry.start(spec);
     expect(await waitUntil(() => registry.hasPendingEvents())).toBe(true);
     const data = describeSubagentEvent(drain(registry)[0] as SubagentEvent).data ?? '';
-    expect(Buffer.byteLength(data, 'utf8')).toBeLessThan(17 * 1024);
+    expect(Buffer.byteLength(data, 'utf8')).toBeLessThanOrEqual(16 * 1024);
     const outputs = savedOutputs(data);
     expect(outputs).toHaveLength(1);
     expect(outputs[0]?.[0]).toContain('-delegate.001.txt');
@@ -462,6 +462,36 @@ describe('subagent registry', () => {
     const [event] = drain(registry);
     expect(event).toMatchObject({ status: 'completed', report: 'final report' });
     expect(event?.steps).toBeLessThan(SUBAGENT_MAX_STEPS);
+  });
+
+  test('a listener that throws is reported apart, and the run ends and reports as usual', async () => {
+    let calls = 0;
+    const provider = routedProvider(() => {
+      calls += 1;
+      return calls === 1
+        ? toolTurn([{ id: 'r1', name: 'read_file', args: {} }])
+        : textTurn('report');
+    });
+    const errors: unknown[] = [];
+    const registry = new SubagentRegistry(runtimeFor(provider), {
+      reportListenerError: (error) => errors.push(error),
+    });
+    registry.onActivity(() => {
+      throw new Error('listener bug');
+    });
+    const seen: string[] = [];
+    registry.onActivity((event) => seen.push(event.type));
+    registry.start(spec);
+    expect(await waitUntil(() => registry.hasPendingEvents())).toBe(true);
+    expect(drain(registry)[0]).toMatchObject({ status: 'completed', report: 'report' });
+    expect(registry.active()).toBe(0);
+    // Every event reached the other listener, and every throw was reported.
+    expect(seen.filter((type) => type !== 'usage')).toEqual([
+      'subagent:start',
+      'subagent:progress',
+      'subagent:end',
+    ]);
+    expect(errors).toHaveLength(seen.length);
   });
 
   test('ids carry a random prefix of their registry', () => {
@@ -605,21 +635,39 @@ describe('batches of background notices', () => {
     expect(nextNotices(null, reports.src, 32 * KIB)).toEqual([]);
   });
 
-  test('a report longer than the budget is reduced to it, and saved whole', () => {
+  test('a report longer than the budget is reduced to it, file name included, and saved whole', () => {
     const event = report(1, 12);
     const [notice] = nextNotices(null, source([event]).src, 4 * KIB);
     const data = notice?.data ?? '';
     const outputs = savedOutputs(data);
     expect(outputs).toHaveLength(1);
-    // The budget, plus the line that names the saved file.
-    expect(Buffer.byteLength(data, 'utf8')).toBeLessThan(4 * KIB + 512);
+    expect(Buffer.byteLength(data, 'utf8')).toBeLessThanOrEqual(4 * KIB);
+    expect(data).toContain('Report:\nxxx');
     expect(readParts(outputs[0] ?? []).toString()).toBe(event.report.trim());
+  });
+
+  test('a stop message of any length is cut, so the batch stays within the budget', () => {
+    const failed: SubagentEvent = {
+      ...report(1, 1),
+      status: 'failed',
+      reason: 'provider_error',
+      title: 't'.repeat(80),
+      detail: `upstream error page\n${'<div>noise</div>\n'.repeat(6_000)}`,
+    };
+    const batch = nextNotices(null, source([failed, report(2, 1)]).src, 8 * KIB);
+    expect(batch).toHaveLength(2);
+    expect(dataBytes(batch)).toBeLessThanOrEqual(8 * KIB);
+    const data = batch[0]?.data ?? '';
+    expect(data).toContain('Stop message: upstream error page');
+    expect(data).toContain('Report:\nxxx');
   });
 
   test('the budget is a quarter of the context window, never more than 32 KiB', () => {
     expect(reportDataBudget(200_000)).toBe(REPORT_DATA_PER_BATCH_BYTES);
     expect(reportDataBudget(16_000)).toBe(12_000);
     expect(reportDataBudget(8_000)).toBe(6_000);
+    // Never below the room for the lines around a report.
+    expect(reportDataBudget(1_000)).toBe(2 * KIB);
   });
 
   test('many reports reach the model over several requests, none lost, each within the limit', async () => {
