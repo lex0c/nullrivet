@@ -105,7 +105,8 @@ does not settle it. Any remaining text is settled when a tool call starts or the
 - If an unexpected error reaches the session, the terminal is restored (raw mode, cursor, key
   reporting) before the error is printed and nullrivet exits with code 1.
 - `Ctrl+C` on an empty prompt with no task running arms an exit; a second `Ctrl+C` within two
-  seconds exits. Typing anything disarms it.
+  seconds exits with code 0, since nothing is interrupted. Typing anything disarms it. Leaving
+  while a task is still stopping, or on a signal from outside, exits with 130.
 - On exit the live region is erased, the cursor is shown, raw mode, bracketed paste and the
   extended key mode are turned off, and every remaining process group is killed. The scrollback
   is left as it is.

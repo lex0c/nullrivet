@@ -383,7 +383,8 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
           history.stopBrowsing();
           setInput({ value: '', cursor: 0 });
         } else if (state.exitArmedAt !== null) {
-          finish(130);
+          // Nothing is interrupted: leaving an idle session this way is as deliberate as /exit.
+          finish(0);
         } else {
           dispatch({ type: 'exit-arm', now: Date.now() });
           if (exitTimer !== null) clearTimeout(exitTimer);

@@ -162,7 +162,7 @@ the tokens spent. The older part of a long conversation is summarized automatica
 | `Shift+Tab` | Switch between `auto` and `readonly`, also while a task runs; it applies from the next tool call. |
 | `Esc` or `Ctrl+C` while a task runs | Interrupt the task; running commands are terminated. A second `Ctrl+C` exits if the task does not stop. |
 | `Ctrl+C` on a non-empty prompt | Clear the prompt. |
-| `Ctrl+C` twice on an empty prompt | Exit (code 130). |
+| `Ctrl+C` twice on an empty prompt | Exit (code 0). |
 | `Ctrl+D` on an empty prompt | Exit (code 0). |
 | `↑`/`↓` | Recall earlier prompts and commands: `↑` from the first line of the input, then `↑`/`↓` walk the history; `↓` past the newest brings back what you were typing. |
 | `Tab`, `↑`/`↓` with the command list open | Complete and choose a command. |

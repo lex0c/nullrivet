@@ -333,6 +333,28 @@ describe('terminal', () => {
   );
 
   test.skipIf(Bun.which('python3') === null)(
+    'Ctrl+C twice on an idle session exits with code 0',
+    async () => {
+      const child = Bun.spawn(inTerminal(cliCommand([])), {
+        env: { ...cliEnv(server), TERM: 'xterm-256color' },
+        cwd: tempDir(),
+        stdin: 'pipe',
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      await Bun.sleep(1_500);
+      child.stdin.write('\x03');
+      child.stdin.flush();
+      await Bun.sleep(200);
+      child.stdin.write('\x03');
+      child.stdin.flush();
+      const [, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+      expect(code).toBe(0);
+    },
+    30_000,
+  );
+
+  test.skipIf(Bun.which('python3') === null)(
     'Shift+Tab switches the session to readonly before the next tool call',
     async () => {
       server.handle(
