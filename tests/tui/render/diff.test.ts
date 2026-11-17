@@ -93,6 +93,27 @@ describe('diffRows', () => {
     }
   });
 
+  test('on a narrow terminal every row fits, the closing row included', () => {
+    const many = lineDiff('', numbered(14).join('\n'));
+    for (const unicode of [true, false]) {
+      for (const row of diffRows(many, { ...caps(20), unicode })) {
+        expect(visualWidth(row)).toBeLessThanOrEqual(20);
+      }
+    }
+    // Too narrow for a four-digit line number and the rail.
+    const before = numbered(1_200);
+    const after = [...before];
+    after[1_100] = 'changed';
+    const deep = lineDiff(before.join('\n'), after.join('\n'));
+    for (const row of diffRows(deep, caps(10))) expect(visualWidth(row)).toBeLessThanOrEqual(10);
+  });
+
+  test('a row cut to the terminal still resets its color', () => {
+    const rows = diffRows(lineDiff('', numbered(14).join('\n')), { ...colored, cols: 20 });
+    expect(stripAnsi(rows.at(-1) ?? '')).toBe('    … +4 more change');
+    expect(rows.at(-1)).toEndWith('\x1b[0m');
+  });
+
   test('changes outside the snippet are counted in a last row', () => {
     const many = lineDiff('', numbered(14).join('\n'));
     expect(diffRows(many, caps()).at(-1)).toBe('    … +4 more changed lines');

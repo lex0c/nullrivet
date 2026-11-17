@@ -40,17 +40,21 @@ export const diffRows = (diff: FileDiff, caps: Capabilities): string[] => {
     0,
   );
   const rail = caps.unicode ? ' │ ' : ' | ';
+  const width = frameWidth(caps);
   // Room left for the text after the indent, the line number, the rail and the mark.
-  const textWidth = Math.max(0, frameWidth(caps) - INDENT.length - digits - rail.length - 2);
+  const textWidth = Math.max(0, width - INDENT.length - digits - rail.length - 2);
+  // Every row is also cut to the frame, for terminals too narrow to hold the line number and the
+  // rail, and for the closing row.
+  const row = (content: string): string => padFrame(truncateToWidth(content, width));
   const rows = diff.snippet.map((line) => {
     const tone = TONE[line.type];
     const number = paint(caps, tone, String(lineNumber(line) ?? '').padStart(digits));
     const text = paint(caps, tone, `${MARK[line.type]} ${displayLine(line.text, textWidth, caps)}`);
-    return padFrame(`${INDENT}${number}${paint(caps, 'secondary', rail)}${text}`);
+    return row(`${INDENT}${number}${paint(caps, 'secondary', rail)}${text}`);
   });
   if (diff.hiddenChanges > 0) {
     const more = `${ellipsisGlyph(caps)} +${diff.hiddenChanges} more changed ${diff.hiddenChanges === 1 ? 'line' : 'lines'}`;
-    rows.push(padFrame(paint(caps, 'secondary', `${INDENT}${more}`)));
+    rows.push(row(paint(caps, 'secondary', `${INDENT}${more}`)));
   }
   return rows;
 };

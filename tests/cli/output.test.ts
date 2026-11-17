@@ -16,6 +16,29 @@ describe('runtime notices in one-shot output', () => {
     expect(stderr).toEqual(['› note: Background job x failed\n']);
   });
 
+  test('the plain output cleans the answer and the messages from providers for the terminal', () => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const sink = createPlainSink({
+      stdout: (text) => stdout.push(text),
+      stderr: (text) => stderr.push(text),
+      color: false,
+    });
+    const override = String.fromCharCode(0x202e);
+    sink.event({ type: 'text:delta', text: `a${override}b\x1b]0;title\x07c\r\n` });
+    sink.event({ type: 'error', message: 'provider request failed: 500: \x1b]52;c;eA==\x07boom' });
+    sink.event({ type: 'warning', message: `slow\x1b[2J${override}` });
+    sink.event({ type: 'agent:end', reason: 'budget', message: 'limit\x1b[31m reached' });
+    sink.notice('error', 'bad\x1b[0m model');
+    expect(stdout).toEqual(['abc\n']);
+    expect(stderr).toEqual([
+      'error: provider request failed: 500: boom\n',
+      'warning: slow\n',
+      'stopped: limit reached\n',
+      'error: bad model\n',
+    ]);
+  });
+
   test('the plain output shows the lines an edit or write changed', () => {
     const stderr: string[] = [];
     const sink = createPlainSink({

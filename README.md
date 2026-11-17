@@ -248,7 +248,8 @@ edits `AGENTS.md` on its own; `--no-agents` disables loading. Details:
 ## Output
 
 Without `--json`, the answer is streamed to stdout and everything else (tool activity, warnings,
-errors) goes to stderr, so `nullrivet "..." > answer.md` captures only the answer.
+errors) goes to stderr, so `nullrivet "..." > answer.md` captures only the answer. Both have
+terminal escape sequences, carriage returns and Unicode bidirectional controls removed.
 
 With `--json`, stdout carries only NDJSON, one event per line, each with a `v` schema version:
 

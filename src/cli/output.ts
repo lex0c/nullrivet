@@ -1,5 +1,5 @@
 import type { AgentEvent } from '../agent/events.ts';
-import { stripAnsi } from '../sanitize/ansi.ts';
+import { terminalText } from '../sanitize/display.ts';
 import { readFileDiff } from '../tools/line-diff.ts';
 import { errorSummary, toolSubject } from '../tui/tool-labels.ts';
 
@@ -43,7 +43,9 @@ export interface PlainSinkOptions {
 }
 
 // The answer goes to stdout and everything else (tool activity, warnings, errors) to stderr, so
-// `nullrivet "..." > answer.md` captures only the answer.
+// `nullrivet "..." > answer.md` captures only the answer. Both carry text from the model, tools
+// and providers, such as an error message taken from the body of a provider's response, so it
+// is cleaned for the terminal before it is written.
 export const createPlainSink = (options: PlainSinkOptions): OutputSink => {
   // Grey rather than faint, which many xterm configurations draw as plain text.
   const grey = (s: string): string => (options.color ? `\x1b[90m${s}\x1b[39m` : s);
@@ -66,7 +68,7 @@ export const createPlainSink = (options: PlainSinkOptions): OutputSink => {
     event(event) {
       switch (event.type) {
         case 'text:delta': {
-          const text = stripAnsi(event.text);
+          const text = terminalText(event.text);
           if (text.length === 0) return;
           options.stdout(text);
           lineOpen = !text.endsWith('\n');
@@ -94,17 +96,17 @@ export const createPlainSink = (options: PlainSinkOptions): OutputSink => {
           );
           return;
         case 'notice':
-          diagnostic(grey(`› note: ${stripAnsi(event.text)}`));
+          diagnostic(grey(`› note: ${terminalText(event.text)}`));
           return;
         case 'warning':
-          diagnostic(yellow(`warning: ${event.message}`));
+          diagnostic(yellow(`warning: ${terminalText(event.message)}`));
           return;
         case 'error':
-          diagnostic(red(`error: ${event.message}`));
+          diagnostic(red(`error: ${terminalText(event.message)}`));
           return;
         case 'agent:end':
           if (event.reason === 'budget' && event.message !== undefined) {
-            diagnostic(yellow(`stopped: ${event.message}`));
+            diagnostic(yellow(`stopped: ${terminalText(event.message)}`));
           } else if (event.reason === 'aborted') {
             diagnostic(yellow('aborted'));
           }
@@ -114,7 +116,8 @@ export const createPlainSink = (options: PlainSinkOptions): OutputSink => {
       }
     },
     notice(level, message) {
-      diagnostic(level === 'error' ? red(`error: ${message}`) : yellow(`warning: ${message}`));
+      const text = terminalText(message);
+      diagnostic(level === 'error' ? red(`error: ${text}`) : yellow(`warning: ${text}`));
     },
     finish() {
       closeLine();

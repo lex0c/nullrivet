@@ -124,6 +124,14 @@ describe('renderMarkdown', () => {
 });
 
 describe('renderMarkdown sanitizing', () => {
+  test('bidirectional controls in the source are removed, so the text is shown in its order', () => {
+    const override = String.fromCharCode(0x202e);
+    const isolate = String.fromCharCode(0x2066);
+    expect(renderMarkdown(`open ${override}fdp.exe ${isolate}now`, caps)).toEqual([
+      'open fdp.exe now',
+    ]);
+  });
+
   test('escape sequences in the source are stripped, not passed to the terminal', () => {
     expect(renderMarkdown('safe \x1b[2Jtext \x1b]0;title\x07end', caps)).toEqual(['safe text end']);
   });

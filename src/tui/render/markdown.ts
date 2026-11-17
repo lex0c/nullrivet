@@ -6,7 +6,7 @@ import type { List, ListItem, PhrasingContent, RootContent, Table, TableRow } fr
 import { remark } from 'remark';
 import remarkGfm from 'remark-gfm';
 import wrapAnsi from 'wrap-ansi';
-import { stripAnsi } from '../../sanitize/ansi.ts';
+import { terminalText } from '../../sanitize/display.ts';
 import { type Capabilities, paint, paintMulti, type SgrToken } from '../term.ts';
 import { frameWidth } from './frame.ts';
 import { visualWidth } from './width.ts';
@@ -223,9 +223,10 @@ const renderFlow = (
   return out;
 };
 
-// The source is model output: escape sequences and control bytes are stripped before parsing
-// so the text cannot drive the terminal. Empty input yields no lines.
+// The source is model output, which can repeat file content: it is cleaned for the terminal
+// before parsing, so the text can neither drive the terminal nor be shown reordered. Empty input
+// yields no lines.
 export const renderMarkdown = (src: string, caps: Capabilities): string[] => {
-  const tree = parser.parse(stripAnsi(src));
+  const tree = parser.parse(terminalText(src));
   return renderFlow(tree.children, caps, frameWidth(caps), 0);
 };
