@@ -2,20 +2,38 @@
 // lives in memory and, when a session file is attached, in that file; nothing else keeps it.
 
 export const PROMPT_HISTORY_LIMIT = 100;
+// The history is saved with the session, and compaction never shortens it, so pasted prompts are
+// bounded too: one that is too large to be worth recalling is not kept, and the oldest entries
+// are dropped past the total. This keeps the history from pushing a session file past the size
+// it may have.
+export const PROMPT_HISTORY_MAX_BYTES = 1024 * 1024;
+export const PROMPT_ENTRY_MAX_BYTES = 64 * 1024;
+
+export interface PromptHistoryLimits {
+  entries?: number;
+  bytes?: number;
+  entryBytes?: number;
+}
+
+const byteLength = (text: string): number => Buffer.byteLength(text, 'utf8');
 
 export class PromptHistory {
-  private readonly items: string[];
+  private readonly items: string[] = [];
+  private totalBytes = 0;
+  private readonly maxEntries: number;
+  private readonly maxBytes: number;
+  private readonly maxEntryBytes: number;
   // Index of the entry shown in the input while browsing; null while the user edits their own
   // text, which is kept as the draft to come back to.
   private position: number | null = null;
   private draft = '';
   private changes = 0;
 
-  constructor(
-    entries: readonly string[] = [],
-    private readonly limit = PROMPT_HISTORY_LIMIT,
-  ) {
-    this.items = entries.slice(-limit);
+  constructor(entries: readonly string[] = [], limits: PromptHistoryLimits = {}) {
+    this.maxEntries = limits.entries ?? PROMPT_HISTORY_LIMIT;
+    this.maxBytes = limits.bytes ?? PROMPT_HISTORY_MAX_BYTES;
+    this.maxEntryBytes = limits.entryBytes ?? PROMPT_ENTRY_MAX_BYTES;
+    for (const entry of entries) this.push(entry);
   }
 
   entries(): readonly string[] {
@@ -31,14 +49,23 @@ export class PromptHistory {
     return this.position !== null;
   }
 
-  // Records a submitted text and ends browsing. Blank text and a repeat of the latest entry are
-  // not added.
+  // Records a submitted text and ends browsing. Blank text, a repeat of the latest entry and text
+  // over the entry limit are not added.
   add(text: string): void {
     this.stopBrowsing();
     if (text.trim().length === 0 || this.items.at(-1) === text) return;
+    if (this.push(text)) this.changes++;
+  }
+
+  private push(text: string): boolean {
+    const size = byteLength(text);
+    if (size > this.maxEntryBytes) return false;
     this.items.push(text);
-    if (this.items.length > this.limit) this.items.splice(0, this.items.length - this.limit);
-    this.changes++;
+    this.totalBytes += size;
+    while (this.items.length > this.maxEntries || this.totalBytes > this.maxBytes) {
+      this.totalBytes -= byteLength(this.items.shift() ?? '');
+    }
+    return true;
   }
 
   // The entry before the one shown, staying at the oldest; null when the history is empty. The

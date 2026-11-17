@@ -49,12 +49,31 @@ describe('PromptHistory', () => {
   });
 
   test('adding ends browsing and keeps only the newest entries', () => {
-    const history = new PromptHistory(['a', 'b', 'c'], 3);
+    const history = new PromptHistory(['a', 'b', 'c'], { entries: 3 });
     expect(history.entries()).toEqual(['a', 'b', 'c']);
     history.previous('');
     history.add('d');
     expect(history.browsing).toBe(false);
     expect(history.entries()).toEqual(['b', 'c', 'd']);
-    expect(new PromptHistory(['a', 'b', 'c', 'd'], 2).entries()).toEqual(['c', 'd']);
+    expect(new PromptHistory(['a', 'b', 'c', 'd'], { entries: 2 }).entries()).toEqual(['c', 'd']);
+  });
+
+  test('a text over the entry limit is not kept, and the oldest entries go past the total', () => {
+    const history = new PromptHistory([], { bytes: 10, entryBytes: 6 });
+    history.add('é'.repeat(4));
+    expect(history.entries()).toEqual([]);
+    expect(history.revision).toBe(0);
+    history.add('aaaa');
+    history.add('bbbb');
+    history.add('cccc');
+    expect(history.entries()).toEqual(['bbbb', 'cccc']);
+  });
+
+  test('entries loaded from a session file are held to the same limits', () => {
+    const loaded = new PromptHistory(['x'.repeat(7), 'aaaa', 'bbbb', 'cccc'], {
+      bytes: 10,
+      entryBytes: 6,
+    });
+    expect(loaded.entries()).toEqual(['bbbb', 'cccc']);
   });
 });

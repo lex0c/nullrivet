@@ -159,7 +159,7 @@ the tokens spent. The older part of a long conversation is summarized automatica
 |---|---|
 | `Enter` | Send the prompt (or run the selected command). |
 | `Shift+Enter`, `Alt+Enter`, `\` then `Enter` | Insert a newline (`Shift+Enter` only in terminals that report it). |
-| `Shift+Tab` | Switch between `auto` and `readonly`, also while a task runs; it applies from the next tool call. |
+| `Shift+Tab` | Switch between `auto` and `readonly`, also while a task runs; it applies from the next tool call and does not stop one already running. |
 | `Esc` or `Ctrl+C` while a task runs | Interrupt the task; running commands are terminated. A second `Ctrl+C` exits if the task does not stop. |
 | `Ctrl+C` on a non-empty prompt | Clear the prompt. |
 | `Ctrl+C` twice on an empty prompt | Exit (code 0). |
