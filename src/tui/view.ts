@@ -1,3 +1,4 @@
+import type { BackgroundWork } from '../agent/events.ts';
 import { formatTokens } from '../format.ts';
 import { stripAnsi } from '../sanitize/ansi.ts';
 import { shortenCwd } from './render/cwd.ts';
@@ -12,7 +13,7 @@ import { truncateToWidth, visualWidth } from './render/width.ts';
 import type { ScreenFrame } from './screen.ts';
 import type { TuiState, TurnState } from './state.ts';
 import { type Capabilities, paint } from './term.ts';
-import { subjectWidth, toolSubject, toolVerb } from './tool-labels.ts';
+import { oneLine, subjectWidth, toolSubject, toolVerb } from './tool-labels.ts';
 
 const FOOTER_MARGIN = 2;
 const MIN_FOOTER_GAP = 2;
@@ -78,21 +79,34 @@ const turnRows = (state: TuiState, turn: TurnState, caps: Capabilities, now: num
       '',
       `${paint(caps, 'accent', spinner(caps, now))} ${toolVerb(tool.name, 'running')} ${subject}${elapsed}`,
     );
-    if (tool.subagent !== undefined) {
-      const inner = tool.subagent.tool;
+  }
+  rows.push('', padFrame(phaseChip(state, turn, caps, now)));
+  return rows;
+};
+
+// One entry per subagent running in the background, with a turn or without one.
+const subagentRows = (state: TuiState, caps: Capabilities, now: number): string[] => {
+  const rows: string[] = [];
+  for (const subagent of state.subagents) {
+    const elapsed = paint(caps, 'secondary', `  [${formatChipDuration(now - subagent.startedAt)}]`);
+    rows.push(
+      '',
+      `${paint(caps, 'accent', spinner(caps, now))} Subagent ${oneLine(subagent.title, subjectWidth(caps))}${elapsed}`,
+    );
+    if (subagent.progress !== undefined) {
+      const inner = subagent.progress.tool;
       const doing = `${toolVerb(inner.name, 'running')} ${toolSubject(inner.name, inner.args, subjectWidth(caps))}`;
       rows.push(
         padFrame(
           paint(
             caps,
             'secondary',
-            `${subContentConnector(caps)}step ${tool.subagent.step} · ${doing}`,
+            `${subContentConnector(caps)}step ${subagent.progress.step} · ${doing}`,
           ),
         ),
       );
     }
   }
-  rows.push('', padFrame(phaseChip(state, turn, caps, now)));
   return rows;
 };
 
@@ -104,8 +118,21 @@ const contextLabel = (state: TuiState, caps: Capabilities): string | null => {
   return paint(caps, tone, `ctx ${percent}%`);
 };
 
+// Background work running now: jobs, then subagents, with those waiting for a slot after a `+`.
+const backgroundParts = (work: BackgroundWork): string[] => {
+  const parts: string[] = [];
+  if (work.jobs > 0) parts.push(`${work.jobs} ${work.jobs === 1 ? 'job' : 'jobs'}`);
+  if (work.queuedSubagents > 0) {
+    parts.push(`${work.subagents}+${work.queuedSubagents} subagents`);
+  } else if (work.subagents > 0) {
+    parts.push(`${work.subagents} ${work.subagents === 1 ? 'subagent' : 'subagents'}`);
+  }
+  return parts;
+};
+
 const footerRow = (state: TuiState, caps: Capabilities): string => {
   const sep = paint(caps, 'secondary', ' · ');
+  const work = state.status.background;
   let left: string;
   if (state.exitArmedAt !== null) {
     left = paint(caps, 'warn', 'Press Ctrl+C again to exit');
@@ -115,19 +142,25 @@ const footerRow = (state: TuiState, caps: Capabilities): string => {
         ? paint(caps, 'warn', 'auto mode on')
         : paint(caps, 'accent', 'readonly mode on');
     // While a task runs, the interrupt hint takes the place of the mode hint so it stays visible
-    // in narrow terminals.
+    // in narrow terminals. With no task running, Esc cancels the subagents, if any.
     left =
       state.turn !== null
         ? `${mode}${sep}${paint(caps, 'secondary', 'esc to interrupt')}`
-        : `${mode}${paint(caps, 'secondary', ' (shift+tab to change)')}`;
+        : work.subagents + work.queuedSubagents > 0
+          ? `${mode}${sep}${paint(caps, 'secondary', 'esc to cancel subagents')}`
+          : `${mode}${paint(caps, 'secondary', ' (shift+tab to change)')}`;
   }
   // Right-side parts in order of importance; the least important are dropped first when the
-  // row is too narrow, and the model name is shortened last.
+  // row is too narrow, and the first part left is shortened last. Background work comes first:
+  // it is what runs now, while no row of the live region shows a job.
   const totals = state.status.totals;
   const parts = [
-    stripAnsi(state.status.model),
-    ...(state.status.effort === undefined ? [] : [`effort ${state.status.effort}`]),
-  ].map((text) => paint(caps, 'secondary', text));
+    ...backgroundParts(work).map((text) => paint(caps, 'success', text)),
+    ...[
+      stripAnsi(state.status.model),
+      ...(state.status.effort === undefined ? [] : [`effort ${state.status.effort}`]),
+    ].map((text) => paint(caps, 'secondary', text)),
+  ];
   const context = contextLabel(state, caps);
   if (context !== null) parts.push(context);
   if (totals.requests > 0) {
@@ -152,12 +185,11 @@ const footerRow = (state: TuiState, caps: Capabilities): string => {
 // The live region: the turn in progress, the input box and the status rows. It is redrawn on
 // every change, while finished content is written to the scrollback by the caller.
 export const composeLive = (state: TuiState, caps: Capabilities, now: number): ScreenFrame => {
-  const rows: string[] =
-    state.turn !== null
-      ? turnRows(state, state.turn, caps, now)
-      : state.compacting !== null
-        ? ['', padFrame(compactingChip(state.compacting.since, caps, now))]
-        : [];
+  const rows: string[] = subagentRows(state, caps, now);
+  if (state.turn !== null) rows.push(...turnRows(state, state.turn, caps, now));
+  else if (state.compacting !== null) {
+    rows.push('', padFrame(compactingChip(state.compacting.since, caps, now)));
+  }
   rows.push('', rule(caps));
   const inputTop = rows.length;
   rows.push(

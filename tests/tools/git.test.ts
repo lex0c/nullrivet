@@ -1,10 +1,12 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { chmod, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { listFiles } from '../../src/tools/file-walk.ts';
 import { gitTool } from '../../src/tools/git.ts';
+import { removeOutputFiles } from '../../src/tools/output-files.ts';
 import type { ToolContext } from '../../src/tools/types.ts';
+import { readParts, savedOutputs } from '../helpers/saved-output.ts';
 
 let dir: string;
 
@@ -41,6 +43,8 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
+afterAll(() => removeOutputFiles());
+
 describe('git tool', () => {
   test('is a read tool', () => {
     expect(gitTool.effect).toBe('read');
@@ -65,6 +69,26 @@ describe('git tool', () => {
     expect(between.content).toContain('a.txt | 1 +');
     const filtered = await git({ subcommand: 'diff', staged: true, paths: ['missing.txt'] });
     expect(filtered.content).toBe('[no changes]');
+  });
+
+  test('a large diff is reduced and saved whole to a file', async () => {
+    sh('seq 1 20000 > big.txt && git add big.txt && git commit -qm big');
+    sh("seq 1 20000 | sed 's/$/ changed/' > big.txt");
+    const result = await git({ subcommand: 'diff' });
+    expect(result.content).toContain('lines elided');
+    const outputs = savedOutputs(result.content);
+    expect(outputs).toHaveLength(1);
+    expect(outputs[0]?.[0]).toContain('-git.001.txt');
+    expect(readParts(outputs[0] ?? []).toString()).toBe(
+      sh('git --no-pager diff --no-ext-diff --no-textconv --ignore-submodules=all'),
+    );
+  });
+
+  test('a small diff is not saved', async () => {
+    sh('echo four >> a.txt');
+    const result = await git({ subcommand: 'diff' });
+    expect(result.content).toContain('+four');
+    expect(savedOutputs(result.content)).toEqual([]);
   });
 
   test('log honours max_count and oneline', async () => {
@@ -100,8 +124,44 @@ describe('git tool', () => {
       const result = await git({ subcommand: 'status' }, outside);
       expect(result.isError).toBe(true);
       expect(result.meta?.errorCode).toBe('git.failed');
+      expect(result.content).toContain('not a git repository');
+      expect(savedOutputs(result.content)).toEqual([]);
     } finally {
       await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  test('a long error output is reduced and saved whole', async () => {
+    // git cuts each message at 4 KiB, so a stand-in prints many warnings before the error, as git
+    // does when it fails after warning about many files.
+    const bin = await mkdtemp(join(tmpdir(), 'nullrivet-fake-git-'));
+    await writeFile(
+      join(bin, 'git'),
+      [
+        '#!/bin/sh',
+        'case " $* " in *" config "*) exit 1 ;; esac',
+        "seq 1 20000 | sed 's/^/warning: /' >&2",
+        "echo 'fatal: the error' >&2",
+        'exit 128',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path ?? ''}`;
+    try {
+      const result = await git({ subcommand: 'status' });
+      expect(result.isError).toBe(true);
+      expect(result.content).toStartWith('error [git.failed]: warning: 1\nwarning: 2\n');
+      expect(result.content).toContain('fatal: the error\n[complete stderr (');
+      expect(Buffer.byteLength(result.content, 'utf8')).toBeLessThan(17 * 1024);
+      const warnings = Array.from({ length: 20_000 }, (_, i) => `warning: ${i + 1}\n`).join('');
+      const [parts = []] = savedOutputs(result.content);
+      expect(parts[0]).toContain('-git-stderr.001.txt');
+      expect(readParts(parts).toString()).toBe(`${warnings}fatal: the error\n`);
+    } finally {
+      if (path === undefined) delete process.env.PATH;
+      else process.env.PATH = path;
+      await rm(bin, { recursive: true, force: true });
     }
   });
 

@@ -285,27 +285,4 @@ export const TASKS: EvalTask[] = [
       return failures;
     },
   },
-  {
-    name: 'subagents/parallel-readonly',
-    description: 'Delegate independent investigations to subagents and combine their reports.',
-    args: ['--permission', 'readonly'],
-    prompt:
-      'Each of the directories svc-a, svc-b and svc-c holds a service. Delegate one investigation per service, in a single response so they run in parallel, to find the TCP port the service listens on. Then answer with the three ports.',
-    setup(dir) {
-      write(dir, {
-        'svc-a/config/server.toml': '[server]\nport = 7311\n',
-        'svc-b/src/main.py': 'import os\nPORT = int(os.environ.get("PORT", "7322"))\n',
-        'svc-c/run.sh': '#!/bin/sh\nexec ./server --listen 0.0.0.0:7333\n',
-      });
-    },
-    check(run) {
-      const failures = ended(run);
-      const delegated = run.tools.filter((tool) => tool === 'delegate').length;
-      expect(failures, delegated >= 2, `delegate was called ${delegated} times`);
-      for (const port of ['7311', '7322', '7333']) {
-        expect(failures, run.answer.includes(port), `the answer lacks port ${port}`);
-      }
-      return failures;
-    },
-  },
 ];

@@ -26,10 +26,22 @@ const splitLines = (s: string): string[] => {
 const isUtf8Continuation = (b: number | undefined): boolean =>
   b !== undefined && (b & 0xc0) === 0x80;
 
-const utf8BoundaryAtOrBefore = (buf: Buffer, pos: number): number => {
+// Largest position at or before `pos` that does not split a UTF-8 character.
+export const utf8BoundaryAtOrBefore = (buf: Buffer, pos: number): number => {
   let p = Math.min(pos, buf.length);
   while (p > 0 && isUtf8Continuation(buf[p])) p--;
   return p;
+};
+
+// Length of the buffer without a UTF-8 character it ends in the middle of, such as one split
+// between two chunks of a stream.
+export const utf8CompleteLength = (buf: Buffer): number => {
+  let start = buf.length - 1;
+  while (start > 0 && start > buf.length - 4 && isUtf8Continuation(buf[start])) start--;
+  const lead = buf[start];
+  if (lead === undefined) return buf.length;
+  const size = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1;
+  return start + size > buf.length ? start : buf.length;
 };
 
 const utf8BoundaryAtOrAfter = (buf: Buffer, pos: number): number => {

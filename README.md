@@ -6,8 +6,10 @@ inspecting git repositories.
 
 - **Ephemeral.** The conversation lives in memory. nullrivet writes no database, history, logs,
   caches or configuration; a conversation is saved only to a file you name with
-  [`--session`](#sessions). Commands the agent runs and the model provider may keep their own
-  records.
+  [`--session`](#sessions). The one exception is the complete output of tool results reduced for
+  the model, kept in private temporary files while nullrivet runs and removed when it exits
+  ([saved output](docs/TOOLS.md#saved-output)). Commands the agent runs and the model provider may
+  keep their own records.
 - **Two execution modes.** `auto` runs every tool without confirmation; `readonly` exposes only
   read tools and is enforced by the executor, not just by the prompt.
 - **Not confined to a directory.** `--cwd` is only the starting point. Tools can reach any path the
@@ -102,8 +104,8 @@ it until end of file, so programs that start nullrivet without piping anything s
 | `-C, --cwd <dir>` | Starting directory for relative paths, commands and `AGENTS.md` lookup. It does not restrict file access. |
 | `--json` | Emit agent events as NDJSON on stdout. |
 | `--no-agents` | Do not load `AGENTS.md` files. |
-| `--max-steps <n>` | Maximum number of model requests for the task (default 200). |
-| `--timeout <time>` | Time limit for the task: `90s`, `30m`, `2h`, or seconds without a unit, at most `596h`. Exit code 3 when reached. No limit by default. |
+| `--max-steps <n>` | Maximum number of model requests for the task, and for each subagent (default 200). |
+| `--timeout <time>` | Time limit for the task, and for each subagent from when it starts running: `90s`, `30m`, `2h`, or seconds without a unit, at most `596h`. Exit code 3 when reached. By default, no limit for the task and 30 minutes for each subagent. |
 | `--session <file>` | Save the conversation to this file and continue it if the file already holds one. See [Sessions](#sessions). |
 | `--context-window <n>` | Override the model's context window, in tokens. |
 | `--max-output <n>` | Override the model's output token limit. |
@@ -125,8 +127,8 @@ Flags take precedence over environment variables, which take precedence over the
 | `NULLRIVET_MODEL` | Default model id. |
 | `NULLRIVET_EFFORT` | Default reasoning effort. |
 | `NULLRIVET_PERMISSION` | Default execution mode. |
-| `NULLRIVET_MAX_STEPS` | Default step limit. |
-| `NULLRIVET_TIMEOUT` | Default time limit per task. |
+| `NULLRIVET_MAX_STEPS` | Default step limit, per task and per subagent. |
+| `NULLRIVET_TIMEOUT` | Default time limit per task and per subagent (without it, 30 minutes per subagent). |
 | `NULLRIVET_<FAMILY>_BASE_URL` | Endpoint of a provider family, e.g. `NULLRIVET_OPENAI_BASE_URL`. |
 
 Provider-specific settings are listed in [docs/MODELS.md](docs/MODELS.md).
@@ -200,8 +202,11 @@ strictly, and some record prompts. Details: [docs/MODELS.md](docs/MODELS.md).
 
 | Mode | Tools offered to the model | Enforcement |
 |---|---|---|
-| `auto` (default) | `read_file`, `glob`, `grep`, `git`, `edit_file`, `write_file`, `bash`, `delegate` | None beyond operating system permissions. |
-| `readonly` | `read_file`, `glob`, `grep`, `git`, `delegate` | The other tools are neither offered nor executed, even if the model calls them. Subagents run in `readonly` too. |
+| `auto` (default) | `read_file`, `glob`, `grep`, `git`, `edit_file`, `write_file`, `bash`, `bash_background`, `bash_jobs`, `bash_kill`, `delegate` | None beyond operating system permissions. |
+| `readonly` | `read_file`, `glob`, `grep`, `git`, `delegate` | The other tools are neither offered nor executed, even if the model calls them. |
+
+`delegate` is offered only in the interactive session. Subagents always run in `readonly`, in both
+modes: only the main agent changes files or runs commands.
 
 `auto` is **not a sandbox**: commands run with your privileges, and anything the agent reads (files,
 command output, `AGENTS.md`) can carry prompt injection. Run nullrivet as an unprivileged user, and
@@ -219,12 +224,16 @@ in a container or VM for risky work ([trust boundaries](docs/ARCHITECTURE.md#tru
 | `edit_file` | write | Apply exact, all-or-nothing text replacements to a file. |
 | `write_file` | write | Create or replace a file atomically. |
 | `bash` | exec | Run a shell command non-interactively, with a timeout and output limits. |
-| `delegate` | read | Hand a self-contained task to a subagent and receive only its report. |
+| `bash_background` | exec | Start a command that keeps running in the background (a dev server, a watcher), with its output in a log file. |
+| `bash_jobs` | exec | List background jobs, show one, or wait for it to end or become ready. |
+| `bash_kill` | exec | Stop a background job and its process group. |
+| `delegate` | read | Start a read-only subagent in the background on a self-contained investigation; only its report enters the conversation. |
 
-Building, testing and git operations that change state go through `bash`. A subagent starts with
-an empty conversation and the same model and tools, never runs in a mode above the session's, and
-only its report enters the conversation. Details: [docs/TOOLS.md](docs/TOOLS.md),
-[subagents](docs/ARCHITECTURE.md#subagents).
+Building, testing and git operations that change state go through `bash`. Background jobs run
+until they end, are stopped, or nullrivet exits, and the model is told when one ends or becomes
+ready. A subagent starts with an empty conversation, the same model and the read tools only. It
+runs in the background, up to four at once, while the main agent keeps working, and its report
+reaches the model as data when it ends. Details: [docs/TOOLS.md](docs/TOOLS.md), [subagents](docs/ARCHITECTURE.md#subagents).
 
 ## Project instructions
 
@@ -254,12 +263,10 @@ nullrivet --json --permission readonly "List the TODOs in src" | jq -c 'select(.
 | `thinking:delta` | `text` |
 | `tool:start` | `id`, `name`, `args`, `step` (the model request of the turn that made the call) |
 | `tool:end` | `id`, `name`, `content`, `isError`, `meta` |
-| `usage` | `input`, `output`, `cacheRead`, `cacheWrite` (tokens of one model request); `compaction: true` for a summary request; `subagent` (the delegate call id) for a subagent's request |
+| `usage` | `input`, `output`, `cacheRead`, `cacheWrite` (tokens of one model request); `compaction: true` for a summary request |
 | `context:compact:start` | `reason` (`auto`, `manual`, `overflow`) |
 | `context:compact` | `reason`, `strategy` (`llm`, `fallback`), `before`, `after` (estimated tokens) |
-| `subagent:start` | `id` (the delegate call id), `title`, `mode` |
-| `subagent:progress` | `id`, `step`, `tool` (`name`, `args`) |
-| `subagent:end` | `id`, `status` (`completed`, `failed`, `cancelled`, `budget`), `steps` |
+| `notice` | `text`: a runtime note added for the model, such as a background job that ended |
 | `warning` | `message` |
 | `error` | `message` |
 | `agent:end` | `reason` (`done`, `aborted`, `error`, `budget`), `message` |

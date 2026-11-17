@@ -9,7 +9,8 @@ file.
 
 - **Ephemeral.** No state is written by nullrivet itself: no database, history, logs, caches or
   configuration. The only persistent effects are the ones tools produce on purpose, and a session
-  file when the user names one.
+  file when the user names one. The complete output of reduced tool results is the one exception:
+  it is kept in private temporary files for the duration of the run and removed when it ends.
 - **Provider-agnostic core.** The agent speaks one canonical message and stream format; adapters
   translate it to each provider's API.
 - **Events, not callbacks into the UI.** The core publishes `AgentEvent`s. The plain output, the
@@ -28,6 +29,7 @@ src/
     args.ts                flags, environment variables, defaults
     run.ts                 resolve the model, create the agent, run one task or the session
     repl.ts                interactive session controller
+    auto-continue.ts       when an idle session starts a turn on background events
     slash.ts               slash commands
     session-file.ts        session files: loading, validation, atomic saves, attaching
     prompt-history.ts      prompts recalled with the arrow keys
@@ -38,7 +40,7 @@ src/
     compactor.ts           summary requests of a compaction, in chunks
     conversation.ts        in-memory history and its invariants
     snapshot.ts            the conversation as data: snapshot format and its validation
-    subagent.ts            the delegate tool: subagents on the same loop
+    subagent.ts            the delegate tool and the registry of background subagents
     tool-executor.ts       policy check, error containment, output sanitizing
     collect.ts             turns a provider stream into one collected step
     retry.ts               retries before the first streamed event
@@ -63,6 +65,8 @@ src/
     glob.ts, grep.ts       file search; grep-search.ts runs in grep-worker.ts
     file-walk.ts           directory listing shared by glob and grep
     process.ts             process groups, timeouts, bounded capture
+    jobs.ts                background jobs: registry, events, and their three tools
+    output-files.ts        complete output of reduced results, saved in parts to temporary files
     args.ts, paths.ts, env.ts
   instructions/
     agents-loader.ts       AGENTS.md discovery and rendering
@@ -90,8 +94,10 @@ src/
 1. The prompt is appended to the conversation.
 2. A request is built from the system prompt, the conversation and the tools allowed in the
    current mode, with the project instructions of the starting directory at the start of the
-   first user message. The output token limit is reduced to what still fits in the context
-   window.
+   first user message. Runtime notices, such as a background job or a subagent that ended, are
+   appended as `<agent-note>`s first, after any automatic compaction; a subagent's report follows
+   its note as a fenced data block. A request takes at most one batch of notices. The output
+   token limit is reduced to what still fits in the context window.
 3. The provider stream is consumed into a *collected step*: text, reasoning, tool calls, usage and
    stop reason, with the original order of the blocks preserved.
 4. The assistant message is appended. If it has no tool calls, the turn ends.
@@ -153,8 +159,9 @@ The in-memory conversation keeps the invariants that provider APIs require:
 
 ## Context management
 
-Everything lives in memory: there is no log to recover discarded content from, so the conversation
-is reduced conservatively and never with pointers to data that no longer exists.
+Everything lives in memory, apart from the saved output of reduced tool results, which lasts
+until the process exits. There is no log to recover discarded content from, so the conversation is
+reduced conservatively and never with pointers to data that no longer exists.
 
 ### Measuring
 
@@ -221,6 +228,14 @@ with a note to the model. Only one recovery happens per step: a second overflow 
 Tool output is reduced before it enters the conversation: large results keep their first and last
 lines (or bytes, for very long lines) with a marker showing how much was dropped.
 
+When `bash`, `git` or `delegate` reduce a result, the complete output is also written to private
+temporary files, split into parts no larger than what `read_file` and `grep` accept, and a line
+below the reduced text names them. Reduction then affects what the model sees first, not what it
+can recover: it reads the omitted part with the read tools, in either mode, instead of running the
+command again. The files are removed when nullrivet exits and never before, so a path in the
+conversation stays valid for the whole run. Limits and states are described in
+[TOOLS.md](TOOLS.md#saved-output).
+
 ## Tools and the execution policy
 
 A tool declares its effect: `read`, `write` or `exec`. In `readonly` mode only `read` tools are
@@ -235,9 +250,7 @@ one stay in the history, and models tend to follow what they said before.
 The executor never lets a tool failure escape: unknown tools, invalid arguments and exceptions all
 become error results the model can read. Terminal escape sequences are removed from tool output.
 
-Tool calls run in the order the model wrote them. A tool marked `concurrent` (`delegate`) is the
-exception: adjacent calls to it run at the same time, and the tool bounds how many make progress
-at once. Results keep the order of the calls.
+Tool calls run one after another, in the order the model wrote them.
 
 See [TOOLS.md](TOOLS.md) for each tool.
 
@@ -280,9 +293,9 @@ is never placed where it would carry the authority of the rules or of the user.
 |---|---|---|
 | System prompt | nullrivet's rules, the execution mode, the environment | Rules |
 | User turn | The user's prompts | The user's requests |
-| User turn, fenced block | `AGENTS.md` of the starting directory; text piped on stdin with a prompt, in its own block after the prompt | Data |
+| User turn, fenced block | `AGENTS.md` of the starting directory; text piped on stdin with a prompt, in its own block after the prompt; a subagent's title, stop message and report, after its runtime note | Data |
 | User turn, first block after a compaction | Notes written by the agent, then the user's requests quoted verbatim | Notes; only the quoted requests are the user's |
-| User turn, `<agent-note>` | Feedback from the runtime, such as a rejected tool call | Runtime |
+| User turn, `<agent-note>` | Feedback from the runtime, such as a rejected tool call, a background job or a subagent that ended; never command output or text from a model | Runtime |
 | Tool results | File contents, command output, search results, `AGENTS.md` found later | Data |
 
 - **The rules state the hierarchy.** Instructions come only from the rules and the user. Data can
@@ -306,37 +319,72 @@ is never placed where it would carry the authority of the rules or of the user.
 ## Subagents
 
 A subagent is a second run of the same loop (`runTurn`) inside the same process, started by the
-`delegate` tool. It exists to keep the main conversation small: it can read dozens of files and
-run tests, and only its report comes back.
+`delegate` tool. It exists to keep the main conversation small: it can read dozens of files, and
+only its report comes back. It runs in the background while the main agent keeps working, and it
+only reads: the main agent is the only one that changes files or runs commands.
 
 - **Spawn, not fork.** The subagent gets a new `Conversation` with nothing from the parent: its
   first message is the delegate call's objective, followed by its context fenced as data, since
   the parent may have copied that text from files. It has its own `InstructionsLoader`
   (a fork of the parent's settings with nothing loaded), so the `AGENTS.md` files of its starting
   directory reach it even when the parent already has them.
-- **Same model and tools.** It uses the parent's current model and effort, and the parent's tools
-  without `delegate`, so delegation is one level deep. Its system prompt adds a section that names
-  the delegating agent as its user and asks for a report: result, evidence, open issues.
-- **Mode.** The subagent's mode is a function of the parent's, read before each of its requests
-  and tool calls: `auto` only when it asked for `auto`, the session was in `auto` when it started,
-  and still is. The ceiling is fixed together with the semaphore it takes, so subagents in the
-  `readonly` lane never gain write access when the session switches to `auto`.
-- **Concurrency.** `delegate` is a concurrent tool: adjacent calls run at the same time. Two
-  semaphores bound them: three `readonly` subagents at once, one `auto` subagent at a time. The
-  parent waits for all of them, so it never writes while an `auto` subagent does.
-- **Cancellation.** The subagent runs on the signal of the parent's tool call, which is the turn's
-  signal: an interrupt or the time limit stops it, and its commands' process groups are
-  terminated like the parent's.
-- **Result.** A status line built by the runtime from what it observed (status, steps, tool
-  errors, tokens, files changed through `edit_file` and `write_file` relative to the session
-  directory, and why it stopped early), then the subagent's last answer, reduced to 16 KiB. Before
-  its last step, a runtime note asks for the report without more tool calls. It enters the
-  parent's conversation as one tool result, which is data like any other.
+- **Same model, read tools.** It uses the parent's current model and effort and runs in
+  `readonly`, so it is offered only the `read` tools of the session. It never gets `delegate` or
+  the background job tools, so delegation is one level deep. Its system prompt adds a section that
+  names the delegating agent as its user and asks for a report: result, evidence, open issues.
+- **Interactive session only.** A report arrives after the call that started it; a one-shot run
+  ends with its task, so it does not offer `delegate`. `createAgent` offers it only when asked
+  (`delegation: true`), since only a caller that runs more turns receives the reports.
+- **Registry.** `SubagentRegistry` owns the runs, as `JobRegistry` owns the jobs; the agent only
+  combines the two. `delegate` registers a run and returns its id at once. Ids are a random
+  prefix of the registry and a counter, so an id in a resumed conversation never names a run of
+  another process. Four runs make progress at once; up to 16 more wait for a slot in order, and
+  beyond that `delegate` is refused. The registry owns each run's promise, which never rejects: an
+  exception becomes a `failed` outcome, the slot is always released, and the outcome is recorded
+  once. An activity listener that throws is reported apart, as an uncaught error, so it changes
+  neither the outcome nor the bookkeeping. A run cancelled just as a slot is handed to it gives
+  the slot back without starting.
+- **Limits.** The session's limits for a task, `--max-steps` and `--timeout`, apply to each run,
+  the time counted from when it starts running. Without a `--timeout`, a run gets 30 minutes
+  (`SUBAGENT_DEFAULT_TIME_LIMIT_MS`): the main agent can go without a time limit because the user
+  watches it, but a run without one could hold its slot, and the queue behind it, without end. The
+  deadline aborts with the same reason as `--timeout`, so the loop reports a limit, not a
+  cancellation. Before its last step, a runtime note asks for the report without more tool calls.
+  After four fifths of the time limit, the loop makes the step in progress the last one
+  (`finalStepAt`), so a run that is about to time out still writes its report. The loop returns
+  which limit ended a turn (`limit` in the result), and the reason in the note comes from it,
+  never from the text of the loop's message.
+- **Cancellation.** Each run has its own signal, independent of the turn that started it.
+  Interrupting a turn, `Esc` on an idle session and exiting cancel every run, running or
+  waiting. `/clear` also discards them: a discarded run reports nothing to the model, and from
+  then on only its `usage` and `subagent:end` events reach the interface, so nothing it does later
+  shows it again.
+- **Report.** When a run ends, the registry announces a pending event, like a job that ended. The
+  runtime note holds only facts the runtime observed: id, status, a reason it chose itself when
+  the run stopped early (`cancelled`, `time_limit`, `step_limit`, `context_full`, `output_limit`,
+  `provider_error`, `internal_error`), steps, tool errors and tokens. The title, any message that
+  came with the stop (possibly from a provider) and the report follow as fenced data: a model's
+  text never gets the authority of a note. The user is shown the title and the same facts instead
+  of the note (`display` of a runtime notice).
+- **Batches.** The job and subagent registries expose their pending events without consuming
+  them, and the agent marks as delivered only those it selects for a batch. A batch takes every
+  job event and the reports in the order they ended, while their data fits a budget of a quarter
+  of the context window and at most 32 KiB, and always at least one report; the rest stay pending
+  for the next request. The registry keeps each report whole, and its data is built when it is
+  sent, within the budget and never above 16 KiB, with everything it holds: the stop message, which
+  may come from a provider at any length, is cut first, the report gets the room left after the
+  title and the name of the file that saves it whole, and the budget has a floor of 2 KiB so that
+  room exists. Since one report never exceeds the budget, the rule of at least one report per batch
+  never does either. Compaction cannot shorten text in the latest message, so the budget is what
+  keeps a batch from filling a small window. The batch is in time order. The loop takes at most one
+  batch per request, so a retried request does not take a second one, and earlier reports can be
+  compacted once they leave the latest message.
 - **Events.** The subagent's own events are not forwarded: text from two agents would mix. The
-  tool emits `subagent:start`, `subagent:progress` (step and current tool) and `subagent:end` with
-  the delegate call's id, and forwards the subagent's `usage` events tagged with that id, so token
-  totals include subagents while the context gauge reflects the main conversation only. Nothing of
-  the subagent is kept after it ends.
+  registry emits `subagent:start`, `subagent:progress` (step and current tool) and `subagent:end`
+  with the subagent's id, and forwards its `usage` events tagged with that id, so token totals
+  include subagents while the context gauge reflects the main conversation only. These events go
+  to a listener of the agent (`onSubagentActivity`), not of a turn, since a run outlives the turn
+  that started it. Nothing of the subagent is kept once its report is delivered.
 
 ## Sessions
 
@@ -390,10 +438,30 @@ version.
 
 Commands run in their own process group with stdin closed. A timeout, an abort or the end of the
 command terminates the whole group (SIGTERM, then SIGKILL after 2 s), so background jobs do not
-outlive the call. Every live group is killed when nullrivet exits.
+outlive the call. Every live group is killed when nullrivet exits, including on SIGTERM and on
+SIGHUP (a closed terminal or a lost SSH connection), whose default action would skip it.
+
+Background jobs (`bash_background`) start the same way, but are not tied to a turn: no abort
+signal, and no timeout unless `max_runtime_ms` is given. Their groups are in the same set, so they
+are killed with the rest when nullrivet exits. A registry owned by the main agent tracks them and
+records each event (ready, finished) once; the loop turns the events not yet shown into runtime
+notes. See [TOOLS.md](TOOLS.md#background-jobs).
 
 ## Interactive session
 
 The session keeps one agent, and therefore one conversation, alive between prompts, and saves it
 to a session file when one is attached (see [Sessions](#sessions)). Its rendering, input handling
 and interrupt behavior are described in [TUI.md](TUI.md).
+
+Turns start from two sources: the user's prompts and background events, from jobs and from
+subagents that ended. The registries only announce that an event is pending; they never hand the
+event to the session. A small scheduler (`cli/auto-continue.ts`) decides when an idle session
+starts a turn without a prompt (`agent.runOnBackgroundEvents`), with a limit of 5 automatic
+turns per prompt and a suspension after an interrupt or a turn that did not end with `done`. Only
+automatic turns that start background work count toward the limit (`agent.backgroundStarts`
+before and after): the others only take events of work that already exists, which are finite. The
+turn's loop alone takes the events and adds them as runtime notes, so an event reaches the model
+exactly once, whichever turn takes it. A turn without a prompt that finds no event ends before any
+compaction or request. Clearing the conversation drops the events of the jobs it started, which
+keep running, and cancels and discards its subagents: nothing in the new conversation would
+explain them.

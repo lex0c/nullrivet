@@ -1,5 +1,5 @@
 import { stat } from 'node:fs/promises';
-import { headTailSummary } from '../context/output-reduction.ts';
+import { HEAD_TAIL_DEFAULT_LINES, headTailSummary } from '../context/output-reduction.ts';
 import { errorMessage } from '../errors.ts';
 import {
   InvalidArgumentError,
@@ -10,12 +10,16 @@ import {
   requireNonEmptyString,
 } from './args.ts';
 import { scrubAgentEnv } from './env.ts';
+import { finishOutput, type OutputSpool, outputFiles } from './output-files.ts';
 import { resolvePath } from './paths.ts';
-import { type ProcessRunResult, runProcess } from './process.ts';
+import { captureInterruption, type ProcessRunResult, runProcess } from './process.ts';
 import { type Tool, type ToolResult, toolError } from './types.ts';
 
 export const GIT_TIMEOUT_MS = 30_000;
 const MODEL_OUTPUT_BYTES = 32 * 1024;
+// git cuts each of its messages at 4 KiB, so a longer error output comes from many warnings before
+// the error, which is at the end.
+const ERROR_OUTPUT_BYTES = 16 * 1024;
 const LOG_DEFAULT_COUNT = 20;
 const LOG_MAX_COUNT = 200;
 
@@ -216,15 +220,34 @@ const buildInvocation = (subcommand: Subcommand, input: Record<string, unknown>)
 const isSubcommand = (value: string): value is Subcommand =>
   (SUBCOMMANDS as readonly string[]).includes(value);
 
-const formatOutput = (subcommand: Subcommand, run: ProcessRunResult): string => {
+const formatOutput = (
+  subcommand: Subcommand,
+  run: ProcessRunResult,
+  spool: OutputSpool,
+): string => {
   if (run.stdout.trim().length === 0) {
     return subcommand === 'diff' ? '[no changes]' : '[no output]';
   }
-  return headTailSummary(run.stdout, {
+  const summary = headTailSummary(run.stdout, {
     maxBytes: MODEL_OUTPUT_BYTES,
     headLines: 300,
     tailLines: 50,
-  }).text;
+  });
+  const note = finishOutput(spool, summary.reduced, 'output', captureInterruption(run));
+  return note === null ? summary.text : `${summary.text}\n${note}`;
+};
+
+// git's message for a failed command, reduced and saved like the output of a successful one.
+const failureDetail = (run: ProcessRunResult, spool: OutputSpool): string => {
+  const stderr = run.stderr.trim();
+  if (stderr.length === 0) return `exit code ${run.exitCode}`;
+  const summary = headTailSummary(stderr, {
+    maxBytes: ERROR_OUTPUT_BYTES,
+    headLines: HEAD_TAIL_DEFAULT_LINES,
+    tailLines: HEAD_TAIL_DEFAULT_LINES,
+  });
+  const note = finishOutput(spool, summary.reduced, 'stderr', captureInterruption(run));
+  return note === null ? summary.text : `${summary.text}\n${note}`;
 };
 
 export const gitTool: Tool = {
@@ -280,42 +303,52 @@ export const gitTool: Tool = {
     }
 
     const env = gitEnv();
-    let run: ProcessRunResult;
+    const spool = outputFiles.spool('git', MODEL_OUTPUT_BYTES);
+    const stderrSpool = outputFiles.spool('git-stderr', ERROR_OUTPUT_BYTES);
     try {
-      const overrides = await driverOverrides(cwd, env, ctx.signal);
-      run = await runProcess({
-        file: 'git',
-        args: [
-          '--no-pager',
-          ...configArgs([...HARDENING_CONFIG, ...overrides]),
-          ...invocation.args,
-        ],
-        cwd,
-        env,
-        timeoutMs: GIT_TIMEOUT_MS,
-        signal: ctx.signal,
-      });
-    } catch (error) {
-      const message = errorMessage(error);
-      return toolError('git.failed', message);
-    }
+      let run: ProcessRunResult;
+      try {
+        const overrides = await driverOverrides(cwd, env, ctx.signal);
+        run = await runProcess({
+          file: 'git',
+          args: [
+            '--no-pager',
+            ...configArgs([...HARDENING_CONFIG, ...overrides]),
+            ...invocation.args,
+          ],
+          cwd,
+          env,
+          timeoutMs: GIT_TIMEOUT_MS,
+          signal: ctx.signal,
+          onStdout: (chunk) => spool.push(chunk),
+          onStderr: (chunk) => stderrSpool.push(chunk),
+        });
+      } catch (error) {
+        const message = errorMessage(error);
+        return toolError('git.failed', message);
+      }
 
-    const touchedPaths = [cwd, ...invocation.paths.map((p) => resolvePath(p, cwd))];
-    if (run.termination !== 'exited') {
-      return toolError(
-        'git.failed',
-        `git ${subcommand} was ${run.termination === 'timeout' ? 'timed out' : 'aborted'}`,
-      );
+      const touchedPaths = [cwd, ...invocation.paths.map((p) => resolvePath(p, cwd))];
+      if (run.termination !== 'exited') {
+        return toolError(
+          'git.failed',
+          `git ${subcommand} was ${run.termination === 'timeout' ? 'timed out' : 'aborted'}`,
+        );
+      }
+      if (run.exitCode !== 0) {
+        return { ...toolError('git.failed', failureDetail(run, stderrSpool)), touchedPaths };
+      }
+      return {
+        content: formatOutput(subcommand, run, spool),
+        isError: false,
+        meta: { subcommand, cwd, durationMs: run.durationMs, stdoutBytes: run.stdoutBytes },
+        touchedPaths,
+      };
+    } finally {
+      // Discards what the result does not show: the output of a failed command, and the error
+      // output of a successful one.
+      spool.finish({ keep: false });
+      stderrSpool.finish({ keep: false });
     }
-    if (run.exitCode !== 0) {
-      const detail = run.stderr.trim() || `exit code ${run.exitCode}`;
-      return { ...toolError('git.failed', detail), touchedPaths };
-    }
-    return {
-      content: formatOutput(subcommand, run),
-      isError: false,
-      meta: { subcommand, cwd, durationMs: run.durationMs, stdoutBytes: run.stdoutBytes },
-      touchedPaths,
-    };
   },
 };

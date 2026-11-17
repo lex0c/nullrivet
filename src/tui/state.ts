@@ -1,4 +1,4 @@
-import type { AgentEndReason, AgentEvent, CompactReason } from '../agent/events.ts';
+import type { AgentEndReason, AgentEvent, BackgroundWork, CompactReason } from '../agent/events.ts';
 import type { ExecutionMode } from '../tools/policy.ts';
 import type { InputState } from './input-editor.ts';
 import { splitSettledMarkdown } from './markdown-stream.ts';
@@ -24,6 +24,8 @@ export interface StatusState {
   // request reports usage, and again after the conversation is cleared.
   contextTokens: number | null;
   totals: UsageTotals;
+  // Kept current by the session controller, since jobs and subagents change outside any turn.
+  background: BackgroundWork;
 }
 
 export interface ActiveTool {
@@ -31,8 +33,15 @@ export interface ActiveTool {
   name: string;
   args: Record<string, unknown>;
   startedAt: number;
-  // For a delegate call, what its subagent is doing.
-  subagent?: { step: number; tool: { name: string; args: Record<string, unknown> } };
+}
+
+// A subagent running in the background, shown in the live region whether a turn runs or not.
+export interface BackgroundSubagent {
+  id: string;
+  title: string;
+  startedAt: number;
+  // What it is doing now; absent until its first tool call.
+  progress?: { step: number; tool: { name: string; args: Record<string, unknown> } };
 }
 
 export interface TurnState {
@@ -62,6 +71,7 @@ export interface TuiState {
   // When Ctrl+C was pressed on an empty, idle prompt; a second press before it expires exits.
   exitArmedAt: number | null;
   compacting: { reason: CompactReason; since: number } | null;
+  subagents: BackgroundSubagent[];
 }
 
 // Items written once to the scrollback, above the live region.
@@ -116,14 +126,20 @@ export const emptyTotals = (): UsageTotals => ({
 });
 
 export const createInitialState = (
-  status: Omit<StatusState, 'totals' | 'contextTokens'>,
+  status: Omit<StatusState, 'totals' | 'contextTokens' | 'background'>,
 ): TuiState => ({
   input: { value: '', cursor: 0 },
   slash: null,
-  status: { ...status, contextTokens: null, totals: emptyTotals() },
+  status: {
+    ...status,
+    contextTokens: null,
+    totals: emptyTotals(),
+    background: { jobs: 0, subagents: 0, queuedSubagents: 0 },
+  },
   turn: null,
   exitArmedAt: null,
   compacting: null,
+  subagents: [],
 });
 
 const formatTokenCount = (n: number): string =>
@@ -238,24 +254,32 @@ const reduceAgentEvent = (state: TuiState, event: AgentEvent, now: number): Redu
         permanent: [],
       };
     }
+    // Subagents run in the background, so they are tracked apart from any turn.
+    case 'subagent:start':
+      return {
+        state: {
+          ...state,
+          subagents: [...state.subagents, { id: event.id, title: event.title, startedAt: now }],
+        },
+        permanent: [],
+      };
     case 'subagent:progress': {
-      if (turn === null) return { state, permanent: [] };
       const progress = { step: event.step, tool: event.tool };
       return {
         state: {
           ...state,
-          turn: {
-            ...turn,
-            tools: turn.tools.map((t) => (t.id === event.id ? { ...t, subagent: progress } : t)),
-          },
+          subagents: state.subagents.map((s) => (s.id === event.id ? { ...s, progress } : s)),
         },
         permanent: [],
       };
     }
-    // The delegate call's own tool card shows when a subagent starts and ends.
-    case 'subagent:start':
     case 'subagent:end':
-      return { state, permanent: [] };
+      return {
+        state: { ...state, subagents: state.subagents.filter((s) => s.id !== event.id) },
+        permanent: [],
+      };
+    case 'notice':
+      return { state, permanent: [{ kind: 'notice', level: 'info', text: event.text }] };
     case 'warning':
       return { state, permanent: [{ kind: 'notice', level: 'warning', text: event.message }] };
     case 'error':

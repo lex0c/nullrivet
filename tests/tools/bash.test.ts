@@ -1,9 +1,15 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { readFileSync, statSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { bashTool, buildChildEnv } from '../../src/tools/bash.ts';
+import { MAX_FILE_BYTES } from '../../src/tools/file-io.ts';
+import { grepTool } from '../../src/tools/grep.ts';
+import { removeOutputFiles } from '../../src/tools/output-files.ts';
+import { readFileTool } from '../../src/tools/read-file.ts';
 import type { ToolContext } from '../../src/tools/types.ts';
+import { readParts, savedOutputs } from '../helpers/saved-output.ts';
 
 let dir: string;
 
@@ -16,6 +22,12 @@ beforeEach(async () => {
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
+
+afterAll(() => removeOutputFiles());
+
+// What `seq 1 count` prints.
+const sequence = (count: number): string =>
+  `${Array.from({ length: count }, (_, i) => i + 1).join('\n')}\n`;
 
 const ctx = (signal: AbortSignal = new AbortController().signal): ToolContext => ({
   cwd: dir,
@@ -140,7 +152,8 @@ describe('bash tool', () => {
     const result = await bashTool.execute({ command: 'seq 1 100000' }, ctx());
     expect(result.content).toStartWith('1\n2\n');
     expect(result.content).toContain('lines elided');
-    expect(result.content).toContain('100000\n[exit code 0]');
+    expect(result.content).toContain('100000\n[exit code 0]\n[complete stdout (');
+    expect(savedOutputs(result.content)).toHaveLength(1);
     expect(result.meta?.stdoutBytes).toBeGreaterThan(500_000);
   });
 
@@ -152,4 +165,99 @@ describe('bash tool', () => {
       "'timeout_ms' must be >= 100",
     );
   });
+});
+
+describe('bash tool output files', () => {
+  // The seq of macOS writes numbers from a million on in exponent notation (1e+06) unless it is
+  // given a format.
+  const numbers = (count: number): string => `seq -f %.0f 1 ${count}`;
+
+  test('a small output is returned whole and not saved', async () => {
+    const result = await bashTool.execute({ command: 'seq 1 100' }, ctx());
+    expect(savedOutputs(result.content)).toEqual([]);
+    expect(result.content).toBe(`${sequence(100)}\n[exit code 0]`);
+  });
+
+  test('the complete output is saved, beyond the memory bound of the capture', async () => {
+    const result = await bashTool.execute({ command: numbers(1_000_000) }, ctx());
+    const outputs = savedOutputs(result.content);
+    expect(outputs).toHaveLength(1);
+    expect(outputs[0]).toHaveLength(1);
+    expect(result.content).toContain('dropped');
+    expect(readParts(outputs[0] ?? []).toString()).toBe(sequence(1_000_000));
+  });
+
+  test('output reduced by its decoding but small in bytes is saved too', async () => {
+    // In a UTF-8 locale, the tr of macOS writes \377 as the character ÿ, which decodes cleanly; in
+    // the C locale it writes the single byte.
+    const result = await bashTool.execute(
+      { command: "head -c 8000 /dev/zero | LC_ALL=C tr '\\0' '\\377'" },
+      ctx(),
+    );
+    expect(result.content).toContain('dropped');
+    const [parts = []] = savedOutputs(result.content);
+    expect(readParts(parts).equals(Buffer.alloc(8000, 0xff))).toBe(true);
+  });
+
+  test('an output over the file size limit is split into parts read_file and grep accept', async () => {
+    const result = await bashTool.execute({ command: numbers(2_000_000) }, ctx());
+    const [parts = []] = savedOutputs(result.content);
+    expect(parts).toHaveLength(2);
+    const [first = '', last = ''] = parts;
+    for (const part of parts) expect(statSync(part).size).toBeLessThanOrEqual(MAX_FILE_BYTES);
+    expect(readFileSync(first).at(-1)).toBe(0x0a);
+    expect(readParts(parts).toString()).toBe(sequence(2_000_000));
+
+    expect(readFileTool.effect).toBe('read');
+    const read = await readFileTool.execute({ path: last, offset: 0, limit: 1 }, ctx());
+    expect(read.isError).toBe(false);
+    expect(read.content).toMatch(/^\d+\n/);
+    expect(grepTool.effect).toBe('read');
+    const found = await grepTool.execute(
+      {
+        pattern: '^1999999$',
+        path: dirname(last),
+        glob: basename(last).replace(/\.\d+\.txt$/, '.*.txt'),
+      },
+      ctx(),
+    );
+    expect(found.content).toContain(`${basename(last)}:`);
+    expect(found.content).toContain(': 1999999');
+  });
+
+  test('stdout and stderr are saved to separate files', async () => {
+    const result = await bashTool.execute(
+      { command: 'seq 1 200000 & seq 1 200000 >&2; wait' },
+      ctx(),
+    );
+    const outputs = savedOutputs(result.content);
+    expect(outputs).toHaveLength(2);
+    expect(result.content).toMatch(
+      /\[exit code 0\]\n\[complete stdout .+\]\n\[complete stderr .+\]$/,
+    );
+    expect(outputs[0]?.[0]).toContain('-bash-stdout.001.txt');
+    expect(outputs[1]?.[0]).toContain('-bash-stderr.001.txt');
+    for (const parts of outputs) expect(readParts(parts).toString()).toBe(sequence(200_000));
+  });
+
+  test('a timeout marks the saved output as interrupted', async () => {
+    const result = await bashTool.execute(
+      { command: 'seq 1 100000; sleep 30', timeout_ms: 1_000 },
+      ctx(),
+    );
+    expect(result.content).toContain('[interrupted stdout (');
+    expect(result.content).toContain('received before the command timed out');
+    const [parts = []] = savedOutputs(result.content);
+    expect(readParts(parts).toString()).toBe(sequence(100_000));
+  });
+
+  test('output cut off by killing processes left running is marked as interrupted', async () => {
+    const result = await bashTool.execute(
+      { command: `(trap '' TERM; seq 1 100000; exec sleep 30) & sleep 0.5` },
+      ctx(),
+    );
+    expect(result.content).toContain(
+      'received before the processes the command left running were killed',
+    );
+  }, 10_000);
 });
