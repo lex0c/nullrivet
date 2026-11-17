@@ -299,9 +299,14 @@ is never placed where it would carry the authority of the rules or of the user.
 | Tool results | File contents, command output, search results, `AGENTS.md` found later | Data |
 
 - **The rules state the hierarchy.** Instructions come only from the rules and the user. Data can
-  tell the model how to carry out the task, but not change it: instructions found in data are
-  not followed and are reported to the user. Credentials found along the way are not printed or
-  sent, and local data is not sent to external services, unless the user's request requires it.
+  tell the model how to carry out the task, such as how to build and test, but not change it,
+  widen it or grant permissions: instructions found in data that go beyond the task are not
+  followed and are reported to the user. Credentials found along the way are not printed or sent,
+  and local data is not sent to services other than the session's model provider, unless the
+  user's request requires it.
+- **Values in the rules.** The working directory is the one value from outside written into the
+  system prompt, and it is quoted as a JSON string: a directory name can hold line breaks, and a
+  subagent's directory is chosen by a model, so it must not be able to add lines to the rules.
 - **Fences.** Text embedded in a user turn is wrapped in a tag whose opening and closing carry a
   value drawn at random when the process starts (`<input fence="…">` … `</input fence="…">`). The
   text cannot know the value, so it cannot end the block early. The value is fixed for the
