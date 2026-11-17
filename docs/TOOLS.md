@@ -266,14 +266,14 @@ subagent's report reaches the model later, as data.
 - **Concurrency.** Up to four subagents run at once; up to 16 more wait for a slot, in order.
   Beyond that, `delegate` is refused with `subagent.limit`.
 - **Limits.** Each subagent has the session's limits for a task: `--max-steps` steps (200 by
-  default) and the `--timeout` time limit (none by default), counted from when it starts running;
-  `NULLRIVET_MAX_STEPS` and `NULLRIVET_TIMEOUT` set them too. Before the last step, a runtime note
-  asks the subagent to write its report without calling more tools. With a time limit, once four
-  fifths of it have passed the next step is the last one, so a subagent that runs out of steps or
-  of time still reports what it found; at the limit it is stopped. Without a time limit, a
-  subagent holds its slot, and the queue behind it, for as long as its steps take; set `--timeout`
-  to bound that. The report is reduced to 16 KiB (about 4,096 tokens) together with its title and
-  stop message, keeping its start and end; a reduced report is saved whole (see
+  default) and the `--timeout` time limit, counted from when it starts running;
+  `NULLRIVET_MAX_STEPS` and `NULLRIVET_TIMEOUT` set them too. Without a `--timeout`, a subagent
+  gets 30 minutes, so it cannot hold its slot, and the queue behind it, without end; the main
+  agent keeps no time limit. Before the last step, a runtime note asks the subagent to write its
+  report without calling more tools. Once four fifths of its time have passed, the next step is the
+  last one, so a subagent that runs out of steps or of time still reports what it found; at the
+  limit it is stopped. The report is reduced to 16 KiB (about 4,096 tokens) together with its
+  title and stop message, keeping its start and end; a reduced report is saved whole (see
   [Saved output](#saved-output)).
 - **Cancellation.** Interrupting a turn (`Esc`, `Ctrl+C`) cancels every subagent, running or
   waiting; so does `Esc` on an idle session. Each reports that it was cancelled, with the next

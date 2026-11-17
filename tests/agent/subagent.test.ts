@@ -10,6 +10,7 @@ import {
   createDelegateTool,
   describeSubagentEvent,
   MAX_RUNNING_SUBAGENTS,
+  SUBAGENT_DEFAULT_TIME_LIMIT_MS,
   type SubagentEvent,
   SubagentLimitError,
   SubagentRegistry,
@@ -501,6 +502,17 @@ describe('subagent registry', () => {
     expect(errors).toHaveLength(seen.length);
   });
 
+  test("a subagent's time limit is the session's, or 30 minutes when the session has none", () => {
+    const provider = routedProvider(() => textTurn('r'));
+    expect(new SubagentRegistry(runtimeFor(provider)).timeLimitMs).toBe(
+      SUBAGENT_DEFAULT_TIME_LIMIT_MS,
+    );
+    expect(SUBAGENT_DEFAULT_TIME_LIMIT_MS).toBe(30 * 60_000);
+    expect(new SubagentRegistry(runtimeFor(provider, { timeLimitMs: 90_000 })).timeLimitMs).toBe(
+      90_000,
+    );
+  });
+
   test('ids carry a random prefix of their registry', () => {
     const provider = routedProvider(() => textTurn('r'));
     const a = new SubagentRegistry(runtimeFor(provider)).start(spec).id;
@@ -539,7 +551,8 @@ describe('the agent and its subagents', () => {
     // The subagent keeps calling tools, so it stops at the step limit.
     const stepped = await make({ maxSteps: 2 });
     await stepped.run('go');
-    expect(describeDelegate()).toContain('at most 2 steps, and cannot delegate further');
+    // Without a session time limit, a subagent still has one of its own.
+    expect(describeDelegate()).toContain('at most 2 steps and 30m, and cannot delegate further');
     expect(await waitUntil(() => stepped.hasBackgroundEvents())).toBe(true);
     await stepped.runOnBackgroundEvents();
     expect(JSON.stringify(stepped.conversation.messages())).toContain('budget (step_limit)');

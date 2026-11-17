@@ -35,6 +35,9 @@ export const MAX_QUEUED_SUBAGENTS = 16;
 // Share of the time limit after which the next step is the last, so a subagent that runs out of
 // time still writes its report before the run is aborted.
 const FINAL_STEP_TIME_SHARE = 0.8;
+// The time limit of a subagent when the session has none, so a run cannot hold its slot, and the
+// queue behind it, without end. The main agent keeps no limit by default.
+export const SUBAGENT_DEFAULT_TIME_LIMIT_MS = 30 * 60_000;
 // The data of one finished subagent, title and stop message included: about 4096 tokens, since the
 // parent keeps only the report, not the work behind it. A batch of notices for a small context
 // window can lower it further.
@@ -61,7 +64,8 @@ export interface SubagentRuntime {
   instructions: InstructionsLoader | null;
   stallMs: number;
   // The session's limits for a task, which apply to each subagent too: model requests, and time
-  // counted from when it starts running (none when undefined).
+  // counted from when it starts running. Without a session time limit, a subagent gets
+  // SUBAGENT_DEFAULT_TIME_LIMIT_MS.
   maxSteps: number;
   timeLimitMs: number | undefined;
   isGitRepo: (cwd: string) => Promise<boolean>;
@@ -313,8 +317,8 @@ export class SubagentRegistry implements PendingEventSource<SubagentEvent> {
     return this.runtime.maxSteps;
   }
 
-  get timeLimitMs(): number | undefined {
-    return this.runtime.timeLimitMs;
+  get timeLimitMs(): number {
+    return this.runtime.timeLimitMs ?? SUBAGENT_DEFAULT_TIME_LIMIT_MS;
   }
 
   // How many subagents this registry has accepted; a turn that leaves it unchanged delegated nothing.
@@ -498,13 +502,11 @@ export class SubagentRegistry implements PendingEventSource<SubagentEvent> {
   ): Promise<Outcome> {
     // The same reason as the session's --timeout, which runTurn reports as a limit, not as a
     // cancellation.
-    const { maxSteps, timeLimitMs } = this.runtime;
+    const { maxSteps } = this.runtime;
+    const { timeLimitMs } = this;
     const deadline = new AbortController();
     const startedAt = Date.now();
-    const timer =
-      timeLimitMs === undefined
-        ? null
-        : setTimeout(() => deadline.abort(new TimeLimitReached(timeLimitMs)), timeLimitMs);
+    const timer = setTimeout(() => deadline.abort(new TimeLimitReached(timeLimitMs)), timeLimitMs);
     const signal = AbortSignal.any([task.controller.signal, deadline.signal]);
     try {
       const { runtime } = this;
@@ -569,9 +571,7 @@ export class SubagentRegistry implements PendingEventSource<SubagentEvent> {
             maxOutputTokens: contextBudget(provider.capabilities).maxOutput,
             stallMs: runtime.stallMs,
             finalStepNote: FINAL_STEP_NOTE,
-            ...(timeLimitMs === undefined
-              ? {}
-              : { finalStepAt: startedAt + timeLimitMs * FINAL_STEP_TIME_SHARE }),
+            finalStepAt: startedAt + timeLimitMs * FINAL_STEP_TIME_SHARE,
           },
           ...(effort === undefined ? {} : { effort }),
           emit: onEvent,
@@ -585,7 +585,7 @@ export class SubagentRegistry implements PendingEventSource<SubagentEvent> {
         report: finalAnswer(conversation),
       };
     } finally {
-      if (timer !== null) clearTimeout(timer);
+      clearTimeout(timer);
     }
   }
 }
@@ -597,7 +597,7 @@ export const createDelegateTool = (registry: SubagentRegistry): Tool => ({
     'The subagent starts with an empty conversation: it sees only `objective` and `context`, never this conversation, so include every path, constraint and decision it needs. Requirements go in `objective`; `context` reaches the subagent as data.',
     'It only reads: it reads and searches files and inspects git history, but never changes files or runs commands.',
     'Its report reaches you as a runtime note with the report attached as data: at your next step, or by a new turn of your own once you have finished. Files may have changed since it read them.',
-    `Up to ${registry.maxRunning} subagents run at once and up to ${MAX_QUEUED_SUBAGENTS} more wait for a slot. A subagent has at most ${registry.maxSteps} steps${registry.timeLimitMs === undefined ? '' : ` and ${formatDuration(registry.timeLimitMs)}`}, and cannot delegate further.`,
+    `Up to ${registry.maxRunning} subagents run at once and up to ${MAX_QUEUED_SUBAGENTS} more wait for a slot. A subagent has at most ${registry.maxSteps} steps and ${formatDuration(registry.timeLimitMs)}, and cannot delegate further.`,
   ].join(' '),
   inputSchema: {
     type: 'object',

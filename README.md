@@ -105,7 +105,7 @@ it until end of file, so programs that start nullrivet without piping anything s
 | `--json` | Emit agent events as NDJSON on stdout. |
 | `--no-agents` | Do not load `AGENTS.md` files. |
 | `--max-steps <n>` | Maximum number of model requests for the task, and for each subagent (default 200). |
-| `--timeout <time>` | Time limit for the task, and for each subagent from when it starts running: `90s`, `30m`, `2h`, or seconds without a unit, at most `596h`. Exit code 3 when reached. No limit by default. |
+| `--timeout <time>` | Time limit for the task, and for each subagent from when it starts running: `90s`, `30m`, `2h`, or seconds without a unit, at most `596h`. Exit code 3 when reached. By default, no limit for the task and 30 minutes for each subagent. |
 | `--session <file>` | Save the conversation to this file and continue it if the file already holds one. See [Sessions](#sessions). |
 | `--context-window <n>` | Override the model's context window, in tokens. |
 | `--max-output <n>` | Override the model's output token limit. |
@@ -128,7 +128,7 @@ Flags take precedence over environment variables, which take precedence over the
 | `NULLRIVET_EFFORT` | Default reasoning effort. |
 | `NULLRIVET_PERMISSION` | Default execution mode. |
 | `NULLRIVET_MAX_STEPS` | Default step limit, per task and per subagent. |
-| `NULLRIVET_TIMEOUT` | Default time limit per task and per subagent. |
+| `NULLRIVET_TIMEOUT` | Default time limit per task and per subagent (without it, 30 minutes per subagent). |
 | `NULLRIVET_<FAMILY>_BASE_URL` | Endpoint of a provider family, e.g. `NULLRIVET_OPENAI_BASE_URL`. |
 
 Provider-specific settings are listed in [docs/MODELS.md](docs/MODELS.md).
