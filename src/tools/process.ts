@@ -61,9 +61,25 @@ const signalGroup = (pgid: number, signal: NodeJS.Signals): void => {
   }
 };
 
+// A group signal can miss a process being forked at that moment: on macOS the child can join the
+// group after the signal went through its members, and outlive its killed parent. While the agent
+// runs, a group is signalled again once its main process exits; at exit nothing comes after, so
+// the signal is repeated a few times, which catches a child forked during the previous one.
+const EXIT_KILL_ROUNDS = 3;
+const EXIT_KILL_INTERVAL_MS = 10;
+
+const pause = (ms: number): void => {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+};
+
 export const killAllProcessGroups = (): void => {
-  for (const pgid of liveGroups) signalGroup(pgid, 'SIGKILL');
+  const groups = [...liveGroups];
   liveGroups.clear();
+  if (groups.length === 0) return;
+  for (let round = 0; round < EXIT_KILL_ROUNDS; round++) {
+    if (round > 0) pause(EXIT_KILL_INTERVAL_MS);
+    for (const pgid of groups) signalGroup(pgid, 'SIGKILL');
+  }
 };
 
 const capture = (
