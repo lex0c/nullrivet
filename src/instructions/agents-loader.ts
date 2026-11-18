@@ -1,6 +1,6 @@
 import { open, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, relative } from 'node:path';
 import { errorMessage } from '../errors.ts';
 import { stripAnsi } from '../sanitize/ansi.ts';
 import { fenced } from '../sanitize/fence.ts';
@@ -139,7 +139,7 @@ export class InstructionsLoader {
       const start = await this.startDirectory(path);
       if (start === null) continue;
       for (const dir of await this.ancestors(start)) {
-        const candidate = await this.lookup(dir);
+        const candidate = await this.lookup(dir, warnings);
         if (candidate === null || this.loaded.has(candidate)) continue;
         const file = await this.load(candidate, dir, warnings);
         if (file !== null) files.push(file);
@@ -201,7 +201,9 @@ export class InstructionsLoader {
     return dirs.reverse();
   }
 
-  private async lookup(dir: string): Promise<string | null> {
+  // `dir` has its symlinks resolved, so the candidate differs from its real path only when the
+  // AGENTS.md itself is a link. The result is cached, so a refused link is reported once.
+  private async lookup(dir: string, warnings?: string[]): Promise<string | null> {
     const cached = this.lookups.get(dir);
     if (cached !== undefined) return cached;
     const candidate = join(dir, INSTRUCTIONS_FILE_NAME);
@@ -211,8 +213,24 @@ export class InstructionsLoader {
     } catch {
       resolved = null;
     }
+    if (resolved !== null && resolved !== candidate) {
+      const boundary = await this.linkBoundary(dir);
+      if (!isWithin(boundary, resolved)) {
+        warnings?.push(`${candidate} was not loaded: it links to ${resolved}, outside ${boundary}`);
+        resolved = null;
+      }
+    }
     this.lookups.set(dir, resolved);
     return resolved;
+  }
+
+  // The files are loaded without any action of the model and sent to the provider, so an
+  // AGENTS.md of an untrusted repository must not link to a file of the user outside it. A link
+  // may point anywhere inside its repository, as AGENTS.md -> CLAUDE.md does; outside a
+  // repository, only inside its own directory.
+  private async linkBoundary(dir: string): Promise<string> {
+    const [outermost] = await this.ancestors(dir);
+    return outermost !== undefined && (await this.isGitRoot(outermost)) ? outermost : dir;
   }
 
   private async load(
@@ -247,6 +265,11 @@ export class InstructionsLoader {
     return file;
   }
 }
+
+const isWithin = (root: string, path: string): boolean => {
+  const rel = relative(root, path);
+  return rel !== '..' && !rel.startsWith('../') && !isAbsolute(rel);
+};
 
 export const renderInstructionFiles = (files: readonly InstructionFile[]): string =>
   files

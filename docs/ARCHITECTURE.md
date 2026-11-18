@@ -273,6 +273,11 @@ one on its own.
   and collects every `AGENTS.md`. The walk stops at the root of the git repository. Outside a
   repository, it stops below the home directory and the filesystem root, so files in shared
   parents are not picked up. The walk never limits which paths the tools may access.
+- **Links.** An `AGENTS.md` that is a symbolic link is loaded only when its final target is inside
+  the repository, or inside its own directory outside a repository, as with `AGENTS.md` linking
+  to `CLAUDE.md`; otherwise it is skipped with a warning. The files reach the provider without any
+  action of the model, so a cloned repository could otherwise make nullrivet send a file of the
+  user, such as a private key, with the first request.
 - **When they are loaded.** At start, the files that apply to the starting directory are loaded,
   and every request carries them at the start of the first user message. They are added when the
   request is built, not stored in the conversation, so compaction and clearing never drop them.

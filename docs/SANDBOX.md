@@ -87,6 +87,12 @@ nullrivet host process                         sandbox (bubblewrap)
   host and reads the host's project: an `AGENTS.md` written inside the sandbox does not change the
   loaded instructions, including on reload, until the ChangeSet applies it to the project. In
   `security`, where nothing is applied, it never does.
+- **Instruction discovery under a profile.** The loader reads host files for paths that reach it
+  from the model (the target of a write) and from the worker (the paths a call touched). Under a
+  profile, it considers only paths inside the project as the sandbox exposes it, and ignores any
+  other; the saved output directory is never one of them. A forged path therefore cannot make the
+  host read an `AGENTS.md` the sandbox does not show. Without a profile, the loader already
+  refuses an `AGENTS.md` that links outside its repository.
 
 The worker starts with `--no-env-file --config=/dev/null`. Checked: with `--clearenv`, a plain
 `bun` started in a project directory loaded that project's `.env` and put the provider keys in its
@@ -150,7 +156,11 @@ type WorkerToHost =
   notices, so the model sees jobs as today.
 - **Disconnection.** If the worker exits or its pipe closes, pending calls fail with the reason,
   jobs are reported as lost, and the session stops using tools: a session whose boundary failed
-  does not continue on another one.
+  does not continue on another one. The same holds after a protocol violation. The backend then
+  stays in a terminal state that the broker checks before every call: each later call is refused
+  with an error code of its own, not as a crash of the tool, and is never sent to the in-process
+  backend. A tool that fails, times out or rejects its arguments is a result, and changes nothing
+  in the backend's state.
 - **Shutdown.** `worker.shutdown` at exit; the sandbox is torn down whether or not the worker
   answers.
 
@@ -449,8 +459,11 @@ not the boundary.
      each tool: a worker receives only a tool's name, and has no `delegate`.
    - `delegate` checks its directory argument with the host's view of the files; under a profile,
      that check has to use the sandbox's view.
-   - The backend becomes a required option of the agent, so a session with a profile cannot run
-     its tools in process by omission.
+   - The backend becomes a required option of the agent, chosen explicitly by the command line,
+     so a session with a profile cannot run its tools in process by omission.
+   - Routing tests: `delegate` runs only on the host; the file, `git`, `bash` and job tools run in
+     the worker; subagents use the same backend; a routing failure never falls back to the
+     in-process backend.
 3. **`workspace`.** The ChangeSet, with the baseline, the stop before reading and the
    descriptor-based resolution, specified and tested on its own before the overlay is wired in.
 4. **`security`.** Only after the network isolation tests pass: the engagement file, the ruleset,
