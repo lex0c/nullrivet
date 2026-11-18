@@ -74,3 +74,30 @@ const STALE_REASONING_PATTERN = /invalid `?signature`? in `?(redacted_)?thinking
 
 export const isStaleReasoningMessage = (text: string): boolean =>
   STALE_REASONING_PATTERN.test(text);
+
+// A rejected TLS certificate carries an OpenSSL verification code in `code`, such as
+// UNABLE_TO_VERIFY_LEAF_SIGNATURE, CERT_HAS_EXPIRED or ERR_TLS_CERT_ALTNAME_INVALID. It does not
+// change on a retry, and the code says more than the message, which can hold the request URL.
+const CERTIFICATE_ERROR_CODE =
+  /CERT|SELF_SIGNED|UNABLE_TO_(GET|VERIFY)_|HOSTNAME_MISMATCH|INVALID_CA/;
+
+export const certificateErrorCode = (error: unknown): string | undefined => {
+  if (typeof error !== 'object' || error === null) return undefined;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'string' && CERTIFICATE_ERROR_CODE.test(code) ? code : undefined;
+};
+
+// Certificates rejected because their issuer is not trusted, which adding the issuing authority
+// to NODE_EXTRA_CA_CERTS resolves; an expired certificate or a name mismatch it does not.
+const UNTRUSTED_ISSUER_CODES: ReadonlySet<string> = new Set([
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'UNABLE_TO_GET_ISSUER_CERT',
+  'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+  'SELF_SIGNED_CERT_IN_CHAIN',
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+]);
+
+export const certificateRejection = (code: string): string =>
+  UNTRUSTED_ISSUER_CODES.has(code)
+    ? `its TLS certificate was rejected (${code}); if a certificate authority of your own signed it, add that authority with NODE_EXTRA_CA_CERTS`
+    : `its TLS certificate was rejected (${code})`;

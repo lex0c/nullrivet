@@ -1,5 +1,5 @@
 import { errorMessage } from '../errors.ts';
-import { AbortError } from './errors.ts';
+import { AbortError, certificateErrorCode, certificateRejection } from './errors.ts';
 import type { ProviderCapabilities } from './types.ts';
 
 export const DISCOVERY_TIMEOUT_MS = 5_000;
@@ -98,6 +98,14 @@ const fetchJson = async (
     if (signal?.aborted === true) throw new AbortError();
     if (timeout.aborted) {
       return { ok: false, status: undefined, error: `${shown} timed out after ${timeoutMs} ms` };
+    }
+    const certificate = certificateErrorCode(e);
+    if (certificate !== undefined) {
+      return {
+        ok: false,
+        status: undefined,
+        error: `${shown} failed: ${certificateRejection(certificate)}`,
+      };
     }
     return { ok: false, status: undefined, error: `${shown} failed: ${errorMessage(e)}` };
   }

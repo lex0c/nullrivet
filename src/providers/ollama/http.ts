@@ -3,6 +3,8 @@ import type { FetchLike } from '../discovery.ts';
 import {
   AbortError,
   ContextOverflowError,
+  certificateErrorCode,
+  certificateRejection,
   isContextOverflowMessage,
   ProviderRequestError,
 } from '../errors.ts';
@@ -119,6 +121,14 @@ export const createOllamaHttp = (options: OllamaHttpOptions) => {
       });
     } catch (e) {
       if (signal?.aborted === true) throw new AbortError();
+      const certificate = certificateErrorCode(e);
+      if (certificate !== undefined) {
+        // The server answered; its certificate will be rejected again on another attempt.
+        throw new ProviderRequestError(
+          `cannot use Ollama at ${displayOrigin(baseUrl)}: ${certificateRejection(certificate)}`,
+          { retryable: false, cause: e },
+        );
+      }
       // No HTTP status: the generic retry cannot classify it, and a server that is starting or
       // restarting usually answers on the next attempt.
       throw new ProviderRequestError(

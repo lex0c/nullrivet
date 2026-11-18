@@ -1,5 +1,43 @@
 import { describe, expect, test } from 'bun:test';
-import { isContextOverflowMessage, isStaleReasoningMessage } from '../../src/providers/errors.ts';
+import {
+  certificateErrorCode,
+  certificateRejection,
+  isContextOverflowMessage,
+  isStaleReasoningMessage,
+} from '../../src/providers/errors.ts';
+
+describe('certificateErrorCode', () => {
+  test('recognizes the codes of rejected certificates', () => {
+    for (const code of [
+      'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+      'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+      'DEPTH_ZERO_SELF_SIGNED_CERT',
+      'SELF_SIGNED_CERT_IN_CHAIN',
+      'CERT_HAS_EXPIRED',
+      'CERT_NOT_YET_VALID',
+      'ERR_TLS_CERT_ALTNAME_INVALID',
+    ]) {
+      expect(certificateErrorCode(Object.assign(new TypeError('x'), { code }))).toBe(code);
+    }
+  });
+
+  test('ignores other failures', () => {
+    for (const error of [
+      Object.assign(new TypeError('x'), { code: 'ECONNREFUSED' }),
+      Object.assign(new Error('x'), { code: 'ETIMEDOUT' }),
+      new TypeError('fetch failed'),
+      'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+      null,
+    ]) {
+      expect(certificateErrorCode(error)).toBeUndefined();
+    }
+  });
+
+  test('names NODE_EXTRA_CA_CERTS only when the issuer is not trusted', () => {
+    expect(certificateRejection('DEPTH_ZERO_SELF_SIGNED_CERT')).toContain('NODE_EXTRA_CA_CERTS');
+    expect(certificateRejection('CERT_HAS_EXPIRED')).not.toContain('NODE_EXTRA_CA_CERTS');
+  });
+});
 
 describe('isContextOverflowMessage', () => {
   test('recognizes the overflow wording of each provider', () => {

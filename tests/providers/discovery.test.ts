@@ -269,6 +269,21 @@ describe('discoverOllamaModel', () => {
     expect(new Headers(m.calls[0]?.init?.headers).has('authorization')).toBe(false);
   });
 
+  test('a rejected certificate is reported by its code, not by the fetch message', async () => {
+    const fetchImpl: FetchLike = async () => {
+      throw Object.assign(
+        new TypeError('ERR_TLS_CERT_ALTNAME_INVALID fetching "https://user:secret@host"'),
+        { code: 'ERR_TLS_CERT_ALTNAME_INVALID' },
+      );
+    };
+    const result = await discoverOllama('llama3.1:8b', fetchImpl);
+    expect(result).toEqual({
+      ok: false,
+      kind: 'unavailable',
+      error: `POST ${OLLAMA}/api/show failed: its TLS certificate was rejected (ERR_TLS_CERT_ALTNAME_INVALID)`,
+    });
+  });
+
   test('`thinking` marks reasoning support', async () => {
     const m = showFetch(showPayload({ capabilities: ['completion', 'tools', 'thinking'] }));
     const result = await discoverOllama('qwen3:8b', m.fetch);

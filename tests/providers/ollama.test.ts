@@ -469,6 +469,51 @@ describe('Ollama HTTP transport', () => {
     expect((error as Error).message).not.toContain('secret');
   });
 
+  // What Bun's fetch throws for a certificate it rejects.
+  const certificateError = (code: string, message: string) =>
+    Object.assign(new TypeError(message), { code });
+
+  test('a rejected certificate is reported as such and not retried', async () => {
+    let fetchCalls = 0;
+    const p = make('qwen2.5-coder:14b', {
+      baseURL: 'https://user:secret@ollama.internal:11434',
+      fetch: async () => {
+        fetchCalls += 1;
+        throw certificateError(
+          'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+          'unable to verify the first certificate',
+        );
+      },
+    });
+    const error = await caught(
+      generateWithRetry(p, req, undefined, {
+        maxAttempts: 3,
+        baseDelayMs: 1,
+        sleep: () => Promise.resolve(),
+      }),
+    );
+    expect(error).toBeInstanceOf(ProviderRequestError);
+    expect(fetchCalls).toBe(1);
+    expect((error as Error).message).toBe(
+      'cannot use Ollama at https://ollama.internal:11434: its TLS certificate was rejected (UNABLE_TO_VERIFY_LEAF_SIGNATURE); if a certificate authority of your own signed it, add that authority with NODE_EXTRA_CA_CERTS',
+    );
+  });
+
+  test('an expired certificate or a name mismatch gets no NODE_EXTRA_CA_CERTS hint', async () => {
+    for (const code of ['CERT_HAS_EXPIRED', 'ERR_TLS_CERT_ALTNAME_INVALID']) {
+      const p = make('qwen2.5-coder:14b', {
+        baseURL: 'https://user:secret@ollama.internal:11434',
+        fetch: async () => {
+          throw certificateError(code, `${code} fetching "https://user:secret@ollama.internal"`);
+        },
+      });
+      const message = ((await caught(p.generate(req))) as Error).message;
+      expect(message).toContain(`its TLS certificate was rejected (${code})`);
+      expect(message).not.toContain('NODE_EXTRA_CA_CERTS');
+      expect(message).not.toContain('secret');
+    }
+  });
+
   test('a pre-aborted signal throws AbortError without sending a request', async () => {
     const f = recordingFetch();
     const p = make('qwen2.5-coder:14b', { fetch: f.fetch });
