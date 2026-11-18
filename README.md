@@ -134,6 +134,27 @@ Flags take precedence over environment variables, which take precedence over the
 
 Provider-specific settings are listed in [docs/MODELS.md](docs/MODELS.md).
 
+### Proxy
+
+Requests to the model providers go through the HTTP proxy named by the standard variables, which
+the Bun runtime reads when nullrivet starts:
+
+| Variable | Description |
+|---|---|
+| `HTTPS_PROXY` | Proxy for `https://` endpoints, e.g. `http://user:password@proxy.example:8080`. |
+| `HTTP_PROXY` | Proxy for `http://` endpoints, such as a local Ollama server. |
+| `NO_PROXY` | Comma-separated hosts reached directly, e.g. `localhost,127.0.0.1`. |
+
+- Every provider and the model discovery use them, streaming included. Credentials in the proxy
+  URL are sent to the proxy and do not appear in error messages.
+- Local addresses are not excluded on their own: with `HTTP_PROXY` set, requests to a local Ollama
+  server go to the proxy unless `NO_PROXY` lists its host.
+- Commands the agent runs inherit these variables with the rest of the environment, so tools such
+  as `git`, `curl` and `npm` use the same proxy.
+- A proxy that inspects TLS signs certificates with its own CA. Add that CA with
+  `NODE_EXTRA_CA_CERTS=/path/to/ca.pem`; `NODE_TLS_REJECT_UNAUTHORIZED=0` would turn off certificate
+  validation for every connection, the provider APIs included.
+
 ### Exit codes
 
 | Code | Meaning |
