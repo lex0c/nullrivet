@@ -369,6 +369,11 @@ export const discoverAnthropicModel = async (
   };
   if (isTrue(features, 'thinking', 'types', 'adaptive', 'supported')) {
     capabilities.supports_adaptive_thinking = true;
+    // The listing does not say whether a model binds replayed thinking to the history. The newest
+    // models do, and one that binds without the flag fails on every request after a compaction,
+    // so a model outside the catalog is assumed to bind. On one that does not, the cost is the
+    // thinking removed when the history changes.
+    capabilities.reasoning_bound_to_history = true;
   } else if (isTrue(features, 'thinking', 'types', 'enabled', 'supported')) {
     capabilities.supports_reasoning = true;
   }

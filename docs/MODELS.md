@@ -63,6 +63,7 @@ publishes a new id:
 | `supports_reasoning_effort` | Accepts a reasoning effort level. |
 | `supports_reasoning` | Reasons behind an on/off switch, without levels. |
 | `supports_adaptive_thinking`, `supports_effort_xhigh`, `max_thinking_budget` | Provider-specific reasoning details. |
+| `reasoning_bound_to_history` | Replayed reasoning is rejected once anything sent before it has changed. |
 | `cache_explicit_breakpoints` | Prompt caching needs explicit cache markers. |
 | `extended_prompt_cache`, `extended_prompt_cache_24h_only` | Extended prompt-cache retention. |
 
@@ -101,7 +102,7 @@ model listing:
 |---|---|
 | `max_input_tokens` | `context_window` |
 | `max_tokens` | `output_max_tokens` |
-| `capabilities.thinking.types.adaptive` | `supports_adaptive_thinking` |
+| `capabilities.thinking.types.adaptive` | `supports_adaptive_thinking`, and `reasoning_bound_to_history`, which the listing does not report |
 | `capabilities.thinking.types.enabled` (without adaptive) | `supports_reasoning` (manual budget) |
 | `capabilities.effort`, `capabilities.effort.xhigh` | `supports_reasoning_effort`, `supports_effort_xhigh` |
 | — | `supports_sampling: false`, because several thinking models cannot turn thinking off |
@@ -167,6 +168,16 @@ adaptive thinking think by default.
 - **Thinking** blocks are replayed unmodified on tool follow-ups, which the API requires when
   thinking precedes a tool call. They are dropped from the part of the conversation that is
   compacted.
+- **Thinking bound to the history.** On Fable 5.2, and on Opus 5.5, Sonnet 5.5 and Haiku 5.5 for
+  accounts created from 2026-08-31, a thinking block is accepted only while the system prompt,
+  the tools and every message before it are unchanged; a block sent back after a change is
+  rejected with HTTP 400, and so is every later one. For these models, and for adaptive models
+  outside the catalog, nullrivet removes every thinking block from the conversation before the
+  first request after a compaction, a mode switch, reloaded `AGENTS.md` instructions, a change of
+  date, or the resumption of a session. The model continues without the reasoning of the earlier
+  turns; removing all of the blocks is accepted, where removing only some is not. If the API
+  still rejects the thinking sent back, after a change nullrivet does not detect, every block is
+  removed, a warning is shown and the request is sent once more.
 - `ANTHROPIC_AUTH_TOKEN` is never read: only the API key above is sent.
 
 ## OpenAI

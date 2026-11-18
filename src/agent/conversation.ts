@@ -37,6 +37,19 @@ export const interruptedResult = (toolUse: ProviderToolUseBlock): ProviderToolRe
   is_error: true,
 });
 
+const hasReasoning = (message: ProviderMessage): boolean =>
+  typeof message.content !== 'string' && message.content.some((b) => b.type === 'reasoning');
+
+// An assistant message always holds text or a tool call besides its reasoning, so it is never left
+// empty.
+const withoutReasoning = (message: ProviderMessage): ProviderMessage =>
+  hasReasoning(message)
+    ? {
+        role: message.role,
+        content: contentBlocks(message.content).filter((b) => b.type !== 'reasoning'),
+      }
+    : message;
+
 // What earlier compactions preserved, kept as data so a later compaction updates it instead of
 // parsing it back out of the message text.
 export interface SummaryState {
@@ -81,6 +94,10 @@ export class Conversation {
   private anchor: MeasurementAnchor | null = null;
   private summaryState: SummaryState | null = null;
   private lastRequestMode: ExecutionMode | null = null;
+  // What the requests sent before the messages (see dropStaleReasoning) when every reasoning block
+  // in the history was produced; null when that is not known: after a compaction or a restore, or
+  // once blocks produced under different prefixes are mixed.
+  private reasoningPrefix: string | null = null;
   private changed = 0;
 
   messages(): readonly ProviderMessage[] {
@@ -120,6 +137,36 @@ export class Conversation {
     this.anchor = null;
     this.summaryState = null;
     this.lastRequestMode = null;
+    this.reasoningPrefix = null;
+  }
+
+  // Called before each request. `prefix` stands for what the request sends besides the history
+  // (the system prompt, the project context, the tools). When `bound`, the provider rejects
+  // reasoning replayed after a change to anything sent before it, so reasoning not known to come
+  // from this prefix and from the history as it stands is removed. All of it is removed: a block
+  // also depends on the ones before it, so removing only some would invalidate the rest.
+  dropStaleReasoning(prefix: string, bound: boolean): void {
+    if (this.reasoningPrefix === prefix) return;
+    if (!this.history.some(hasReasoning)) {
+      this.reasoningPrefix = prefix;
+      return;
+    }
+    if (!bound) {
+      this.reasoningPrefix = null;
+      return;
+    }
+    this.dropReasoning(prefix);
+  }
+
+  // Removes every reasoning block, for requests with `prefix` from now on. Returns whether there
+  // was any to remove.
+  dropReasoning(prefix: string): boolean {
+    if (!this.history.some(hasReasoning)) return false;
+    this.changed++;
+    this.history = this.history.map(withoutReasoning);
+    this.reasoningPrefix = prefix;
+    this.anchor = null;
+    return true;
   }
 
   // `input` is material the prompt refers to, such as piped stdin; it is added as data.
@@ -212,14 +259,17 @@ export class Conversation {
     this.summaryState = structuredClone(snapshot.summary);
     this.lastRequestMode = snapshot.requestMode;
     this.anchor = null;
+    this.reasoningPrefix = null;
     this.changed++;
   }
 
-  // Replaces the history with its compacted form. The measurement no longer describes it.
+  // Replaces the history with its compacted form. The measurement no longer describes it, and the
+  // reasoning kept in it no longer follows the messages it was produced after.
   replaceAfterCompaction(history: ProviderMessage[], summary: SummaryState): void {
     this.changed++;
     this.history = history;
     this.summaryState = summary;
     this.anchor = null;
+    this.reasoningPrefix = null;
   }
 }

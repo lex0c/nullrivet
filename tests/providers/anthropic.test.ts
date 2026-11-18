@@ -13,6 +13,7 @@ import {
   CONTEXT_OVERFLOW,
   ContextOverflowError,
   ProviderRequestError,
+  StaleReasoningError,
 } from '../../src/providers/errors.ts';
 import type {
   GenerateRequest,
@@ -551,6 +552,22 @@ describe('createAnthropicProvider over the SDK transport', () => {
     );
     const error = await caught(p.generate(req));
     expect(error).toBeInstanceOf(ContextOverflowError);
+    expect(isRetryableError(error)).toBe(false);
+  });
+
+  test('a 400 rejecting replayed thinking is a StaleReasoningError', async () => {
+    const p = providerWithFetch(async () =>
+      jsonResponse(400, {
+        type: 'error',
+        error: {
+          type: 'invalid_request_error',
+          message:
+            'messages.5.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation.',
+        },
+      }),
+    );
+    const error = await caught(p.generate(req));
+    expect(error).toBeInstanceOf(StaleReasoningError);
     expect(isRetryableError(error)).toBe(false);
   });
 

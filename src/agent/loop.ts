@@ -2,7 +2,12 @@ import { type ContextBudget, contextBudget } from '../context/budget.ts';
 import { errorMessage } from '../errors.ts';
 import type { InstructionsLoader } from '../instructions/agents-loader.ts';
 import { renderInstructionFiles } from '../instructions/agents-loader.ts';
-import { CONTEXT_OVERFLOW, ContextOverflowError, INVALID_TOOL_CALL } from '../providers/errors.ts';
+import {
+  CONTEXT_OVERFLOW,
+  ContextOverflowError,
+  INVALID_TOOL_CALL,
+  StaleReasoningError,
+} from '../providers/errors.ts';
 import {
   contentBlocks,
   type GenerateRequest,
@@ -181,6 +186,11 @@ export const promptShape = (
     countReasoning: deps.provider.replaysReasoning === true,
   };
 };
+
+// What a request sends besides the history: the system prompt, the project context that opens the
+// first message, and the tools. A mode switch, reloaded instructions or a new day change it.
+const requestPrefix = (shape: PromptShape): string =>
+  `${shape.system}\0${shape.context}\0${JSON.stringify(shape.tools)}`;
 
 // The context is added when the request is built instead of being stored in the conversation, so
 // compaction and clearing never drop it and it always reflects the current instructions.
@@ -440,6 +450,10 @@ export const runTurn = async (
     }
     conversation.setRequestMode(mode);
     const shape = promptShape(deps);
+    const prefix = requestPrefix(shape);
+    const bound = deps.provider.capabilities.reasoning_bound_to_history === true;
+    // Before the size estimate, which counts the reasoning sent back.
+    conversation.dropStaleReasoning(prefix, bound);
     const budget = contextBudget(deps.provider.capabilities);
     let estimate = conversation.estimateTokens(shape);
     if (shouldCompact(estimate, budget)) {
@@ -462,6 +476,8 @@ export const runTurn = async (
       );
       if (maxTokens < minOutput) return end('budget', CONTEXT_FULL, 'context');
     }
+    // Again after any compaction of this step, which changes the earlier messages.
+    conversation.dropStaleReasoning(prefix, bound);
     const request: GenerateRequest = {
       model: deps.provider.id,
       system: shape.system,
@@ -485,6 +501,18 @@ export const runTurn = async (
           conversation.appendAssistant([{ type: 'text', text: partial.text }]);
         }
         return end('aborted');
+      }
+      // The provider rejected the reasoning sent back, after a change to the history the prefix
+      // does not cover. The request is sent again without any; holding none, it cannot be
+      // rejected this way twice.
+      if (cause instanceof StaleReasoningError && conversation.dropReasoning(prefix)) {
+        emit({
+          type: 'warning',
+          message:
+            'the provider rejected the reasoning sent back from earlier turns; it was removed and the request sent again',
+        });
+        steps -= 1;
+        continue;
       }
       if (cause instanceof ContextOverflowError) {
         const recovery = await recoverFromOverflow(shape);

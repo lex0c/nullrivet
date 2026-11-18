@@ -82,10 +82,13 @@ const message = (value: unknown, where: string): ProviderMessage => {
   if (!Array.isArray(value.content) || value.content.length === 0) {
     return fail(`${where}.content must be a string or a non-empty array of blocks`);
   }
-  return {
-    role: value.role,
-    content: value.content.map((item, i) => block(item, `${where}.content[${i}]`)),
-  };
+  const content = value.content.map((item, i) => block(item, `${where}.content[${i}]`));
+  // Reasoning is removed from the history when it can no longer be sent back, which would leave
+  // such a message empty; the agent never stores one.
+  if (content.every((b) => b.type === 'reasoning')) {
+    return fail(`${where}.content holds only reasoning`);
+  }
+  return { role: value.role, content };
 };
 
 const blocksOf = (m: ProviderMessage): ProviderContentBlock[] =>

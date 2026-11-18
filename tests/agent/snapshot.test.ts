@@ -103,6 +103,17 @@ describe('conversation snapshot', () => {
         [{ role: 'user', content: [{ type: 'tool_use', id: 't', name: 'bash', input: {} }] }],
         'outside an assistant',
       ],
+      [
+        'has a message made only of reasoning',
+        [
+          { role: 'user', content: 'a' },
+          {
+            role: 'assistant',
+            content: [{ type: 'reasoning', provider: 'anthropic', data: { signature: 's' } }],
+          },
+        ],
+        'only reasoning',
+      ],
     ];
     for (const [name, messages, error] of cases) {
       const parsed = parse({ messages, summary: null });

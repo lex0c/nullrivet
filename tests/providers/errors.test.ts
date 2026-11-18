@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { isContextOverflowMessage } from '../../src/providers/errors.ts';
+import { isContextOverflowMessage, isStaleReasoningMessage } from '../../src/providers/errors.ts';
 
 describe('isContextOverflowMessage', () => {
   test('recognizes the overflow wording of each provider', () => {
@@ -31,6 +31,28 @@ describe('isContextOverflowMessage', () => {
       'invalid context management configuration',
     ]) {
       expect(isContextOverflowMessage(message)).toBe(false);
+    }
+  });
+});
+
+describe('isStaleReasoningMessage', () => {
+  test('recognizes a thinking block the API no longer accepts', () => {
+    for (const message of [
+      'messages.5.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation.',
+      'messages.3.content.0: Invalid `signature` in `thinking` block',
+      'messages.1.content.0: Invalid signature in redacted_thinking block',
+    ]) {
+      expect(isStaleReasoningMessage(message)).toBe(true);
+    }
+  });
+
+  test('does not match other errors about thinking', () => {
+    for (const message of [
+      'thinking: budget_tokens must be at least 1024',
+      'thinking.type: Input should be adaptive',
+      'prompt is too long: 215000 tokens > 200000 maximum',
+    ]) {
+      expect(isStaleReasoningMessage(message)).toBe(false);
     }
   });
 });

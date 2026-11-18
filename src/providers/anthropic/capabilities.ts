@@ -19,12 +19,14 @@ const CLAUDE_5: Readonly<ProviderCapabilities> = {
 };
 
 export const ANTHROPIC_CAPS: Record<string, ProviderCapabilities> = {
-  'claude-fable-5-2': { ...CLAUDE_5 },
-  'claude-opus-5-5': { ...CLAUDE_5 },
+  // Fable 5.2, Opus 5.5, Sonnet 5.5 and Haiku 5.5 bind replayed thinking to the history before it:
+  // Fable 5.2 on every account, the others on accounts created from 2026-08-31.
+  'claude-fable-5-2': { ...CLAUDE_5, reasoning_bound_to_history: true },
+  'claude-opus-5-5': { ...CLAUDE_5, reasoning_bound_to_history: true },
   'claude-opus-5': { ...CLAUDE_5 },
-  'claude-sonnet-5-5': { ...CLAUDE_5 },
+  'claude-sonnet-5-5': { ...CLAUDE_5, reasoning_bound_to_history: true },
   'claude-sonnet-5': { ...CLAUDE_5 },
-  'claude-haiku-5-5': { ...CLAUDE_5 },
+  'claude-haiku-5-5': { ...CLAUDE_5, reasoning_bound_to_history: true },
   // Opus 4.7 and 4.8 reject `temperature`/`top_p` and a manual thinking budget: adaptive thinking
   // is their only thinking mode. Both accept the `xhigh` effort level.
   'claude-opus-4-8': {

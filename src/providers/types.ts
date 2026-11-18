@@ -23,6 +23,10 @@ export interface ProviderCapabilities {
   supports_reasoning?: boolean;
   // Anthropic: adaptive thinking is the only accepted mode; a manual budget is rejected.
   supports_adaptive_thinking?: boolean;
+  // Anthropic: replayed thinking is accepted only while everything sent before it (the system
+  // prompt, the tools, the earlier messages) is unchanged; a block sent back after a change is
+  // rejected, and so is every later one.
+  reasoning_bound_to_history?: boolean;
   // Accepts `xhigh`; otherwise the adapter clamps it down to `high`.
   supports_effort_xhigh?: boolean;
   // Google: ceiling for the numeric thinking budget; larger values are rejected.

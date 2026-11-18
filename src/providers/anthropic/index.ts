@@ -6,7 +6,9 @@ import {
   AbortError,
   ContextOverflowError,
   isContextOverflowMessage,
+  isStaleReasoningMessage,
   ProviderRequestError,
+  StaleReasoningError,
 } from '../errors.ts';
 import type {
   GenerateRequest,
@@ -87,6 +89,9 @@ const classifyError = (error: unknown, signal: AbortSignal | undefined): unknown
     isContextOverflowMessage(error.message)
   ) {
     return new ContextOverflowError(error.message, { cause: error });
+  }
+  if (error instanceof APIError && error.status === 400 && isStaleReasoningMessage(error.message)) {
+    return new StaleReasoningError(error.message, { cause: error });
   }
   return error;
 };

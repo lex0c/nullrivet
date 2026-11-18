@@ -7,7 +7,7 @@ import type { AgentEvent } from '../../src/agent/events.ts';
 import { runTurn, type TurnDependencies } from '../../src/agent/loop.ts';
 import { assembleHistory, emptySummary, SUMMARY_OPEN } from '../../src/context/compaction.ts';
 import { InstructionsLoader } from '../../src/instructions/agents-loader.ts';
-import { ContextOverflowError } from '../../src/providers/errors.ts';
+import { ContextOverflowError, StaleReasoningError } from '../../src/providers/errors.ts';
 import type { ProviderMessage, StreamEvent } from '../../src/providers/types.ts';
 import { fenced } from '../../src/sanitize/fence.ts';
 import type { ExecutionMode } from '../../src/tools/policy.ts';
@@ -89,6 +89,18 @@ const types = (events: AgentEvent[]): string[] => events.map((e) => e.type);
 const toolResults = (message: ProviderMessage | undefined) =>
   Array.isArray(message?.content) ? message.content.filter((b) => b.type === 'tool_result') : [];
 
+// A scripted response that starts with a reasoning block.
+const withReasoning = (id: string, turn: StreamEvent[]): StreamEvent[] => [
+  ...turn.slice(0, 1),
+  { kind: 'reasoning', provider: 'anthropic', data: { thinking: id, signature: `sig-${id}` } },
+  ...turn.slice(1),
+];
+
+const reasoningIn = (messages: readonly ProviderMessage[] | undefined): number =>
+  (messages ?? [])
+    .flatMap((m) => (typeof m.content === 'string' ? [] : m.content))
+    .filter((b) => b.type === 'reasoning').length;
+
 describe('runTurn', () => {
   test('a text answer ends the turn', async () => {
     const h = harness([textTurn('hello')]);
@@ -169,6 +181,62 @@ describe('runTurn', () => {
       true,
     ]);
     expect(h.provider.calls[1]?.req.system).toBe('system for readonly');
+  });
+
+  describe('replayed reasoning', () => {
+    test('is sent back while the system prompt and the tools stay the same', async () => {
+      const h = harness([
+        withReasoning('r1', toolTurn([{ id: 't1', name: 'read_file', args: {} }])),
+        withReasoning('r2', textTurn('done')),
+        textTurn('again'),
+      ]);
+      h.deps.provider.capabilities.reasoning_bound_to_history = true;
+      await runTurn('go', h.deps);
+      await runTurn('more', h.deps);
+      expect(reasoningIn(h.provider.calls[1]?.req.messages)).toBe(1);
+      expect(reasoningIn(h.provider.calls[2]?.req.messages)).toBe(2);
+    });
+
+    test('is removed after a mode switch when the provider binds it to the history', async () => {
+      const h = harness([withReasoning('r1', textTurn('done')), textTurn('ok')]);
+      h.deps.provider.capabilities.reasoning_bound_to_history = true;
+      await runTurn('go', h.deps);
+      h.setMode('readonly');
+      await runTurn('more', h.deps);
+      expect(h.provider.calls[1]?.req.system).toBe('system for readonly');
+      expect(reasoningIn(h.provider.calls[1]?.req.messages)).toBe(0);
+    });
+
+    test('a rejection of the reasoning sent back removes it and sends the request again', async () => {
+      const h = harness([
+        withReasoning('r1', textTurn('done')),
+        new StaleReasoningError('messages.1.content.0: Invalid `signature` in `thinking` block'),
+        textTurn('ok'),
+      ]);
+      await runTurn('go', h.deps);
+      const result = await runTurn('more', h.deps);
+      expect(result).toMatchObject({ reason: 'done', steps: 1 });
+      expect(reasoningIn(h.provider.calls[1]?.req.messages)).toBe(1);
+      expect(reasoningIn(h.provider.calls[2]?.req.messages)).toBe(0);
+      expect(
+        h.events.some((e) => e.type === 'warning' && e.message.includes('rejected the reasoning')),
+      ).toBe(true);
+    });
+
+    test('the rejection ends the turn when there is no reasoning to remove', async () => {
+      const h = harness([new StaleReasoningError('Invalid `signature` in `thinking` block')]);
+      const result = await runTurn('go', h.deps);
+      expect(result.reason).toBe('error');
+      expect(h.provider.calls).toHaveLength(1);
+    });
+
+    test('is kept after a mode switch when the provider does not bind it', async () => {
+      const h = harness([withReasoning('r1', textTurn('done')), textTurn('ok')]);
+      await runTurn('go', h.deps);
+      h.setMode('readonly');
+      await runTurn('more', h.deps);
+      expect(reasoningIn(h.provider.calls[1]?.req.messages)).toBe(1);
+    });
   });
 
   test('stops at the step limit', async () => {
@@ -528,6 +596,47 @@ describe('runTurn', () => {
       expect(Array.isArray(head) && head[0]?.type === 'text' ? head[0].text : '').toContain(
         '[compacted_history]',
       );
+    });
+
+    test('reasoning bound to the history is removed from the part a compaction keeps', async () => {
+      const h = harness(
+        responder([() => withReasoning('r1', textTurn('first answer')), () => textTurn('ok')]),
+      );
+      prefill(h, 12);
+      h.deps.provider.capabilities.reasoning_bound_to_history = true;
+      // Below the trigger for the first turn, above it for the second.
+      h.deps.provider.capabilities.context_window = 100_000;
+      await runTurn('first', h.deps);
+      expect(reasoningIn(h.deps.conversation.messages())).toBe(1);
+      h.deps.provider.capabilities.context_window = 16_000;
+      expect((await runTurn('second', h.deps)).reason).toBe('done');
+      expect(h.events.some((e) => e.type === 'context:compact' && e.reason === 'auto')).toBe(true);
+      const last = h.provider.calls.at(-1)?.req.messages;
+      expect(JSON.stringify(last)).toContain('first answer');
+      expect(reasoningIn(last)).toBe(0);
+    });
+
+    test('reasoning removed after a mode switch no longer counts toward compacting', async () => {
+      const large = 'x'.repeat(60_000);
+      const h = harness(
+        responder([
+          () => [
+            { kind: 'start', message_id: 'msg' },
+            { kind: 'reasoning', provider: 'anthropic', data: { thinking: large, signature: 's' } },
+            ...textTurn('done').slice(1),
+          ],
+          () => textTurn('ok'),
+        ]),
+      );
+      h.deps.provider.capabilities.reasoning_bound_to_history = true;
+      h.deps.provider.replaysReasoning = true;
+      await runTurn('go', h.deps);
+      // With the reasoning, the conversation would be above the trigger of this window.
+      h.deps.provider.capabilities.context_window = 16_000;
+      h.setMode('readonly');
+      expect((await runTurn('more', h.deps)).reason).toBe('done');
+      expect(h.events.some((e) => e.type === 'context:compact')).toBe(false);
+      expect(reasoningIn(h.provider.calls.at(-1)?.req.messages)).toBe(0);
     });
 
     test('runtime notices reach the request intact when the step compacts first', async () => {

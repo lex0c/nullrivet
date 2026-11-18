@@ -360,6 +360,7 @@ describe('resolveModel for the direct provider families', () => {
       output_max_tokens: 32_768,
       supports_sampling: false,
       supports_adaptive_thinking: true,
+      reasoning_bound_to_history: true,
       supports_reasoning_effort: true,
       supports_effort_xhigh: true,
     });

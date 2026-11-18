@@ -57,3 +57,20 @@ const CONTEXT_OVERFLOW_PATTERNS: readonly RegExp[] = [
 
 export const isContextOverflowMessage = (text: string): boolean =>
   CONTEXT_OVERFLOW_PATTERNS.some((pattern) => pattern.test(text));
+
+// Thrown by adapters when the provider rejects reasoning sent back from earlier turns, such as
+// Anthropic thinking bound to a history that changed in a way the agent did not detect. The agent
+// recovers by removing the reasoning from the conversation and sending the request again.
+export class StaleReasoningError extends Error {
+  constructor(message: string, options: { cause?: unknown } = {}) {
+    super(message, options.cause === undefined ? undefined : { cause: options.cause });
+    this.name = 'StaleReasoningError';
+  }
+}
+
+// Anthropic's wording for a thinking block it no longer accepts ("Invalid `signature` in
+// `thinking` block").
+const STALE_REASONING_PATTERN = /invalid `?signature`? in `?(redacted_)?thinking`? block/i;
+
+export const isStaleReasoningMessage = (text: string): boolean =>
+  STALE_REASONING_PATTERN.test(text);
