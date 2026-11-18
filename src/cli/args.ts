@@ -21,6 +21,7 @@ export interface CliConfig {
   prompt: string;
   help: boolean;
   version: boolean;
+  listModels: boolean;
 }
 
 export class UsageError extends Error {
@@ -47,6 +48,7 @@ Options:
       --session <file>        Save the conversation to this file, continuing it if it exists
       --context-window <n>    Override the model context window
       --max-output <n>        Override the model output token limit
+      --list-models           List the models of the built-in catalog
   -h, --help                  Show this help
   -v, --version               Show the version
 
@@ -122,6 +124,7 @@ export const parseCli = (
         session: { type: 'string' },
         'context-window': { type: 'string' },
         'max-output': { type: 'string' },
+        'list-models': { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
         version: { type: 'boolean', short: 'v' },
       },
@@ -159,5 +162,6 @@ export const parseCli = (
     prompt: parsed.positionals.join(' ').trim(),
     help: values.help === true,
     version: values.version === true,
+    listModels: values['list-models'] === true,
   };
 };

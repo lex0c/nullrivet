@@ -18,6 +18,13 @@ describe('parseDuration', () => {
   });
 });
 
+describe('--list-models', () => {
+  test('is set only by the flag, which needs no model or prompt', () => {
+    expect(parseCli(['--list-models'], {}, '/tmp').listModels).toBe(true);
+    expect(parseCli(['go'], {}, '/tmp').listModels).toBe(false);
+  });
+});
+
 describe('--timeout', () => {
   test('the flag takes precedence over the environment', () => {
     expect(

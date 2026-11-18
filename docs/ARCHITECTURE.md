@@ -34,6 +34,7 @@ src/
     session-file.ts        session files: loading, validation, atomic saves, attaching
     prompt-history.ts      prompts recalled with the arrow keys
     output.ts              plain and NDJSON event sinks for one-shot runs
+    list-models.ts         the model catalog as a table, for --list-models
   agent/
     agent.ts               createAgent(): the public API of the core
     loop.ts                runTurn(): the request / tool execution loop

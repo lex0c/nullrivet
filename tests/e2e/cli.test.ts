@@ -389,6 +389,32 @@ describe('sessions', () => {
   }, 30_000);
 });
 
+describe('model list', () => {
+  test('--list-models prints the catalog without a model, and without waiting for stdin', async () => {
+    // stdin stays open: a run that read it would never end, so it is killed after a deadline.
+    const child = Bun.spawn(cliCommand(['--list-models']), {
+      env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
+      stdin: 'pipe',
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    const deadline = setTimeout(() => child.kill('SIGKILL'), 10_000);
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]).finally(() => {
+      clearTimeout(deadline);
+      child.stdin.end();
+    });
+    expect(child.signalCode).toBeNull();
+    expect(code).toBe(0);
+    expect(stderr).toBe('');
+    expect(stdout).toStartWith('MODEL ');
+    expect(stdout).toContain('\nollama/qwen2.5-coder:7b ');
+  }, 30_000);
+});
+
 describe('working directory', () => {
   test('a .env or bunfig.toml in the directory is neither loaded nor run', async () => {
     const cwd = tempDir();

@@ -109,6 +109,7 @@ it until end of file, so programs that start nullrivet without piping anything s
 | `--session <file>` | Save the conversation to this file and continue it if the file already holds one. See [Sessions](#sessions). |
 | `--context-window <n>` | Override the model's context window, in tokens. |
 | `--max-output <n>` | Override the model's output token limit. |
+| `--list-models` | List the models of the built-in catalog and exit. See [Models](#models). |
 | `-h, --help` | Show help. |
 | `-v, --version` | Show the version. |
 
@@ -196,7 +197,8 @@ A model id is `<family>/<model>`: `anthropic/claude-sonnet-5-5`, `openai/gpt-5.4
 Capabilities come from a compiled catalog, from the provider (Anthropic, OpenRouter, Ollama) or,
 with a warning, from conservative defaults. Models without tool calling are rejected. OpenRouter
 `:free` models are used like any other; their routes can be withdrawn, are rate-limited more
-strictly, and some record prompts. Details: [docs/MODELS.md](docs/MODELS.md).
+strictly, and some record prompts. `nullrivet --list-models` prints the catalog; a model missing
+from it can still be used. Details: [docs/MODELS.md](docs/MODELS.md).
 
 ## Execution modes
 

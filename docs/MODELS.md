@@ -66,6 +66,16 @@ publishes a new id:
 | `cache_explicit_breakpoints` | Prompt caching needs explicit cache markers. |
 | `extended_prompt_cache`, `extended_prompt_cache_24h_only` | Extended prompt-cache retention. |
 
+`nullrivet --list-models` prints the catalog, one model per row, and exits. It needs no model,
+prompt or network access:
+
+| Column | Content |
+|---|---|
+| `MODEL` | The id to pass to `--model`. |
+| `CONTEXT`, `OUTPUT` | Context window and output limit, in tokens. |
+| `REASONING` | `levels` (reasons, and `--effort` sets the level), `yes` (reasons without levels; see [Reasoning effort](#reasoning-effort) for what `--effort` does) or `no`. |
+| `ENDPOINT` | Set only for a model served by another host than its family's default, such as the Ollama Cloud models. |
+
 Prices are deliberately not stored. They change without the model id changing, especially on
 OpenRouter, where routing, promotions and free tiers shift, so a compiled price table would always
 be stale. nullrivet reports token counts instead (see [Usage and cost](#usage-and-cost)).

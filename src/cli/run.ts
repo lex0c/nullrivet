@@ -5,10 +5,12 @@ import { createAgent } from '../agent/agent.ts';
 import type { AgentEndReason } from '../agent/events.ts';
 import { headTailSummary } from '../context/output-reduction.ts';
 import { InstructionsLoader } from '../instructions/agents-loader.ts';
+import { MODEL_CATALOG } from '../providers/catalog.ts';
 import type { FetchLike } from '../providers/discovery.ts';
 import { type ModelOverrides, resolveModel } from '../providers/resolve.ts';
 import { BUILTIN_TOOLS } from '../tools/index.ts';
 import { parseCli, USAGE, UsageError } from './args.ts';
+import { formatModelList } from './list-models.ts';
 import { createJsonSink, createPlainSink } from './output.ts';
 import { PromptHistory } from './prompt-history.ts';
 import { runRepl } from './repl.ts';
@@ -71,6 +73,10 @@ export const runCli = async (io: CliIO): Promise<number> => {
   }
   if (config.version) {
     io.stdout(`nullrivet ${packageJson.version}\n`);
+    return 0;
+  }
+  if (config.listModels) {
+    io.stdout(formatModelList(MODEL_CATALOG));
     return 0;
   }
 
