@@ -21,6 +21,17 @@ describe('certificateErrorCode', () => {
     }
   });
 
+  test('finds the code in the fetch error an SDK error wraps', () => {
+    const fetchError = Object.assign(new TypeError('unable to verify the first certificate'), {
+      code: 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+    });
+    const sdkError = new Error('Connection error.', { cause: fetchError });
+    expect(certificateErrorCode(sdkError)).toBe('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+    const loop: { cause?: unknown } = {};
+    loop.cause = loop;
+    expect(certificateErrorCode(loop)).toBeUndefined();
+  });
+
   test('ignores other failures', () => {
     for (const error of [
       Object.assign(new TypeError('x'), { code: 'ECONNREFUSED' }),

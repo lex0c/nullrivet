@@ -4,6 +4,8 @@ import { boolFromEnv, type Env } from '../env.ts';
 import {
   AbortError,
   ContextOverflowError,
+  certificateErrorCode,
+  certificateRejection,
   isContextOverflowMessage,
   ProviderRequestError,
 } from '../errors.ts';
@@ -80,6 +82,14 @@ const isContextOverflowRejection = (error: APIError): boolean => {
 const classifyError = (error: unknown, signal: AbortSignal | undefined): unknown => {
   if (signal?.aborted === true) return new AbortError();
   if (error instanceof APIConnectionError) {
+    const certificate = certificateErrorCode(error);
+    if (certificate !== undefined) {
+      // The server answered; its certificate will be rejected again on another attempt.
+      return new ProviderRequestError(
+        `cannot use OpenRouter: ${certificateRejection(certificate)}`,
+        { retryable: false, cause: error },
+      );
+    }
     return new ProviderRequestError(`connection to OpenRouter failed: ${error.message}`, {
       retryable: true,
       cause: error,

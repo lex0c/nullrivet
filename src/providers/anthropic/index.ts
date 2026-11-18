@@ -5,6 +5,8 @@ import { boolFromEnv, type Env } from '../env.ts';
 import {
   AbortError,
   ContextOverflowError,
+  certificateErrorCode,
+  certificateRejection,
   isContextOverflowMessage,
   isStaleReasoningMessage,
   ProviderRequestError,
@@ -78,6 +80,14 @@ const buildClient = (options: CreateAnthropicProviderOptions): Anthropic => {
 const classifyError = (error: unknown, signal: AbortSignal | undefined): unknown => {
   if (signal?.aborted === true) return new AbortError();
   if (error instanceof APIConnectionError) {
+    const certificate = certificateErrorCode(error);
+    if (certificate !== undefined) {
+      // The server answered; its certificate will be rejected again on another attempt.
+      return new ProviderRequestError(
+        `cannot use Anthropic: ${certificateRejection(certificate)}`,
+        { retryable: false, cause: error },
+      );
+    }
     return new ProviderRequestError(`connection to Anthropic failed: ${error.message}`, {
       retryable: true,
       cause: error,

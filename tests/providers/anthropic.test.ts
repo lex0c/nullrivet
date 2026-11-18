@@ -540,6 +540,20 @@ describe('createAnthropicProvider over the SDK transport', () => {
     expect(isRetryableError(error)).toBe(true);
   });
 
+  test('a rejected certificate is reported as such and not retryable', async () => {
+    const p = providerWithFetch(async () => {
+      throw Object.assign(new TypeError('unable to verify the first certificate'), {
+        code: 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+      });
+    });
+    const error = await caught(p.generate(req));
+    expect(error).toBeInstanceOf(ProviderRequestError);
+    expect(isRetryableError(error)).toBe(false);
+    expect((error as Error).message).toBe(
+      'cannot use Anthropic: its TLS certificate was rejected (UNABLE_TO_VERIFY_LEAF_SIGNATURE); if a certificate authority of your own signed it, add that authority with NODE_EXTRA_CA_CERTS',
+    );
+  });
+
   test('a prompt-too-long 400 is a ContextOverflowError', async () => {
     const p = providerWithFetch(async () =>
       jsonResponse(400, {

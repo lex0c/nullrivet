@@ -625,6 +625,23 @@ describe('createGoogleProvider over HTTP', () => {
     expect(isRetryableError(e)).toBe(true);
   });
 
+  test('a rejected certificate is reported as such and not retryable', async () => {
+    const p = make('gemini-3.5-flash', {
+      fetch: async () => {
+        throw Object.assign(new TypeError('unable to verify the first certificate'), {
+          code: 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+        });
+      },
+    });
+    const e = await caught(p.generate(reqGen()));
+    expect(e).toBeInstanceOf(ProviderRequestError);
+    expect(isRetryableError(e)).toBe(false);
+    expect((e as Error).message).toContain('cannot use the Gemini API at ');
+    expect((e as Error).message).toEndWith(
+      ': its TLS certificate was rejected (UNABLE_TO_VERIFY_LEAF_SIGNATURE); if a certificate authority of your own signed it, add that authority with NODE_EXTRA_CA_CERTS',
+    );
+  });
+
   test('a stream that breaks while reading is a retryable ProviderRequestError', async () => {
     const encoder = new TextEncoder();
     const body = new ReadableStream<Uint8Array>({

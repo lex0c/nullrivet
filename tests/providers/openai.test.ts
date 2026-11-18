@@ -372,6 +372,20 @@ describe('createOpenAIProvider over the SDK transport', () => {
     expect(isRetryableError(error)).toBe(true);
   });
 
+  test('a rejected certificate is reported as such and not retryable', async () => {
+    const p = providerWithFetch(async () => {
+      throw Object.assign(new TypeError('unable to verify the first certificate'), {
+        code: 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+      });
+    });
+    const error = await caught(p.generate(req));
+    expect(error).toBeInstanceOf(ProviderRequestError);
+    expect(isRetryableError(error)).toBe(false);
+    expect((error as Error).message).toBe(
+      'cannot use OpenAI: its TLS certificate was rejected (UNABLE_TO_VERIFY_LEAF_SIGNATURE); if a certificate authority of your own signed it, add that authority with NODE_EXTRA_CA_CERTS',
+    );
+  });
+
   test('context_length_exceeded is a ContextOverflowError on both routes', async () => {
     for (const model of ['gpt-4o', 'gpt-5.4-mini']) {
       const p = providerWithFetch(

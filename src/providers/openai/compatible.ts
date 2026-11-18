@@ -2,6 +2,8 @@ import OpenAI, { APIConnectionError, APIError, type ClientOptions } from 'openai
 import {
   AbortError,
   ContextOverflowError,
+  certificateErrorCode,
+  certificateRejection,
   isContextOverflowMessage,
   ProviderRequestError,
 } from '../errors.ts';
@@ -57,6 +59,14 @@ export const classifyCompatibleError = (
 ): unknown => {
   if (signal?.aborted === true) return new AbortError();
   if (error instanceof APIConnectionError) {
+    const certificate = certificateErrorCode(error);
+    if (certificate !== undefined) {
+      // The server answered; its certificate will be rejected again on another attempt.
+      return new ProviderRequestError(
+        `cannot use ${service.name}: ${certificateRejection(certificate)}`,
+        { retryable: false, cause: error },
+      );
+    }
     return new ProviderRequestError(`connection to ${service.name} failed: ${error.message}`, {
       retryable: true,
       cause: error,

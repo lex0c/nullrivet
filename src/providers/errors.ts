@@ -81,10 +81,16 @@ export const isStaleReasoningMessage = (text: string): boolean =>
 const CERTIFICATE_ERROR_CODE =
   /CERT|SELF_SIGNED|UNABLE_TO_(GET|VERIFY)_|HOSTNAME_MISMATCH|INVALID_CA/;
 
+// The SDKs wrap the fetch error in a connection error of their own and keep it as `cause`, so the
+// chain is followed, a few levels deep.
 export const certificateErrorCode = (error: unknown): string | undefined => {
-  if (typeof error !== 'object' || error === null) return undefined;
-  const code = (error as { code?: unknown }).code;
-  return typeof code === 'string' && CERTIFICATE_ERROR_CODE.test(code) ? code : undefined;
+  let current = error;
+  for (let depth = 0; depth < 5 && typeof current === 'object' && current !== null; depth++) {
+    const { code, cause } = current as { code?: unknown; cause?: unknown };
+    if (typeof code === 'string' && CERTIFICATE_ERROR_CODE.test(code)) return code;
+    current = cause;
+  }
+  return undefined;
 };
 
 // Certificates rejected because their issuer is not trusted, which adding the issuing authority
