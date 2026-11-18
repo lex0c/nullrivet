@@ -160,6 +160,9 @@ Applies text replacements to an existing file.
 - **Diff in NDJSON.** The lines of a diff can include content the model never read, such as the
   content `write_file` replaced. In `--json` output, `meta.diff` carries only `added` and
   `removed`.
+- **Diff on screen.** The interactive session shows those lines under the call, so its scrollback,
+  and any recording of the terminal, can hold lines of a file the agent overwrote without reading
+  it, a secret included.
 
 ## bash
 

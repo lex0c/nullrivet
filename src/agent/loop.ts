@@ -188,7 +188,9 @@ export const promptShape = (
 };
 
 // What a request sends besides the history: the system prompt, the project context that opens the
-// first message, and the tools. A mode switch, reloaded instructions or a new day change it.
+// first message, and the tools. A mode switch, reloaded instructions or a new day change it. The
+// model is left out: after a switch, the API drops the blocks the new model cannot read and
+// accepts the others, so removing them would only lose reasoning the new model could use.
 const requestPrefix = (shape: PromptShape): string =>
   `${shape.system}\0${shape.context}\0${JSON.stringify(shape.tools)}`;
 

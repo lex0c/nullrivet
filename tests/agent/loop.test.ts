@@ -230,6 +230,16 @@ describe('runTurn', () => {
       expect(h.provider.calls).toHaveLength(1);
     });
 
+    test('is kept across a model switch, which leaves the system prompt and tools as they were', async () => {
+      const h = harness([withReasoning('r1', textTurn('done'))]);
+      h.deps.provider.capabilities.reasoning_bound_to_history = true;
+      await runTurn('go', h.deps);
+      const next = createMockProvider([textTurn('ok')], { reasoning_bound_to_history: true });
+      h.deps.provider = { ...next, id: 'mock/other' };
+      await runTurn('more', h.deps);
+      expect(reasoningIn(next.calls[0]?.req.messages)).toBe(1);
+    });
+
     test('is kept after a mode switch when the provider does not bind it', async () => {
       const h = harness([withReasoning('r1', textTurn('done')), textTurn('ok')]);
       await runTurn('go', h.deps);
