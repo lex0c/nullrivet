@@ -118,6 +118,29 @@ const waitForClose = (child: ChildProcess, ms: number): Promise<boolean> =>
     });
   });
 
+const GROUP_POLL_MS = 25;
+
+// Whether any process of the group is left. Signal 0 checks without delivering anything; EPERM
+// means a member exists that this process may not signal.
+const groupAlive = (pgid: number): boolean => {
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+};
+
+// Resolves true once the group has no process left, or false when `ms` runs out first.
+const waitForGroupExit = async (pgid: number, ms: number): Promise<boolean> => {
+  const deadline = Date.now() + ms;
+  while (groupAlive(pgid)) {
+    if (Date.now() >= deadline) return false;
+    await Bun.sleep(GROUP_POLL_MS);
+  }
+  return true;
+};
+
 // Starts a process in its own process group with stdin closed, bounded output capture and the
 // optional timeout and abort. Resolves once the process exists and rejects when it cannot start,
 // so a failure to start is never mistaken for the end of a run. Any process left in the group after
@@ -187,8 +210,13 @@ export const startProcess = (options: ProcessRunOptions): Promise<ProcessHandle>
       stopTimers();
       if (pgid !== undefined) {
         signalGroup(pgid, 'SIGTERM');
-        if (!(await waitForClose(child, KILL_GRACE_MS))) {
-          signalGroup(pgid, 'SIGKILL');
+        const deadline = Date.now() + KILL_GRACE_MS;
+        const closed = await waitForClose(child, KILL_GRACE_MS);
+        // Closed pipes do not mean the group is gone: a process that ignores SIGTERM and writes
+        // elsewhere outlives them, and once the group leaves liveGroups nothing would kill it.
+        const emptied = await waitForGroupExit(pgid, deadline - Date.now());
+        if (!closed || !emptied) signalGroup(pgid, 'SIGKILL');
+        if (!closed) {
           child.stdout?.destroy();
           child.stderr?.destroy();
           outputCutOff = true;

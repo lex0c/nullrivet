@@ -175,7 +175,8 @@ Runs a command with `bash -c`.
   instead of waiting forever.
 - **Process group.** The command runs in its own process group. On timeout or abort, the whole
   group receives SIGTERM, then SIGKILL after 2 s. When the command finishes, processes it left in
-  the background are terminated as well, so nothing outlives the call.
+  the background are terminated the same way, including one that ignores SIGTERM and no longer
+  writes to the output, so nothing outlives the call.
 - **Output.** stdout and stderr are captured separately in bounded memory (the first and last
   2 MiB of each). Each stream is then reduced to 16 KiB for the model, keeping the first and last
   80 lines. A reduced stream is also saved whole, beyond the memory bound, to its own files (see

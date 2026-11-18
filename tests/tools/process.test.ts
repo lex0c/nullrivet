@@ -64,6 +64,24 @@ describe('startProcess', () => {
     expect(await waitUntil(() => !isAlive(child) && !isAlive(handle.pid))).toBe(true);
   });
 
+  test('a process left behind that ignores SIGTERM and writes elsewhere is killed', async () => {
+    const cwd = temp.create('process');
+    // The pipes close as soon as bash exits, since the child no longer holds them.
+    const handle = await startProcess(
+      bash('trap "" TERM; sleep 60 >/dev/null 2>&1 & echo $!', cwd),
+    );
+    const result = await handle.done;
+    const pid = Number(result.stdout.trim());
+    try {
+      expect(pid).toBeGreaterThan(0);
+      expect(result.outputCutOff).toBe(false);
+      // A killed process can be listed for a moment, until it is reaped.
+      expect(await waitUntil(() => !isAlive(pid))).toBe(true);
+    } finally {
+      if (isAlive(pid)) process.kill(pid, 'SIGKILL');
+    }
+  }, 10_000);
+
   test('only the first termination counts, and none after the process exited', async () => {
     const cwd = temp.create('process');
     // bash exits at once while a process that ignores SIGTERM keeps the pipes open for a while,
