@@ -1,4 +1,7 @@
-import type { ModelEntry } from '../providers/catalog.ts';
+import { FAMILY_ADAPTERS, type ModelEntry } from '../providers/catalog.ts';
+import { displayUrl } from '../providers/discovery.ts';
+import type { Env } from '../providers/env.ts';
+import { modelBaseUrl } from '../providers/resolve.ts';
 import type { ProviderCapabilities } from '../providers/types.ts';
 
 const HEADER = ['MODEL', 'CONTEXT', 'OUTPUT', 'REASONING', 'ENDPOINT'] as const;
@@ -13,17 +16,24 @@ const reasoning = (capabilities: ProviderCapabilities): string => {
   return 'no';
 };
 
-// The catalog as a table, one model per row in catalog order. The endpoint is shown only for a
-// model served by another host than its family's default.
-export const formatModelList = (entries: readonly ModelEntry[]): string => {
+// Where the model's requests go with this environment. A base URL from the environment can hold
+// credentials or a query string, so only its origin and path are shown.
+const endpoint = (entry: ModelEntry, env: Env): string => {
+  const adapter = FAMILY_ADAPTERS[entry.family];
+  const url = modelBaseUrl(adapter, entry, env);
+  return url === undefined ? `invalid ${adapter.baseUrlEnv}` : displayUrl(url).replace(/\/$/, '');
+};
+
+// The catalog as a table, one model per row in catalog order.
+export const formatModelList = (entries: readonly ModelEntry[], env: Env): string => {
   const rows: string[][] = [
     [...HEADER],
-    ...entries.map(({ id, capabilities, baseUrl }) => [
-      id,
-      String(capabilities.context_window),
-      String(capabilities.output_max_tokens),
-      reasoning(capabilities),
-      baseUrl ?? '',
+    ...entries.map((entry) => [
+      entry.id,
+      String(entry.capabilities.context_window),
+      String(entry.capabilities.output_max_tokens),
+      reasoning(entry.capabilities),
+      endpoint(entry, env),
     ]),
   ];
   const widths = HEADER.map((_, column) =>

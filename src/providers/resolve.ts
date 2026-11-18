@@ -77,6 +77,21 @@ const normalizeBaseUrl = (value: string): string | undefined => {
   return value.replace(/\/+$/, '');
 };
 
+// The endpoint a model's requests go to: the family's base URL variable when it is set, otherwise
+// the host the catalog names for the model or the family default. Undefined when the variable is
+// not an http(s) URL.
+export const modelBaseUrl = (
+  adapter: FamilyAdapter,
+  entry: ModelEntry | undefined,
+  env: Env,
+): string | undefined => {
+  const configured = env[adapter.baseUrlEnv];
+  if (configured === undefined || configured.length === 0) {
+    return entry?.baseUrl ?? adapter.defaultBaseUrl;
+  }
+  return normalizeBaseUrl(configured);
+};
+
 type CapabilityResolution =
   | { ok: true; source: ModelSource; capabilities: ProviderCapabilities; warnings: string[] }
   | { ok: false; error: string };
@@ -154,11 +169,7 @@ export const resolveModel = async (
   if (overrideError !== undefined) return { ok: false, error: overrideError };
 
   const entry = findCatalogEntry(id);
-  const configuredBaseUrl = env[adapter.baseUrlEnv];
-  const baseURL =
-    configuredBaseUrl === undefined || configuredBaseUrl.length === 0
-      ? (entry?.baseUrl ?? adapter.defaultBaseUrl)
-      : normalizeBaseUrl(configuredBaseUrl);
+  const baseURL = modelBaseUrl(adapter, entry, env);
   if (baseURL === undefined) {
     return { ok: false, error: `${adapter.baseUrlEnv} must be an http or https URL` };
   }

@@ -76,7 +76,7 @@ export const runCli = async (io: CliIO): Promise<number> => {
     return 0;
   }
   if (config.listModels) {
-    io.stdout(formatModelList(MODEL_CATALOG));
+    io.stdout(formatModelList(MODEL_CATALOG, io.env));
     return 0;
   }
 

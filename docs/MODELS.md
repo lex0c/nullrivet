@@ -75,7 +75,7 @@ prompt or network access:
 | `MODEL` | The id to pass to `--model`. |
 | `CONTEXT`, `OUTPUT` | Context window and output limit, in tokens. |
 | `REASONING` | `levels` (reasons, and `--effort` sets the level), `yes` (reasons without levels; see [Reasoning effort](#reasoning-effort) for what `--effort` does) or `no`. |
-| `ENDPOINT` | Set only for a model served by another host than its family's default, such as the Ollama Cloud models. |
+| `ENDPOINT` | Where the model's requests go: the family's `NULLRIVET_<FAMILY>_BASE_URL` when set, otherwise the host the catalog names for the model (the Ollama Cloud models) or the family default. Credentials and query parameters in the URL are not shown. |
 
 Prices are deliberately not stored. They change without the model id changing, especially on
 OpenRouter, where routing, promotions and free tiers shift, so a compiled price table would always

@@ -52,7 +52,7 @@ const stringList = (v: unknown): string[] | undefined =>
   Array.isArray(v) ? v.filter((item): item is string => typeof item === 'string') : undefined;
 
 // Messages may reach logs, so they never carry credentials or query parameters from the URL.
-const displayUrl = (url: string): string => {
+export const displayUrl = (url: string): string => {
   try {
     const u = new URL(url);
     return `${u.origin}${u.pathname}`;
