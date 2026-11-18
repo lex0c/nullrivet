@@ -191,7 +191,7 @@ is not sent; to send a prompt that starts with `/`, begin it with a space.
 ## Models
 
 A model id is `<family>/<model>`: `anthropic/claude-sonnet-5-5`, `openai/gpt-5.4`,
-`google/gemini-3.5-flash`, `xai/grok-4.5`, `ollama/qwen3-coder:480b`,
+`google/gemini-3.5-flash`, `xai/grok-4.5`, `ollama/glm-5.3`,
 `openrouter/deepseek/deepseek-v4-flash`. The family is everything before the first `/`.
 
 Capabilities come from a compiled catalog, from the provider (Anthropic, OpenRouter, Ollama) or,

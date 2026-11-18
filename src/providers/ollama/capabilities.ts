@@ -26,12 +26,18 @@ export const OLLAMA_LOCAL_CAPS: Record<string, ProviderCapabilities> = {
 };
 
 // Served by Ollama Cloud, which needs OLLAMA_API_KEY. A remote host has no local memory limit, so
-// the full window is requested. The windows of GLM-5.2 and DeepSeek-V4-Pro are capped at 256K
-// although the host serves up to 1M, because a larger window is far past a coding session.
+// the full window is requested, up to 256K: the host serves several models up to 1M, which is far
+// past a coding session.
 export const OLLAMA_CLOUD_CAPS: Record<string, ProviderCapabilities> = {
-  'glm-5.2': { context_window: K256, output_max_tokens: 32_768, supports_reasoning: true },
-  'qwen3-coder:480b': { context_window: K256, output_max_tokens: 32_768 },
+  'kimi-k3.1-pro': { context_window: K256, output_max_tokens: 32_768, supports_reasoning: true },
   'kimi-k2.7-code:cloud': {
+    context_window: K256,
+    output_max_tokens: 32_768,
+    supports_reasoning: true,
+  },
+  'glm-5.3': { context_window: K256, output_max_tokens: 32_768, supports_reasoning: true },
+  'glm-5.2': { context_window: K256, output_max_tokens: 32_768, supports_reasoning: true },
+  'deepseek-v4.1-flash': {
     context_window: K256,
     output_max_tokens: 32_768,
     supports_reasoning: true,
@@ -41,8 +47,19 @@ export const OLLAMA_CLOUD_CAPS: Record<string, ProviderCapabilities> = {
     output_max_tokens: 32_768,
     supports_reasoning: true,
   },
-  'qwen3-coder-next': { context_window: K256, output_max_tokens: 32_768 },
-  'devstral-2:123b': { context_window: K256, output_max_tokens: 32_768 },
+  'minimax-m3.1-flash': {
+    context_window: K256,
+    output_max_tokens: 32_768,
+    supports_reasoning: true,
+  },
+  'mistral-large-4': { context_window: K256, output_max_tokens: 32_768, supports_reasoning: true },
+  'mimo-v2.6-pro': { context_window: K256, output_max_tokens: 32_768, supports_reasoning: true },
+  'nemotron-3-ultra': { context_window: K256, output_max_tokens: 32_768, supports_reasoning: true },
+  'gpt-oss:120b': {
+    context_window: K128,
+    output_max_tokens: 32_768,
+    supports_reasoning_effort: true,
+  },
   'gpt-oss:20b': {
     context_window: K128,
     output_max_tokens: 32_768,

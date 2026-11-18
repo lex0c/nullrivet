@@ -12,7 +12,7 @@ anthropic/claude-sonnet-5-5
 openai/gpt-5.4
 google/gemini-3.5-flash
 xai/grok-4.5
-ollama/qwen3-coder:480b
+ollama/glm-5.3
 openrouter/deepseek/deepseek-v4-flash
 ```
 
