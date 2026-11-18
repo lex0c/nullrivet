@@ -279,9 +279,14 @@ describe('createOpenAIProvider on the Responses API', () => {
     expect('metadata' in p).toBe(false);
   });
 
-  test('max effort maps to xhigh', async () => {
-    const p = await capture('gpt-5.4-mini', { effort: 'max' });
-    expect(p.reasoning).toEqual({ effort: 'xhigh', summary: 'auto' });
+  test('a level above the model top one is sent as that top level', async () => {
+    const sent = async (model: string, effort: 'xhigh' | 'max') =>
+      ((await capture(model, { effort })).reasoning as { effort: string }).effort;
+    expect(await sent('gpt-6-luna', 'max')).toBe('max');
+    expect(await sent('gpt-5.4-mini', 'max')).toBe('xhigh');
+    expect(await sent('gpt-5.4-mini', 'xhigh')).toBe('xhigh');
+    expect(await sent('gpt-5-nano', 'xhigh')).toBe('high');
+    expect(await sent('gpt-5-nano', 'max')).toBe('high');
   });
 
   test('extended retention is sent only for models on the extended list', async () => {

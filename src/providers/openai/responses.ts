@@ -1,4 +1,4 @@
-import { OPENAI_REASONING_EFFORT } from '../effort.ts';
+import { openaiEffortLevel } from '../effort.ts';
 import type {
   GenerateRequest,
   ProviderCapabilities,
@@ -151,7 +151,14 @@ export const buildResponsesParams = (
   if (req.effort !== undefined && caps.supports_reasoning_effort === true) {
     // OpenAI never streams raw reasoning; `summary: 'auto'` streams a summary, which is the only
     // reasoning text that can be shown.
-    params.reasoning = { effort: OPENAI_REASONING_EFFORT[req.effort], summary: 'auto' };
+    params.reasoning = {
+      effort: openaiEffortLevel(
+        req.effort,
+        caps.supports_effort_xhigh === true,
+        caps.supports_effort_max === true,
+      ),
+      summary: 'auto',
+    };
   }
   if (caps.supports_sampling !== false) {
     if (req.temperature !== undefined) params.temperature = req.temperature;

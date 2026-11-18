@@ -29,6 +29,8 @@ export interface ProviderCapabilities {
   reasoning_bound_to_history?: boolean;
   // Accepts `xhigh`; otherwise the adapter clamps it down to `high`.
   supports_effort_xhigh?: boolean;
+  // OpenAI: accepts `max`; otherwise it is sent as the highest level the model accepts.
+  supports_effort_max?: boolean;
   // Google: ceiling for the numeric thinking budget; larger values are rejected.
   max_thinking_budget?: number;
   // Google: floor for the numeric thinking budget; smaller values other than zero are rejected.

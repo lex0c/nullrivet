@@ -5,6 +5,7 @@ import {
   EFFORT_THINKING_BUDGET,
   effortThinkingBudget,
   OPENAI_REASONING_EFFORT,
+  openaiEffortLevel,
 } from '../../src/providers/effort.ts';
 import type { ProviderEffort } from '../../src/providers/types.ts';
 
@@ -27,8 +28,18 @@ describe('anthropicEffort', () => {
   });
 });
 
+describe('openaiEffortLevel', () => {
+  test('levels up to the model top one are 1:1, and higher ones become the top one', () => {
+    const top = (xhigh: boolean, max: boolean) =>
+      LEVELS.map((level) => openaiEffortLevel(level, xhigh, max));
+    expect(top(true, true)).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+    expect(top(true, false)).toEqual(['low', 'medium', 'high', 'xhigh', 'xhigh']);
+    expect(top(false, false)).toEqual(['low', 'medium', 'high', 'high', 'high']);
+  });
+});
+
 describe('OPENAI_REASONING_EFFORT', () => {
-  test('low/medium/high/xhigh are 1:1; max also maps to xhigh (OpenAI tops at xhigh)', () => {
+  test('low/medium/high/xhigh are 1:1; max also maps to xhigh (OpenRouter tops at xhigh)', () => {
     expect(OPENAI_REASONING_EFFORT.low).toBe('low');
     expect(OPENAI_REASONING_EFFORT.medium).toBe('medium');
     expect(OPENAI_REASONING_EFFORT.high).toBe('high');

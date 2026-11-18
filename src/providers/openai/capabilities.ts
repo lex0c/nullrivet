@@ -11,6 +11,9 @@ import type { ProviderCapabilities } from '../types.ts';
 //
 // `extended_prompt_cache` is set only on the ids OpenAI lists for 24h prompt-cache retention, and
 // `extended_prompt_cache_24h_only` on those that reject the `in_memory` value.
+//
+// `supports_effort_xhigh` and `supports_effort_max` mark the top effort level each model accepts,
+// as the API answered on 2026-11-17; gpt-5-nano stops at `high`.
 
 // The GPT-6 models keep the prompt cache for 30 minutes or 12 hours, without a 24h retention, so
 // no retention is sent and the API default applies.
@@ -18,6 +21,8 @@ const GPT_6: Readonly<ProviderCapabilities> = {
   context_window: 1_050_000,
   output_max_tokens: 32_768,
   supports_reasoning_effort: true,
+  supports_effort_xhigh: true,
+  supports_effort_max: true,
   supports_sampling: false,
 };
 
@@ -30,6 +35,7 @@ export const OPENAI_CAPS: Record<string, ProviderCapabilities> = {
     context_window: 1_050_000,
     output_max_tokens: 32_768,
     supports_reasoning_effort: true,
+    supports_effort_xhigh: true,
     supports_sampling: false,
     extended_prompt_cache: true,
     extended_prompt_cache_24h_only: true,
@@ -38,6 +44,7 @@ export const OPENAI_CAPS: Record<string, ProviderCapabilities> = {
     context_window: 1_050_000,
     output_max_tokens: 32_768,
     supports_reasoning_effort: true,
+    supports_effort_xhigh: true,
     supports_sampling: false,
     extended_prompt_cache: true,
   },
@@ -46,6 +53,7 @@ export const OPENAI_CAPS: Record<string, ProviderCapabilities> = {
     context_window: 400_000,
     output_max_tokens: 32_768,
     supports_reasoning_effort: true,
+    supports_effort_xhigh: true,
     supports_sampling: false,
   },
   // Available through the Responses API only.
@@ -53,6 +61,7 @@ export const OPENAI_CAPS: Record<string, ProviderCapabilities> = {
     context_window: 400_000,
     output_max_tokens: 32_768,
     supports_reasoning_effort: true,
+    supports_effort_xhigh: true,
     supports_sampling: false,
   },
   // Shut down by OpenAI on 2026-12-11.

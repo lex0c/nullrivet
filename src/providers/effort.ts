@@ -16,8 +16,7 @@ export const EFFORT_THINKING_BUDGET: Record<ProviderEffort, number> = {
   max: 24_576,
 };
 
-// Only the newest OpenAI models accept `max`, and an unsupported level is rejected, so `max` maps
-// onto `xhigh`.
+// OpenRouter takes OpenAI's level names and stops at `xhigh`, so `max` maps onto it.
 export const OPENAI_REASONING_EFFORT: Record<ProviderEffort, 'low' | 'medium' | 'high' | 'xhigh'> =
   {
     low: 'low',
@@ -37,6 +36,16 @@ export const cappedEffortLevel = (
   if (effort === 'xhigh' || effort === 'max') return supportsXhigh ? 'xhigh' : 'high';
   return effort;
 };
+
+// OpenAI models stop at different levels (`high` on gpt-5-nano, `xhigh` on the other gpt-5
+// models, `max` on the gpt-6 models) and reject a higher one, so a level above the model's top one
+// is sent as that top level.
+export const openaiEffortLevel = (
+  effort: ProviderEffort,
+  supportsXhigh: boolean,
+  supportsMax: boolean,
+): 'low' | 'medium' | 'high' | 'xhigh' | 'max' =>
+  effort === 'max' && supportsMax ? 'max' : cappedEffortLevel(effort, supportsXhigh);
 
 // Anthropic rejects `xhigh` with a 400 on models that do not expose it, so it is clamped to `high`.
 export const anthropicEffort = (effort: ProviderEffort, supportsXhigh: boolean): ProviderEffort =>

@@ -62,7 +62,7 @@ publishes a new id:
 | `supports_sampling` | Whether `temperature` and `top_p` are accepted (absent means yes). |
 | `supports_reasoning_effort` | Accepts a reasoning effort level. |
 | `supports_reasoning` | Reasons behind an on/off switch, without levels. |
-| `supports_adaptive_thinking`, `supports_effort_xhigh`, `max_thinking_budget` | Provider-specific reasoning details. |
+| `supports_adaptive_thinking`, `supports_effort_xhigh`, `supports_effort_max`, `max_thinking_budget` | Provider-specific reasoning details. |
 | `reasoning_bound_to_history` | Replayed reasoning is rejected once anything sent before it has changed. |
 | `cache_explicit_breakpoints` | Prompt caching needs explicit cache markers. |
 | `extended_prompt_cache`, `extended_prompt_cache_24h_only` | Extended prompt-cache retention. |
@@ -140,10 +140,11 @@ always fit in the window. See [ARCHITECTURE.md](ARCHITECTURE.md#context-manageme
 
 - models with `supports_reasoning_effort` receive the level in the provider's own parameter
   (Anthropic `output_config.effort`, OpenAI and OpenRouter `reasoning.effort`, xAI
-  `reasoning_effort`, Gemini 3 and later `thinkingConfig.thinkingLevel`); `max` is sent to
-  OpenAI as `xhigh`, because only the newest OpenAI models accept `max`; Anthropic models
-  without `xhigh` get `high`, and on xAI and Gemini `xhigh` and `max` become `xhigh` where the
-  model accepts it and `high` elsewhere;
+  `reasoning_effort`, Gemini 3 and later `thinkingConfig.thinkingLevel`); OpenAI models get the
+  highest level they accept when `--effort` names a higher one (`max` on the gpt-6 models, `xhigh`
+  on the other gpt-5 models, `high` on gpt-5-nano), OpenRouter gets `xhigh` for `max`, Anthropic
+  models without `xhigh` get `high`, and on xAI and Gemini `xhigh` and `max` become `xhigh` where
+  the model accepts it and `high` elsewhere;
 - Gemini 2.5 models take a thinking token budget instead, sized from the level and capped by the
   model's `max_thinking_budget`;
 - models with only `supports_reasoning` have reasoning switched on (Anthropic models with a manual
