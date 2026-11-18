@@ -139,9 +139,10 @@ always fit in the window. See [ARCHITECTURE.md](ARCHITECTURE.md#context-manageme
 
 - models with `supports_reasoning_effort` receive the level in the provider's own parameter
   (Anthropic `output_config.effort`, OpenAI and OpenRouter `reasoning.effort`, xAI
-  `reasoning_effort`, Gemini 3 and later `thinkingConfig.thinkingLevel`); OpenAI's top level is
-  `xhigh`, so `max` maps to it, Anthropic models without `xhigh` get `high`, and on xAI and Gemini
-  `xhigh` and `max` become `xhigh` where the model accepts it and `high` elsewhere;
+  `reasoning_effort`, Gemini 3 and later `thinkingConfig.thinkingLevel`); `max` is sent to
+  OpenAI as `xhigh`, because only the newest OpenAI models accept `max`; Anthropic models
+  without `xhigh` get `high`, and on xAI and Gemini `xhigh` and `max` become `xhigh` where the
+  model accepts it and `high` elsewhere;
 - Gemini 2.5 models take a thinking token budget instead, sized from the level and capped by the
   model's `max_thinking_budget`;
 - models with only `supports_reasoning` have reasoning switched on (Anthropic models with a manual
@@ -158,8 +159,8 @@ adaptive thinking think by default.
 | `ANTHROPIC_API_KEY` | API key. Required. |
 | `NULLRIVET_ANTHROPIC_BASE_URL` | Endpoint (default `https://api.anthropic.com`). |
 | `NULLRIVET_ANTHROPIC_CACHE_TTL` | `1h` selects the one-hour prompt cache; anything else keeps the default five minutes. |
-| `NULLRIVET_ANTHROPIC_THINKING` | `0` turns off adaptive thinking on models that allow it (default on). |
-| `NULLRIVET_ANTHROPIC_REASONING_REPLAY` | Send signed thinking back on tool follow-ups (default on, adaptive models only). |
+| `NULLRIVET_ANTHROPIC_THINKING` | `0` stops requesting adaptive thinking (default on). The Claude 5 models think without the request, so it does not turn their thinking off. |
+| `NULLRIVET_ANTHROPIC_REASONING_REPLAY` | Send signed thinking back on tool follow-ups (default on, adaptive models only). With `0`, the Claude 5 models still think on requests with tools; their thinking is only not sent back. |
 
 - **Prompt caching** places cache breakpoints after the system prompt, after the tool definitions
   and on the latest message, so each request reuses the prefix of the previous one.

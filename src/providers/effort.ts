@@ -16,7 +16,8 @@ export const EFFORT_THINKING_BUDGET: Record<ProviderEffort, number> = {
   max: 24_576,
 };
 
-// OpenAI's top level is `xhigh`, so `max` has no counterpart and maps onto it.
+// Only the newest OpenAI models accept `max`, and an unsupported level is rejected, so `max` maps
+// onto `xhigh`.
 export const OPENAI_REASONING_EFFORT: Record<ProviderEffort, 'low' | 'medium' | 'high' | 'xhigh'> =
   {
     low: 'low',
