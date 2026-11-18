@@ -494,7 +494,7 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       if (handlePopoverKey(key)) return;
       if (recall(key)) return;
       if (isShiftTab(key)) {
-        // Also while a task runs: the executor reads the mode before every tool call, so the
+        // Also while a task runs: the tool broker reads the mode before every tool call, so the
         // switch applies from the next one, as with /permission. The notice records the switch
         // in the scrollback, the only record of which mode the tool calls around it ran in.
         agent.mode = agent.mode === 'auto' ? 'readonly' : 'auto';

@@ -28,7 +28,7 @@ export interface Tool {
   // loaded first, so instructions the model has not seen reach it before the change, not after.
   targetPaths?(input: Record<string, unknown>, cwd: string): string[];
   // Input comes from the model and is untrusted; each tool validates its own arguments with the
-  // readers in `args.ts`, whose InvalidArgumentError the executor reports as `input.invalid`.
+  // readers in `args.ts`, whose InvalidArgumentError the tool broker reports as `input.invalid`.
   execute(input: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult>;
 }
 

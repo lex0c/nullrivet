@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { Conversation } from '../../src/agent/conversation.ts';
 import type { AgentEvent } from '../../src/agent/events.ts';
 import { runTurn, type TurnDependencies } from '../../src/agent/loop.ts';
+import { IN_PROCESS_BACKEND } from '../../src/agent/tool-broker.ts';
 import { assembleHistory, emptySummary, SUMMARY_OPEN } from '../../src/context/compaction.ts';
 import { InstructionsLoader } from '../../src/instructions/agents-loader.ts';
 import { ContextOverflowError, StaleReasoningError } from '../../src/providers/errors.ts';
@@ -67,6 +68,7 @@ const harness = (
       provider,
       conversation: new Conversation(),
       tools: new Map(tools.map((t) => [t.name, t])),
+      toolBackend: IN_PROCESS_BACKEND,
       mode: () => mode,
       cwd: options.cwd ?? '/tmp',
       systemPrompt: () => `system for ${mode}`,

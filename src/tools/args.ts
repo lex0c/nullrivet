@@ -1,5 +1,5 @@
 // Tool arguments come from the model and are untrusted. These readers validate one field each and
-// throw InvalidArgumentError, which the executor turns into an `input.invalid` tool error.
+// throw InvalidArgumentError, which the tool broker turns into an `input.invalid` tool error.
 
 export class InvalidArgumentError extends Error {
   constructor(message: string) {

@@ -15,7 +15,7 @@ file.
   translate it to each provider's API.
 - **Events, not callbacks into the UI.** The core publishes `AgentEvent`s. The plain output, the
   NDJSON output and the interactive session are consumers of the same events.
-- **Policy enforced in code.** The execution mode is checked by the executor before every tool
+- **Policy enforced in code.** The execution mode is checked by the tool broker before every tool
   call, not only by choosing which tools the model sees.
 - **Not a sandbox.** The working directory is a starting point, not a boundary. Isolation, when
   needed, comes from the operating system.
@@ -42,7 +42,7 @@ src/
     conversation.ts        in-memory history and its invariants
     snapshot.ts            the conversation as data: snapshot format and its validation
     subagent.ts            the delegate tool and the registry of background subagents
-    tool-executor.ts       policy check, error containment, output sanitizing
+    tool-broker.ts         authorization, dispatch to a backend, error containment, sanitizing
     collect.ts             turns a provider stream into one collected step
     retry.ts               retries before the first streamed event
     abortable.ts           abort and stall handling for streams
@@ -242,7 +242,7 @@ conversation stays valid for the whole run. Limits and states are described in
 ## Tools and the execution policy
 
 A tool declares its effect: `read`, `write` or `exec`. In `readonly` mode only `read` tools are
-offered to the model, and the executor refuses any other call before running it, so a call the
+offered to the model, and the tool broker refuses any other call before running it, so a call the
 model was not offered, or a mode change during a turn, cannot cause a side effect.
 
 The conversation records the mode of its last request. When the next request is made in another
@@ -250,8 +250,14 @@ mode, an `<agent-note>` saying so is added to the last user message, after the p
 results. The system prompt already states the current mode, but answers given under the previous
 one stay in the history, and models tend to follow what they said before.
 
-The executor never lets a tool failure escape: unknown tools, invalid arguments and exceptions all
-become error results the model can read. Terminal escape sequences are removed from tool output.
+Every tool call, a subagent's included, is authorized by the tool broker and only then handed to
+a tool backend, which runs it and decides nothing about what is allowed. The one backend today
+runs the tool in the nullrivet process; the sandbox planned in [SANDBOX.md](SANDBOX.md) adds one
+that runs it in an isolated worker.
+
+The broker never lets a tool or backend failure escape: unknown tools, invalid arguments and
+exceptions all become error results the model can read. Terminal escape sequences are removed from
+tool output.
 
 Tool calls run one after another, in the order the model wrote them.
 

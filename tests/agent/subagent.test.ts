@@ -16,6 +16,7 @@ import {
   SubagentRegistry,
   type SubagentRuntime,
 } from '../../src/agent/subagent.ts';
+import { IN_PROCESS_BACKEND, type ToolBackend } from '../../src/agent/tool-broker.ts';
 import type { InstructionsLoader } from '../../src/instructions/agents-loader.ts';
 import type { GenerateRequest, StreamEvent } from '../../src/providers/types.ts';
 import { FENCE, fenced } from '../../src/sanitize/fence.ts';
@@ -84,6 +85,7 @@ const runtimeFor = (
   effort: () => undefined,
   cwd: '/tmp',
   tools: [fakeTool('read_file', 'read')],
+  toolBackend: IN_PROCESS_BACKEND,
   instructions: null,
   stallMs: 5_000,
   maxSteps: MAX_STEPS,
@@ -167,6 +169,42 @@ describe('delegate', () => {
     expect(last[note + 1]).toContain('Title: scan');
     expect(last[note + 1]).toContain('found the bug in parser.ts');
     expect(agent.hasBackgroundEvents()).toBe(false);
+  });
+
+  test("runs the parent's and the subagent's tool calls through the agent's backend", async () => {
+    const ran: string[] = [];
+    const recording: ToolBackend = {
+      execute: (tool, input, context) => {
+        ran.push(tool.name);
+        return IN_PROCESS_BACKEND.execute(tool, input, context);
+      },
+    };
+    let parentCalls = 0;
+    let childCalls = 0;
+    const provider = routedProvider((req) => {
+      if (isChild(req)) {
+        childCalls += 1;
+        return childCalls === 1
+          ? toolTurn([{ id: 'r1', name: 'read_file', args: {} }])
+          : textTurn('report');
+      }
+      parentCalls += 1;
+      return parentCalls === 1
+        ? toolTurn([{ id: 'b1', name: 'bash', args: {} }, delegateCall('d1')])
+        : textTurn('done');
+    });
+    const agent = await createAgent({
+      provider,
+      tools: [fakeTool('read_file', 'read'), fakeTool('bash', 'exec')],
+      toolBackend: recording,
+      mode: 'auto',
+      cwd: '/tmp',
+      instructions: null,
+      delegation: true,
+    });
+    await agent.run('go');
+    expect(await waitUntil(() => agent.hasBackgroundEvents())).toBe(true);
+    expect(ran).toEqual(['bash', 'delegate', 'read_file']);
   });
 
   test('the tool result names the subagent, and says when it waits for a slot', async () => {

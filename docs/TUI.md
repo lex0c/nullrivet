@@ -94,10 +94,10 @@ does not settle it. Any remaining text is settled when a tool call starts or the
   can hold escape sequences. `/clear` keeps the history. It lives in memory and, when a session
   file is attached, in that file.
 - `Shift+Tab` switches the execution mode between `auto` and `readonly`, also while a task runs:
-  the executor reads the mode before every tool call, so the switch applies from the next one. It
-  does not stop or undo a call already running: a command started in `auto` runs to its end. Each
-  switch prints a line in the scrollback, the only record of which mode the tool calls around it
-  ran in. The status line shows the mode, with the `Shift+Tab` hint when no task runs and the
+  the tool broker reads the mode before every tool call, so the switch applies from the next one.
+  It does not stop or undo a call already running: a command started in `auto` runs to its end.
+  Each switch prints a line in the scrollback, the only record of which mode the tool calls around
+  it ran in. The status line shows the mode, with the `Shift+Tab` hint when no task runs and the
   interrupt hint while one does, so the latter stays visible in narrow terminals. With no task
   running and subagents in the background, the hint says that `Esc` cancels them instead. With the
   command list open, `Shift+Tab` completes the selected command, like `Tab`.

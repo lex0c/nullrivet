@@ -27,6 +27,7 @@ import {
   type TurnResult,
 } from './loop.ts';
 import { buildSystemPrompt, localDate, renderProjectContext } from './system-prompt.ts';
+import type { ToolBackend } from './tool-broker.ts';
 
 export const MAX_RUNNING_SUBAGENTS = 4;
 // Subagents waiting for a slot. Past this, delegate is refused, so the subagents waiting to run,
@@ -60,6 +61,8 @@ export interface SubagentRuntime {
   // The tools a subagent may use. It runs in readonly mode, so only the read ones are offered and
   // executed; it never changes files or runs commands.
   tools: readonly Tool[];
+  // The parent's backend, so a subagent's calls run where the parent's do.
+  toolBackend: ToolBackend;
   // Null when AGENTS.md loading is disabled.
   instructions: InstructionsLoader | null;
   stallMs: number;
@@ -560,6 +563,7 @@ export class SubagentRegistry implements PendingEventSource<SubagentEvent> {
           provider,
           conversation,
           tools: new Map(runtime.tools.map((tool) => [tool.name, tool])),
+          toolBackend: runtime.toolBackend,
           mode: () => 'readonly',
           cwd: spec.cwd,
           systemPrompt: () =>

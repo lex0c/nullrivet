@@ -1,0 +1,478 @@
+# Sandbox and engagement scope
+
+Status: proposal. Phase 1, the ToolBroker, is implemented; nothing else is. The document records
+the design, the facts checked on a Linux host while preparing it, and the decisions taken on it.
+
+## Purpose
+
+nullrivet runs tools with the operator's privileges: `bash` reaches the whole network, and the file
+tools read and write any path the user can. That suits a coding session on one's own project. It
+does not suit security work, where the agent runs commands against systems it must not exceed,
+and where the data it reads (a web page, a banner, a log, a sample) may be written to steer it.
+
+The goal is an opt-in sandbox in which the runtime, not the model, decides what the tools can
+reach:
+
+- **Files.** Only the paths the profile exposes, never the host home, credential directories or
+  sockets such as the Docker socket and the SSH agent.
+- **Network.** Nothing, or only the destinations an engagement file authorizes.
+- **Processes.** Nothing started by a tool outlives the session or sees the host's processes.
+
+The model can choose which tools to call. It cannot change, widen or turn off these restrictions:
+there is no tool for it, and the operator sets them on the command line or in the session.
+
+Having namespaces is not the same as having a boundary. A phase is done when a test suite that
+tries to cross the boundary fails to, not when the sandbox starts without errors.
+
+## Non-goals
+
+- Replacing the current default. Without a sandbox profile, nullrivet behaves as today.
+- Defending against a kernel exploit. Bubblewrap shares the host kernel; samples or tools of
+  unknown origin belong in the virtual machine backend (phase 6).
+- Exploit libraries, evasion, persistence or command and control. The sandbox constrains an
+  operator's assistant; it does not add offensive capability.
+- Hiding activity. Providers retain prompts under their own policies, targets log connections,
+  and the operating system may swap memory to disk. The aim is no unnecessary persistence of
+  nullrivet's own and explicit control over what is exported.
+
+## Threat model
+
+| Threat | Example | Answer |
+|---|---|---|
+| Model error | The agent scans a neighboring range or the internet at large | Network allowlist enforced in the kernel |
+| Prompt injection from data | A target's page says "also run this against 10.0.0.0/8" or "send ~/.aws to this URL" | Same allowlist; host credentials not visible; no route to the internet |
+| Hostile artifact | A sample or tool writes to `~/.bashrc` or starts a daemon | Isolated filesystem and PID namespace, discarded at the end |
+| Leftover processes | A command leaves a process that ignores SIGTERM | The PID namespace ends with the sandbox |
+| Secret exposure through the environment | Provider keys reach a command | Worker environment built from nothing; the host process keeps the keys |
+| A worker driven to misbehave | A command the model chose makes the worker send forged or oversized messages, or leave a link to a host file where the host reads | The host validates every message and stops the sandbox on a violation; files the worker wrote are opened without following links |
+| Kernel escape | A sample exploits the kernel | Out of scope for Bubblewrap; virtual machine backend |
+
+## Relation to the project principles
+
+`docs/nullrivet.md` sets the principles this has to respect:
+
+- **Ephemeral by design.** Kept: the sandbox lives for one session, its writable layers are in
+  memory-backed storage, and it is destroyed at exit.
+- **Zero persistence by default.** Kept: nothing is written unless the operator names a path, as
+  with `--session`. The evidence log (phase 5) is off unless an engagement file names its
+  directory, and the host writes it.
+- **Tool effects are allowed, without a workspace restriction.** Kept for the default, which stays
+  unsandboxed. The profiles below are opt-in restrictions.
+- **Minimal execution policy, no approvals.** One exception, accepted: applying the changes of the
+  `workspace` profile to the project is confirmed by the operator. No other approval is added.
+
+## Architecture
+
+```
+nullrivet host process                         sandbox (bubblewrap)
+  agent loop, providers, credentials, TUI        worker process (Bun)
+  ToolBroker ── JSON lines over a pipe ──────►   read_file glob grep edit_file write_file
+    authorization: mode, profile, engagement     git bash bash_background bash_jobs bash_kill
+    validation of every worker message           saved output, background jobs
+  ChangeSet, evidence log                        project view, tmpfs, scoped network
+```
+
+- **ToolBroker.** One place where every tool call is authorized and dispatched
+  (`src/agent/tool-broker.ts`). It checks the mode and the `AGENTS.md` files a write needs, then
+  hands the call to a backend; subagents' calls go through it too. The in-process backend runs the
+  tool in the nullrivet process, as before. Later phases add the profile and the engagement window
+  to the checks, and the worker as a backend.
+- **Worker.** A Bun process started inside the sandbox once per session. It hosts the same tool
+  implementations and loads only those the profile allows. The file tools must run there too: a
+  sandbox around `bash` alone would leave `read_file` and `grep` reading the host.
+- **What stays on the host.** The agent loop, the providers and their keys, the TUI, the session
+  file, the policy, the ChangeSet and the evidence log. The worker never holds a provider key and
+  never decides what is allowed: authorization happens on the host, and the worker only carries
+  out calls within the limits the sandbox imposes on it. The instructions loader also stays on the
+  host and reads the host's project: an `AGENTS.md` written inside the sandbox does not change the
+  loaded instructions, including on reload, until the ChangeSet applies it to the project. In
+  `security`, where nothing is applied, it never does.
+
+The worker starts with `--no-env-file --config=/dev/null`. Checked: with `--clearenv`, a plain
+`bun` started in a project directory loaded that project's `.env` and put the provider keys in its
+own environment, from where every command inherits them.
+
+## Execution mode and sandbox profile
+
+The execution mode (`auto`, `readonly`) and the sandbox profile are independent settings, and the
+effective policy is the intersection of both: a profile never grants what the mode withholds, and
+the mode never lifts a restriction of the profile.
+
+| Profile | Files | Network | Use |
+|---|---|---|---|
+| none (default) | Host, as today | Host, as today | Coding on one's own project |
+| `inspect` | Project read-only; system directories read-only; tmpfs home and `/tmp` | None | Code review, analysis of untrusted repositories |
+| `workspace` | Project through an overlay; changes held aside until applied | None | Coding without touching the project until confirmed |
+| `security` | Working directory in an overlay; system read-only; tmpfs home | Only the engagement scope | Authorized testing, laboratories |
+
+| Mode | Profile | Result |
+|---|---|---|
+| `readonly` | `inspect` | Reading only, no network |
+| `auto` | `inspect` | Reading and commands, on a read-only project, no network |
+| `auto` | `workspace` | Writes held in the overlay, reviewable before they reach the project |
+| `readonly` | `security` | Local investigation of the working directory, without commands |
+| `auto` | `security` | Every tool, with the network limited to the scope |
+
+A profile is chosen with `--sandbox <profile>` and shown in the status line. A sandbox that cannot
+be set up stops the session with the reason: no profile falls back to running unsandboxed.
+
+## Worker protocol
+
+One JSON object per line in each direction, over the worker's stdin and stdout. stderr is read
+for diagnostics only.
+
+```ts
+type HostToWorker =
+  | { type: 'tool.execute'; id: string; name: string; input: Record<string, unknown>; cwd: string }
+  | { type: 'tool.cancel'; id: string }
+  | { type: 'worker.shutdown' };
+
+type WorkerToHost =
+  | { type: 'worker.ready'; protocol: 1; tools: string[] }
+  | { type: 'tool.result'; id: string; result: ToolResult }
+  | { type: 'job.event'; event: JobEvent }
+  | { type: 'worker.error'; message: string };
+```
+
+- **Correlation.** The host generates the ids, unique per session. Each `tool.execute` gets exactly
+  one `tool.result`.
+- **Untrusted input.** The worker executes commands the model chose, so everything it sends is
+  data to validate, not a statement to trust. The host checks each message against its type, the
+  sizes a `ToolResult` may have today and the job identifiers it knows. A line over 8 MiB, a
+  malformed message, a result for an unknown or already answered id, or a tool name the host did
+  not send stops the sandbox.
+- **Readiness.** The host sends nothing before `worker.ready`, whose tool list must match what the
+  profile allows.
+- **Cancellation.** `tool.cancel` aborts the call's signal in the worker, which still answers with
+  the interrupted result. A call that does not answer within the kill grace of the process code
+  (2 s) counts as failed.
+- **Background jobs.** Job events are forwarded as `job.event` and feed the existing job
+  notices, so the model sees jobs as today.
+- **Disconnection.** If the worker exits or its pipe closes, pending calls fail with the reason,
+  jobs are reported as lost, and the session stops using tools: a session whose boundary failed
+  does not continue on another one.
+- **Shutdown.** `worker.shutdown` at exit; the sandbox is torn down whether or not the worker
+  answers.
+
+## Files
+
+- Bound read-only: `/usr` and the links that lead to it (`/bin`, `/lib`, `/lib64`), the parts of
+  `/etc` tools need (`/etc/ssl`, `/etc/passwd`, a generated `/etc/hosts` and `/etc/resolv.conf`),
+  and the Bun binary.
+- The project at its host path, so paths in tool results and in the conversation are the same
+  inside and outside: read-only in `inspect`, an overlay in `workspace` and `security`.
+- The session's saved output directory, created by the host in memory-backed storage and bound
+  writable, so the host reads saved output without asking the worker. The worker writes its files
+  directly in it, without a subdirectory of its own.
+- New `/proc`, minimal `/dev`, tmpfs `/tmp` and home. `/sys` is not bound from the host. Checked:
+  with the host root bound, `/sys/class/net` listed the host's interfaces from inside a sandbox
+  with its own network namespace.
+- Never bound: the host home, `~/.ssh`, `~/.aws` and other credential directories, the Docker
+  socket, `SSH_AUTH_SOCK`, and the saved output of other sessions.
+
+### Memory-backed storage
+
+Writable layers live in `$XDG_RUNTIME_DIR`, a per-user tmpfs on systems with systemd, so an
+abnormal exit leaves nothing on disk, and what remains is removed when the user's last session
+ends or at reboot. The variable's value is not taken on trust: the host checks with `statfs` that
+the directory is a tmpfs, and that it belongs to the user with mode 0700. Checked: `statfs` in Bun
+reported tmpfs (`0x1021994`) for the runtime directory and another type for `/home`. Without a
+directory that passes, the profiles that need one stop, unless the operator passes
+`--sandbox-storage <dir>` to accept a directory on disk.
+
+### Files the worker writes
+
+The worker can create any entry in the saved output directory, including a symbolic link to a host
+file it cannot see. A host that followed it would read that file with its own access, on the
+worker's behalf, and could copy it into the evidence log. So the host:
+
+- never opens a path as a worker message gives it: a path is accepted only when it names an entry
+  directly inside the directory the host created, in the fixed pattern of the output code
+  (`<sequence>-<label>.<part>.txt`);
+- opens it with `O_NOFOLLOW` and `O_NONBLOCK`, and reads it only if `fstat` on the descriptor shows
+  a regular file no larger than a part may be;
+- reads the content as data, like any tool output.
+
+Only the last component needs this, because the components above it are host paths the sandbox
+does not see. Checked in Bun: `O_NOFOLLOW` refused a symbolic link with `ELOOP`, and `O_NONBLOCK`
+opened a FIFO without blocking, with `fstat` reporting that it is not a regular file. The ChangeSet
+reads a whole tree the worker wrote, and resolves every component instead.
+
+## The workspace ChangeSet
+
+Applying the overlay to the project is a security operation, handled by a host component of its
+own, the ChangeSet. The worker never names the host paths to write: the ChangeSet reads the
+overlay's upper layer itself and decides. The worker wrote that layer, so it is untrusted input,
+and it is read only when no process can change it.
+
+- **Baseline.** Before the worker starts, the host records in memory the metadata of every entry
+  under the project: device, inode, type, size, and modification and change times. The files the
+  session will change are not known yet, so the record covers the whole project; hashing every
+  file would serve the same purpose, at a cost proportional to the project's size.
+- **Stopping the sandbox.** Applying starts by ending the sandbox, with its commands and background
+  jobs, which the confirmation lists. The broker holds tool calls until the application ends, and
+  the next call starts a new sandbox over the updated project. With no process left that can write
+  the upper layer, it cannot change between validation and writing. overlayfs requires the stop as
+  well: changing a lower layer while the overlay is mounted has undefined behavior.
+- **Snapshot.** The ChangeSet walks the upper layer once, without following its symbolic links,
+  and records each entry: type, mode and, for a regular file, its SHA-256. Regular files are
+  additions or modifications; whiteouts are deletions; an opaque directory replaces the one below.
+  A rename appears as a deletion and an addition, and is applied as such. The diff is built from
+  the snapshot, and each file is checked against its hash again when written, so what is written
+  is what was shown.
+- **Validation, before anything is written.** Every target path is resolved from a descriptor of
+  the project directory, beneath it and without following a symbolic link in any component
+  (`openat2` with `RESOLVE_BENEATH` and `RESOLVE_NO_SYMLINKS`), so a path cannot lead elsewhere
+  between the check and the write. A target that is a symbolic link in the project and a
+  directory in the snapshot is replaced, not followed. Symbolic links in the snapshot whose target
+  leaves the project, hard links, devices, FIFOs and sockets are refused. Modes are kept,
+  set-user-ID and set-group-ID bits dropped. Checked: through `bun:ffi`, `openat2` refused a
+  component that is a symbolic link with `ELOOP` and a path that leaves the directory with
+  `EXDEV`. The file API Bun provides opens by path only, so these calls go through `bun:ffi`.
+- **Conflicts.** A target whose metadata differs from the baseline, or that appeared or
+  disappeared since, changed on the host during the session: a conflict, shown and not applied.
+  Equal metadata does not prove equal content: timestamps have a granularity, and a file changed
+  twice within one tick, keeping its size, keeps its metadata. As Git does for racily clean
+  entries, files whose change time is not earlier than the moment the baseline is taken are also
+  hashed then, and compared by content. The check prevents accidental overwrites; it does not
+  detect every concurrent change.
+- **Application.** The validated set is shown as a diff with the existing diff rendering. On
+  confirmation, files are written one by one with the atomic write `write_file` uses, through the
+  same descriptor-based resolution. Stopping the sandbox ends the worker's processes, not the
+  host's: an editor or a build can still change a file during the application, so the conflict
+  check runs again just before each file is replaced. The application is atomic per file, not
+  across the project; a failure or a new conflict stops it and reports what was applied and what
+  was not. Applied entries leave the upper layer. The others stay with their original
+  baseline, so a conflict is still a conflict in the next sandbox, and can be retried or
+  discarded.
+- **Discarding** removes the upper layer.
+
+While the sandbox runs, the overlay does not promise a consistent view of files the operator edits
+on the host. Such edits are found as conflicts when the ChangeSet is applied.
+
+`security` uses the same overlay with its upper layer kept in memory (`--tmp-overlay`): its writes
+are not meant to be applied anywhere, and they are discarded at exit. What outlasts the session is
+the evidence log, when the engagement file enables it.
+
+## Network scope
+
+### Setup order
+
+The namespaces are configured by helper processes the host starts for that purpose; the host
+process never joins them, so the agent loop and the providers keep the host's network.
+
+1. Bubblewrap creates the sandbox's user and network namespaces, reports the sandbox's PID
+   (`--info-fd`) and waits (`--block-fd`) before starting the worker.
+2. A helper enters those namespaces from outside the sandbox and installs the ruleset; only then
+   does pasta connect the network namespace to the outside. The user that created a user namespace
+   holds every capability in it from the parent namespace, so the helper needs no privilege on the
+   host, and no process inside the sandbox keeps `CAP_NET_ADMIN`. Later ruleset changes use the
+   same path.
+3. The worker starts with every capability dropped from its bounding set, `no_new_privs`, and
+   `--disable-userns`, so it can neither change the ruleset nor create a user namespace in which
+   it would hold capabilities again.
+
+Checked: rules install without root in a user-owned namespace; with the capabilities dropped,
+`nft flush ruleset` fails with "Operation not permitted"; Bubblewrap sets `no_new_privs` by default
+(`NoNewPrivs: 1`); a sandbox may create a nested user namespace by default, and cannot with
+`--disable-userns`. A Docker container without `NET_ADMIN` behaved the same, with
+`ip route del default` refused.
+
+The ruleset is installed by a program already on the host, with no network needed. Checked: a
+sidecar container sharing the locked namespace could not download nftables to apply new rules.
+
+### Ruleset
+
+- One `inet` table, so IPv4 and IPv6 share the same policy, drop, for output and input. An address
+  family without authorized destinations has no way out.
+- Every outgoing packet, not only the first of a connection, is matched against the authorized
+  destinations with their ports and protocols. An incoming packet is accepted only when it belongs
+  to a tracked connection and comes from an authorized destination. Loopback is accepted. No rule
+  accepts a packet only because its connection is established.
+- Out-of-scope packets are rejected (TCP reset, ICMP administratively prohibited) rather than
+  dropped, so a tool reports the refusal at once instead of waiting for its own timeout.
+- The rate limit counts new connections per destination: `ct state new` matched against a meter
+  keyed by destination address. A plain `limit rate` counts packets, which is not what the
+  engagement file promises.
+
+### Revoking a destination
+
+The scope can shrink during a session: `/scope refresh` drops an address a name no longer resolves
+to, and the window ends. A connection opened earlier must not outlive its authorization, as it
+would under a rule that accepts established connections.
+
+- The helper replaces the ruleset in one `nft -f` transaction, which applies in full or not at all.
+- Since every packet is matched, a connection to a revoked destination is refused at its next
+  packet, and the process gets a reset or an error, as for any destination out of scope. No
+  process is killed for it, and the boundary does not depend on removing conntrack entries.
+- Before the window starts and after it ends, the ruleset authorizes nothing. At its end, the
+  ruleset is replaced first; then the broker cancels the running command and stops the jobs. A
+  process a command left behind loses the network with the rest. The sandbox stays, so the files
+  written in it can still be read.
+
+### Profiles without network
+
+In `inspect` and `workspace`, the sandbox has its own network namespace with only the loopback
+interface. Checked: a connection from inside fails at once with "Network is unreachable".
+
+### User-mode networking
+
+In `security`, passt's `pasta` connects the namespace to the host network once the rules are in
+place. Without it the profile does not start. Before phase 4, tests establish:
+
+- that the host's loopback services are not reachable through pasta's address mapping, with the
+  mapping disabled (`--no-map-gw`) and checked;
+- that TCP, UDP and ICMP to an authorized destination pass, and to any other do not, in both
+  address families;
+- that a helper outside the sandbox can replace the ruleset of a running sandbox;
+- that a TCP connection kept open stops at its next packet when `/scope refresh` removes its
+  destination and when the window ends, and that a connection opened just before a change behaves
+  as the new ruleset says.
+
+### Names and DNS
+
+The ruleset matches addresses, so the scope's host names are resolved by the host process when
+the session starts, and the sandbox gets an `/etc/hosts` with them and no resolver. Without a
+resolver, DNS cannot carry data out. Checked: Docker's embedded resolver answered any name from a
+container whose output was otherwise blocked, which would leave that channel open.
+
+An authorized address is not an authorized host name. A name that resolves to a shared address (a
+CDN) authorizes every site served from that address, and the session shows at start the addresses
+each name authorized. When the engagement requires the distinction, the address allowlist does not
+provide it, and phase 4b does: an allowlisting HTTP proxy on the host, matched on the requested
+host name. A name handled by the proxy gets no rule of its own, since a tool could otherwise reach
+the address without the proxy.
+
+`/scope refresh` resolves the names again and replaces the ruleset, for targets whose addresses
+change.
+
+### Raw sockets
+
+In its own network namespace, the sandbox can hold `CAP_NET_RAW` without affecting the host, but
+user-mode networking translates TCP and UDP connections instead of forwarding packets, so SYN
+scans and packet capture would not behave as on a real interface. Tools that need raw packets on
+the wire belong in the virtual machine backend's laboratory profile, not in `security`.
+
+## Engagement file
+
+`--engagement <file>` gives the scope. JSON, like the session file, so no new parser is needed:
+
+```json
+{
+  "name": "ACME external test",
+  "scope": {
+    "allow": [
+      { "cidr": "203.0.113.0/28", "ports": [80, 443] },
+      { "host": "app.acme.example", "ports": [443] }
+    ],
+    "deny": [{ "cidr": "203.0.113.5/32" }]
+  },
+  "window": { "from": "2026-11-20T09:00:00-03:00", "until": "2026-11-20T18:00:00-03:00" },
+  "rate": { "newConnectionsPerSecond": 20 },
+  "evidence": { "dir": "./evidence" }
+}
+```
+
+- `deny` wins over `allow`. A file without `allow` entries leaves the sandbox without network.
+- `rate` applies per destination address.
+- Outside `window`, the ruleset authorizes nothing and the broker refuses commands before they
+  start. When the window ends, the running command and jobs are stopped, as described under
+  Revoking a destination.
+- The scope reaches the model as a system prompt section stating the facts, so it can plan within
+  them; nothing depends on the model reading it.
+- The file is validated like a session file: unknown fields, malformed addresses and a window
+  that ends before it starts are errors that stop the session.
+
+## Evidence log
+
+With `evidence.dir` set, the host records each tool call in a JSON lines file there, from what
+passes through the broker: time, tool, arguments, working directory, exit code, the SHA-256 of each
+output stream, and copies of the saved output, read from the session's saved output directory as
+described under Files the worker writes. The worker has no access to the evidence directory.
+Nothing is written when it is not set.
+
+Before an entry is written, credentials in the arguments are replaced by a marker that names what
+was removed: the values of the secrets the host holds, such as provider keys, by exact match, and
+by pattern `Authorization` headers, passwords in URLs and the values of password and token options.
+The pattern part is best effort, so the evidence directory is still to be handled as sensitive.
+Output copies are kept as produced, since they are the findings.
+
+Each entry holds the hash of the previous one, which detects an entry removed or edited by
+accident. It does not prove integrity against someone who rewrites the whole file and recomputes
+the chain; that needs an anchor kept elsewhere, such as the final hash shown to the operator at
+the end of the session, or a signature.
+
+## Resources
+
+CPU, memory and process limits use cgroups when the user's systemd manager can create a scope
+(`systemd-run --user --scope`), and `prlimit` otherwise. Unlike the file and network isolation,
+which stop the session when unavailable, a missing limit is a warning: limits protect stability,
+not the boundary.
+
+## Lifecycle
+
+- The sandbox starts at the first tool call of a session with a profile, and lives until exit or
+  until a ChangeSet is applied, after which the next tool call starts a new one. Background jobs
+  and saved output need a shared, lasting environment; one sandbox per call would lose both.
+- Bubblewrap keeps a minimal reaper of its own as PID 1 of the sandbox's PID namespace, so the
+  worker is not PID 1. When the sandbox's main process ends, the namespace ends with every
+  process in it. Checked: a process left behind that ignores SIGTERM and writes to `/dev/null` did
+  not survive the end of the sandbox. `--die-with-parent` ties the sandbox to the nullrivet process.
+- Timeouts and aborts reach the worker as `tool.cancel`, and the worker signals the command's
+  process group inside the namespace, as `src/tools/process.ts` does today.
+- `/clear` keeps the sandbox, as it keeps background jobs; exit destroys it.
+
+## Platforms
+
+- **Linux:** Bubblewrap with overlay support (`--overlay-src`, `--tmp-overlay`; checked on 0.13),
+  unprivileged user namespaces enabled, nftables, and passt for `security`. Some distributions
+  restrict unprivileged user namespaces through AppArmor; the check at start says which
+  requirement is missing.
+- **macOS:** no Bubblewrap. The profiles stop with that reason until the virtual machine backend
+  (Lima, or Apple's container on macOS 26 and later). `sandbox-exec` is deprecated and not used.
+- **Docker** is not a backend in this plan: it needs a daemon and an image, and the same namespace
+  and nftables design applies without it. The container tests above served to check that design.
+
+## Phases
+
+0. **Checks.** Bun inside the sandbox, the end of the PID namespace, rootless nftables, nested user
+   namespaces, `no_new_privs`, `openat2` through `bun:ffi`, and `statfs` and `O_NOFOLLOW` in Bun
+   (done). pasta with the firewall, and ruleset changes from outside a running sandbox: the tests
+   listed under User-mode networking.
+1. **ToolBroker** (done). Every tool call goes through the broker and the in-process backend. No
+   change in behavior; existing tests pass with only the backend added to their setup.
+2. **Worker and `inspect`.** The worker protocol, first tested without a sandbox, then inside
+   Bubblewrap with no network. The rules for files the worker writes apply from this phase, since
+   the saved output directory is shared from the start. Three points the in-process backend does
+   not raise:
+   - The broker, not the backend, decides which tools run on the host, from a declaration on
+     each tool: a worker receives only a tool's name, and has no `delegate`.
+   - `delegate` checks its directory argument with the host's view of the files; under a profile,
+     that check has to use the sandbox's view.
+   - The backend becomes a required option of the agent, so a session with a profile cannot run
+     its tools in process by omission.
+3. **`workspace`.** The ChangeSet, with the baseline, the stop before reading and the
+   descriptor-based resolution, specified and tested on its own before the overlay is wired in.
+4. **`security`.** Only after the network isolation tests pass: the engagement file, the ruleset,
+   revocation, pasta, the hosts file, `/scope refresh` and the window. 4b: the allowlisting HTTP
+   proxy.
+5. **Evidence log**, written by the host, with credentials removed from the arguments.
+6. **Virtual machine backend** for macOS and for raw-socket laboratories.
+
+Each phase ends with tests that try to cross the boundary: read `~/.ssh` and the host's processes
+through `/proc`, through every file tool and through `bash`; write outside the project; apply a
+ChangeSet with a link that leaves the project, or with a project path that is a symbolic link;
+leave a symbolic link to a host file or a FIFO in the saved output directory; connect out of scope
+by TCP, UDP and ICMP, over IPv4 and IPv6; keep a connection open across `/scope refresh` and the
+end of the window; resolve a name; change the ruleset; create a user namespace; leave a process
+behind; read a provider key from the environment; send the host a malformed or oversized message.
+
+## Decisions
+
+1. **Confirmation in `workspace`:** accepted, as the only approval. Applying the ChangeSet is
+   confirmed by the operator.
+2. **An approval mode for intrusive actions in scope:** not added. The network boundary does not
+   depend on it; it can be reconsidered after phase 4.
+3. **passt as a requirement of `security`:** accepted. A namespace whose only way out is an HTTP
+   proxy cannot carry the non-HTTP tools security work needs.
+4. **macOS:** no sandbox profile until the virtual machine backend.

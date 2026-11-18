@@ -33,6 +33,7 @@ import {
   subagentDataBytes,
 } from './subagent.ts';
 import { buildSystemPrompt, localDate, renderProjectContext } from './system-prompt.ts';
+import { IN_PROCESS_BACKEND, type ToolBackend } from './tool-broker.ts';
 
 export const DEFAULT_MAX_STEPS = 200;
 export const DEFAULT_STALL_MS = 120_000;
@@ -41,6 +42,8 @@ export const MAX_TIME_LIMIT_MS = MAX_TIMER_DELAY_MS;
 export interface AgentOptions {
   provider: Provider;
   tools: readonly Tool[];
+  // Where the tool calls of this agent and of its subagents run. In process when omitted.
+  toolBackend?: ToolBackend;
   mode: ExecutionMode;
   cwd: string;
   // Null disables AGENTS.md loading.
@@ -199,6 +202,7 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
     options.timeLimitMs === undefined
       ? undefined
       : Math.min(options.timeLimitMs, MAX_TIME_LIMIT_MS);
+  const toolBackend = options.toolBackend ?? IN_PROCESS_BACKEND;
   const subagents =
     options.delegation !== true
       ? null
@@ -207,6 +211,7 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
           effort: () => agent.effort,
           cwd: options.cwd,
           tools: options.tools,
+          toolBackend,
           instructions: options.instructions,
           stallMs: options.stallMs ?? DEFAULT_STALL_MS,
           maxSteps,
@@ -269,6 +274,7 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
           provider: agent.provider,
           conversation,
           tools,
+          toolBackend,
           mode: () => agent.mode,
           cwd: options.cwd,
           systemPrompt,

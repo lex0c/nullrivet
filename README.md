@@ -11,7 +11,7 @@ inspecting git repositories.
   ([saved output](docs/TOOLS.md#saved-output)). Commands the agent runs and the model provider may
   keep their own records.
 - **Two execution modes.** `auto` runs every tool without confirmation; `readonly` exposes only
-  read tools and is enforced by the executor, not just by the prompt.
+  read tools and is enforced by the tool broker, not just by the prompt.
 - **Not confined to a directory.** `--cwd` is only the starting point. Tools can reach any path the
   operating system allows.
 - **Project instructions.** Existing `AGENTS.md` files are read and applied to the directories they
@@ -348,6 +348,8 @@ as CI does. Evaluations against real models: [docs/EVALS.md](docs/EVALS.md).
 - [docs/MODELS.md](docs/MODELS.md): model resolution, the catalog, discovery and provider settings.
 - [docs/TUI.md](docs/TUI.md): the interactive interface: rendering, streaming Markdown, keys.
 - [docs/EVALS.md](docs/EVALS.md): evaluations against real models.
+- [docs/SANDBOX.md](docs/SANDBOX.md): proposal, not implemented: an opt-in sandbox for the tools
+  and a network scope for authorized security work.
 
 ## License
 

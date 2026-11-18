@@ -46,7 +46,7 @@ import {
 import type { AgentEndReason, AgentEventListener, CompactReason } from './events.ts';
 import { generateWithRetry } from './retry.ts';
 import { DISCOVERED_INSTRUCTIONS_HEADER } from './system-prompt.ts';
-import { executeToolCall } from './tool-executor.ts';
+import { executeToolCall, type ToolBackend } from './tool-broker.ts';
 
 export interface LoopLimits {
   maxSteps: number;
@@ -69,6 +69,9 @@ export interface TurnDependencies {
   provider: Provider;
   conversation: Conversation;
   tools: ReadonlyMap<string, Tool>;
+  // Where the tool calls run once authorized. Required, so no caller runs tools outside the
+  // backend the session chose.
+  toolBackend: ToolBackend;
   // Read before every request and every tool call, so a mode change takes effect immediately.
   mode: () => ExecutionMode;
   cwd: string;
@@ -279,6 +282,7 @@ const executeToolCalls = async (
       mode: deps.mode(),
       cwd: deps.cwd,
       signal,
+      backend: deps.toolBackend,
       newInstructions: unseenBeforeWrite,
     });
     let content = result.content;
