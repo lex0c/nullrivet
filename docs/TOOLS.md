@@ -22,8 +22,8 @@ Common behavior:
 - **Paths** are absolute or relative to the starting directory; `~` is expanded. Paths outside
   the starting directory, `..` and symlinks are allowed on purpose. Access is limited only by
   operating system permissions, or, with `--sandbox inspect`, by what the sandbox exposes: the
-  project read-only, a temporary home and `/tmp`, no network ([SANDBOX.md](SANDBOX.md)). The
-  background job tools are not offered in a sandbox yet.
+  project read-only, a temporary home and `/tmp`, no network ([SANDBOX.md](SANDBOX.md)).
+  Background jobs then run in the sandbox, with their logs in its `/tmp`.
 - **Arguments** come from the model and are validated by each tool. Invalid arguments come back as
   an `input.invalid` error result.
 - **Errors** come back to the model as text of the form `error [<code>]: <message>`, followed by a

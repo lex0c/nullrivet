@@ -48,6 +48,12 @@ createReadStream('', { fd: 3 }).on('data', (chunk) => {
       case 'job-event':
         send({ type: 'job.event', event: {} });
         break;
+      case 'job-started':
+        send({ type: 'job.started', jobId: '0123456789abcdef-1' });
+        break;
+      case 'unknown-type':
+        send({ type: 'job.lost', jobId: '0123456789abcdef-1' });
+        break;
       case 'relative-path':
         send({ type: 'tool.result', id, result: { ...result('x'), touchedPaths: ['../etc'] } });
         break;

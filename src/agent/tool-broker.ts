@@ -1,6 +1,7 @@
 import { errorMessage } from '../errors.ts';
 import { stripAnsi } from '../sanitize/ansi.ts';
 import { InvalidArgumentError } from '../tools/args.ts';
+import type { BackgroundJobs } from '../tools/jobs.ts';
 import { type ExecutionMode, isToolAllowed } from '../tools/policy.ts';
 import { type Tool, type ToolContext, type ToolResult, toolError } from '../tools/types.ts';
 
@@ -21,6 +22,9 @@ export interface ToolBackend {
   // exited; null while it can. A lost backend stays lost: the session does not continue its tool
   // calls anywhere else.
   failure?(): string | null;
+  // The background jobs of a backend that runs them itself, as a sandboxed worker does; the agent
+  // reads them from here instead of keeping a registry of its own.
+  readonly jobs?: BackgroundJobs | undefined;
 }
 
 // Thrown by a backend for a call it lost, such as one pending when its worker exited.

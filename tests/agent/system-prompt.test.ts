@@ -78,7 +78,7 @@ describe('buildSystemPrompt', () => {
       'The project directory "/work" and the system directories are read-only',
     );
     expect(auto).toContain('There is no network');
-    expect(auto).toContain('Background jobs are not available');
+    expect(auto).not.toContain('Background jobs');
     expect(auto).not.toContain('paths outside it are accessible');
     expect(sandboxed('readonly')).toContain('# Sandbox: inspect');
     expect(prompt('auto')).toContain('There is no sandbox');

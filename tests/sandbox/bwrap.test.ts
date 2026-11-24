@@ -23,18 +23,21 @@ import {
 import { seccompProgram } from '../../src/sandbox/seccomp.ts';
 import { WorkerBackend } from '../../src/sandbox/worker-backend.ts';
 import { BUILTIN_TOOLS } from '../../src/tools/index.ts';
+import { createJobTools } from '../../src/tools/jobs.ts';
 import type { Tool, ToolResult } from '../../src/tools/types.ts';
 import { sandboxTestsRun } from '../helpers/sandbox.ts';
 
 const host = sandboxHost();
 const runs = sandboxTestsRun;
 
+// As a session starts it: the built-in tools and the job tools, whose jobs live in the worker.
+const ALL_TOOLS = [...BUILTIN_TOOLS, ...createJobTools(null, 'one-shot')];
 const tool = (name: string): Tool => {
-  const found = BUILTIN_TOOLS.find((t) => t.name === name);
+  const found = ALL_TOOLS.find((t) => t.name === name);
   if (found === undefined) throw new Error(`no tool ${name}`);
   return found;
 };
-const TOOLS = BUILTIN_TOOLS.map((t) => t.name);
+const TOOLS = ALL_TOOLS.map((t) => t.name);
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'nullrivet-bwrap-')));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
@@ -72,8 +75,10 @@ const startInspect = async (): Promise<WorkerBackend> => {
       hostEnv,
       tools: TOOLS,
       readOnlyDirs: [],
+      jobs: 'one-shot',
     }),
     tools: TOOLS,
+    jobs: true,
   });
 };
 
@@ -299,6 +304,27 @@ describe.if(runs)('the end of the inspect sandbox', () => {
   const leftover = (marker: string) => hostProcessArgs().some((args) => args.includes(marker));
   const leave = (backend: WorkerBackend, marker: string) =>
     sh(backend, `setsid sh -c 'trap "" TERM; exec sleep ${marker}' >/dev/null 2>&1 & echo started`);
+
+  test('a background job runs in the sandbox, its log is readable there, and it ends with it', async () => {
+    const backend = await startInspect();
+    const started = await call(backend, 'bash_background', {
+      command: `echo from-the-job; ls /run 2>&1; setsid sh -c 'trap "" TERM; exec sleep 31337.3' >/dev/null 2>&1 & sleep 60`,
+    });
+    const logPath = /\[log so far \([^)]*\) saved to `([^`]+)`/.exec(started.content)?.[1];
+    expect(logPath).toStartWith('/tmp/nullrivet-');
+    const deadline = Date.now() + 5_000;
+    while (!leftover('sleep 31337.3') && Date.now() < deadline) await Bun.sleep(50);
+    const log = await call(backend, 'read_file', { path: logPath });
+    expect(log.content).toContain('from-the-job');
+    expect(log.content).toContain('No such file or directory');
+    // The log is in the sandbox's own /tmp, not the host's.
+    expect(existsSync(logPath ?? '')).toBe(false);
+    expect(leftover('sleep 31337.3')).toBe(true);
+    expect(backend.jobs?.running()).toBe(1);
+    await backend.close();
+    await Bun.sleep(200);
+    expect(leftover('sleep 31337.3')).toBe(false);
+  });
 
   test('a process left behind ends when the sandbox is closed', async () => {
     const backend = await startInspect();

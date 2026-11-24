@@ -74,7 +74,6 @@ Tools run in an isolated sandbox, not with the user's access:
 - The home directory and /tmp are temporary and hold none of the user's files. What is written there stays in the sandbox and is discarded when the session ends.
 - Other paths of the user's machine do not exist inside the sandbox.
 - There is no network: connections and name resolution fail.
-- Background jobs are not available.
 These limits are deliberate: report what they prevent instead of trying to work around them.`;
 
 export const buildSystemPrompt = (input: SystemPromptInput): string => {

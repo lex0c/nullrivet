@@ -81,7 +81,7 @@ describe.if(sandboxTestsRun)('--sandbox inspect', () => {
     expect(results[1]).toContain('project notes');
     const offered = (server.requests[0]?.tools ?? []).map((t) => t.function.name);
     expect(offered).toContain('bash');
-    expect(offered).not.toContain('bash_background');
+    expect(offered).toContain('bash_background');
     expect(server.requests[0]?.messages[0]?.content).toContain('# Sandbox: inspect');
   }, 30_000);
 
@@ -173,6 +173,73 @@ describe.if(sandboxTestsRun)('--sandbox inspect', () => {
       }),
     );
   }, 30_000);
+
+  test('background jobs run in the sandbox and their end reaches the model', async () => {
+    const { home, project } = workspace();
+    server.handle((request) => {
+      const results = toolMessages(request);
+      if (results.length === 0) {
+        return {
+          toolCalls: [
+            { name: 'bash_background', args: { command: 'echo from-job; ls /run; sleep 0.3' } },
+          ],
+        };
+      }
+      if (results.length === 1) {
+        const id = /Started background job (\S+) /.exec(results[0]?.content ?? '')?.[1] ?? '';
+        return { toolCalls: [{ name: 'bash_jobs', args: { id, wait_ms: 5_000 } }] };
+      }
+      return { text: 'done' };
+    });
+    const cli = startCli(['--sandbox', 'inspect', 'run it'], {
+      env: cliEnv(server, { HOME: home }),
+      cwd: project,
+    });
+    expect((await cli.finished).code).toBe(0);
+    const results = toolMessages(server.requests.at(-1)).map((m) => m.content);
+    expect(results[0]).toContain('Started background job');
+    expect(results[1]).toContain('completed with exit code');
+    expect(results[1]).toContain('from-job');
+    expect(results[1]).toContain('No such file or directory');
+  }, 30_000);
+
+  test.skipIf(Bun.which('python3') === null)(
+    'in the interactive session, a job that ends while it is idle starts a turn',
+    async () => {
+      const { home, project } = workspace();
+      server.handle((request) => {
+        const text = JSON.stringify(request.messages);
+        if (text.includes('Background job')) return { text: 'noted the end' };
+        return toolMessages(request).length === 0
+          ? { toolCalls: [{ name: 'bash_background', args: { command: 'sleep 1' } }] }
+          : { text: 'started' };
+      });
+      const before = server.requests.length;
+      const child = Bun.spawn(inTerminal(cliCommand(['--sandbox', 'inspect'])), {
+        env: { ...cliEnv(server, { HOME: home }), TERM: 'xterm-256color' },
+        cwd: project,
+        stdin: 'pipe',
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      await Bun.sleep(1_500);
+      child.stdin.write('go\r');
+      child.stdin.flush();
+      const noted = (): boolean =>
+        server.requests
+          .slice(before)
+          .some((r) => JSON.stringify(r.messages).includes('Background job'));
+      const deadline = Date.now() + 20_000;
+      while (!noted() && Date.now() < deadline) await Bun.sleep(100);
+      await Bun.sleep(500);
+      child.stdin.write('/exit\r');
+      child.stdin.flush();
+      const [, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+      expect(code).toBe(0);
+      expect(noted()).toBe(true);
+    },
+    40_000,
+  );
 
   test('refuses a project that contains the home directory', async () => {
     const { home } = workspace();

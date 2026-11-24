@@ -5,6 +5,7 @@ import { BoundedCapture } from '../context/bounded-capture.ts';
 import { terminalText } from '../sanitize/display.ts';
 import { KILL_GRACE_MS, trackProcessGroup } from '../tools/process.ts';
 import { type Tool, type ToolContext, type ToolResult, toolError } from '../tools/types.ts';
+import { JobProjection } from './job-projection.ts';
 import { LineSplitter } from './lines.ts';
 import {
   encodeMessage,
@@ -32,6 +33,8 @@ export interface WorkerBackendOptions {
   readyTimeoutMs?: number;
   // How long a cancelled call may take to return its result.
   cancelGraceMs?: number;
+  // The worker runs background jobs, and reports them as they happen.
+  jobs?: boolean;
 }
 
 const DEFAULT_READY_TIMEOUT_MS = 10_000;
@@ -68,6 +71,8 @@ export class WorkerBackend implements ToolBackend {
   private readonly cancelGraceMs: number;
   private lost: string | null = null;
   private closing = false;
+  // The background jobs the worker runs, when it was started with them.
+  readonly jobs: JobProjection | undefined;
   private ready = false;
   private sequence = 0;
   private untrack: () => void = () => undefined;
@@ -81,6 +86,7 @@ export class WorkerBackend implements ToolBackend {
   ) {
     this.offered = new Set(options.tools);
     this.cancelGraceMs = options.cancelGraceMs ?? DEFAULT_CANCEL_GRACE_MS;
+    this.jobs = options.jobs === true ? new JobProjection() : undefined;
     this.toWorker = child.stdio[3] as Writable;
     const fromWorker = child.stdio[4] as Readable;
     if (child.pid !== undefined) this.untrack = trackProcessGroup(child.pid);
@@ -215,7 +221,7 @@ export class WorkerBackend implements ToolBackend {
     if (this.lost !== null) return;
     const parsed = parseWorkerMessage(line);
     if (!parsed.ok) {
-      this.lose(`the worker sent ${parsed.reason}`);
+      this.lose(`the worker broke the protocol: ${parsed.reason}`);
       return;
     }
     this.handle(parsed.message);
@@ -252,7 +258,16 @@ export class WorkerBackend implements ToolBackend {
       return;
     }
     if (!this.ready) {
-      this.lose('the worker sent a result before worker.ready');
+      this.lose(`the worker sent ${message.type} before worker.ready`);
+      return;
+    }
+    if (message.type !== 'tool.result') {
+      if (this.jobs === undefined) {
+        this.lose(`the worker sent ${message.type}, but it runs no background jobs`);
+        return;
+      }
+      const violation = this.jobs.receive(message);
+      if (violation !== null) this.lose(`the worker broke the job protocol: ${shown(violation)}`);
       return;
     }
     const call = this.pending.get(message.id);
@@ -277,6 +292,7 @@ export class WorkerBackend implements ToolBackend {
       call.reject(new BackendLostError(this.lost));
     }
     this.pending.clear();
+    this.jobs?.lose();
     this.onReady?.(new Error(this.lost));
     this.toWorker.destroy();
     this.killGroup();

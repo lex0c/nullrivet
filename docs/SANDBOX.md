@@ -1,9 +1,8 @@
 # Sandbox and engagement scope
 
-Status: phases 1 and 2a are implemented: the ToolBroker, and the worker with the `inspect` profile
-(`--sandbox inspect`). Background jobs in the sandbox (2b) and the later phases are not. The
-document records the design, the facts checked on a Linux host while preparing it, and the
-decisions taken on it.
+Status: phases 1 and 2 are implemented: the ToolBroker, and the worker with the `inspect` profile
+(`--sandbox inspect`), background jobs included. The later phases are not. The document records the
+design, the facts checked on a Linux host while preparing it, and the decisions taken on it.
 
 ## Purpose
 
@@ -152,8 +151,10 @@ type HostToWorker =
 type WorkerToHost =
   | { type: 'worker.ready'; protocol: 1; tools: string[] }
   | { type: 'tool.result'; id: string; result: ToolResult }
-  | { type: 'worker.error'; message: string };
-// Phase 2b adds job events.
+  | { type: 'worker.error'; message: string }
+  | { type: 'job.started'; jobId: string }
+  | { type: 'job.event'; seq: number; event: JobEvent }
+  | { type: 'job.shown'; jobId: string };
 ```
 
 - **Correlation.** The host generates the ids, unique per session. Each `tool.execute` gets exactly
@@ -173,9 +174,14 @@ type WorkerToHost =
   the interrupted result. A cancelled command gets SIGTERM, SIGKILL after the 2 s kill grace, and up
   to the same grace for its output to close, so the host waits twice the grace plus 3 s (7 s).
   A call that does not answer in that time stops the sandbox.
-- **Background jobs** (phase 2b). Job events are forwarded as `job.event` and feed the existing
-  job notices, so the model sees jobs as today. Until then a sandboxed session offers no job
-  tools, and the agent refuses background jobs with any backend but the in-process one.
+- **Background jobs.** The jobs live in the worker, which sends each fact as it happens, on the
+  same descriptor as the results: `job.started` before the result of the call that started the
+  job, `job.event` when a job becomes ready or ends, before anything waiting on it resumes, and
+  `job.shown` when `bash_jobs` or `bash_kill` showed a job to the model. So every fact reaches the
+  host before the result it led to. The host keeps a projection of the jobs (see Background jobs
+  below). Event numbers start at 1 and follow each other; a job id is the registry's prefix, fixed
+  by the first start, and a number above the previous job's; a second ready or end, an event of a
+  job that did not start, or a start while 8 jobs run stops the sandbox.
 - **Disconnection.** If the worker exits or its pipe closes, pending calls fail with the reason,
   jobs are reported as lost, and the session stops using tools: a session whose boundary failed
   does not continue on another one. The same holds after a protocol violation. The backend then
@@ -187,6 +193,40 @@ type WorkerToHost =
 - **Shutdown.** `worker.shutdown` at exit; the sandbox is torn down whether or not the worker
   answers. Bubblewrap runs in a process group of its own, which the exit handler kills with the
   command groups, and `--die-with-parent` ends the sandbox when nullrivet is killed outright.
+
+## Background jobs
+
+The worker runs the jobs in a registry of its own, with hooks that hand each fact to the protocol
+as it happens: the start when the job is registered, readiness and the end before anything waiting
+on them resumes, and a show when a tool reports the job. Handing a fact over counts as its
+delivery in the worker, which then forgets finished jobs as the registry always has; it can forget
+a job before its note reaches the model, since the host already has the facts. Delivery to the
+model is decided on the host alone, so nothing is confirmed back to the worker.
+
+| Step | Meaning |
+|---|---|
+| A fact handed over in the worker | produced and put on the protocol descriptor |
+| `job.event` on the host | received by the projection |
+| delivery on the host | its note reached the agent loop |
+| `job.shown` | a tool showed the job and every earlier event of it |
+
+The host's projection (`src/sandbox/job-projection.ts`) answers what the agent and the interactive
+session read at once: the pending events, oldest first, with an end hiding a pending ready event;
+how many jobs run; how many were started. Its listeners run on every ready or end, delivered or
+not, so the footer stays current. `/clear` marks the known jobs as dropped on the host: only the
+main agent has the job tools, and the conversation is cleared between its turns, after the start
+of every job it launched has arrived.
+
+The fields of an event become text of a runtime note, which the model trusts, so the host checks
+or reduces them: log parts must be log files of the sandbox's `/tmp`, at most 8; sizes, times and
+exit codes are bounded integers; a signal must be one the system knows; a stop reason or an
+interruption keeps only its kind, without the system message after it, and unknown text becomes a
+generic kind. Text a correct worker can produce when a command interferes, such as a log directory
+made again or a full disk, never stops the sandbox.
+
+When the sandbox is lost, each job still running gets a `job.lost` note, written by the host
+without the reason of the loss. From then on no event starts a turn of its own, since every tool
+would be refused in it; the notes go out with the next prompt.
 
 ## Files
 
@@ -556,12 +596,10 @@ limits or for the virtual machine backend.
      a profile cannot run its tools in process by omission;
    - routing tests: `delegate` runs in process, every other tool and the subagents' calls on the
      session backend, and a lost backend is never replaced by the in-process one.
-2b. **Background jobs in the worker.** The worker is the source of truth for the processes, their
-   logs and their state; `bash_jobs` and `bash_kill` are forwarded to it like any other call. The
-   host keeps only a projection of what the agent loop and the interface read synchronously: each
-   job's id, status, start and end, and whether it is ready. It is fed by job events that carry a
-   sequence number, which gives marking events as delivered an explicit meaning and keeps an event
-   from counting twice. Two parties never control the same processes.
+2b. **Background jobs in the worker** (done). The worker is the source of truth for the
+   processes, their logs and their state; `bash_jobs` and `bash_kill` are forwarded to it like any
+   other call. The host keeps only a projection of what the agent loop and the interface read at
+   once, fed by facts with sequence numbers. Two parties never control the same processes.
 3. **`workspace`.** The ChangeSet, with the baseline, the stop before reading and the
    descriptor-based resolution, specified and tested on its own before the overlay is wired in.
 4. **`security`.** Only after the network isolation tests pass: the engagement file, the ruleset,
@@ -587,5 +625,5 @@ behind; read a provider key from the environment; send the host a malformed or o
 3. **passt as a requirement of `security`:** accepted. A namespace whose only way out is an HTTP
    proxy cannot carry the non-HTTP tools security work needs.
 4. **macOS:** no sandbox profile until the virtual machine backend.
-5. **Background jobs in a sandbox:** deferred to phase 2b. Until then a sandboxed session offers
-   no job tools, has no job registry, and a direct call to a job tool is refused as unknown.
+5. **Background jobs in a sandbox:** in the worker, with a projection on the host (phase 2b). The
+   host keeps no job registry of its own in a sandboxed session.

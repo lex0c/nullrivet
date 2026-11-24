@@ -2,6 +2,7 @@ import { lstatSync, readFileSync, readlinkSync, realpathSync, type Stats } from 
 import { lstat, realpath } from 'node:fs/promises';
 import { homedir, userInfo } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
+import type { JobSession } from '../tools/jobs.ts';
 import { isWithinDirectory } from '../tools/paths.ts';
 import { HOST_TO_WORKER_FD, WORKER_TO_HOST_FD } from './protocol.ts';
 import { type SyscallArch, sandboxArch, seccompProgram } from './seccomp.ts';
@@ -256,12 +257,14 @@ export interface InspectOptions {
   tools: readonly string[];
   // Directories the host writes and the worker reads, such as subagent reports.
   readOnlyDirs: readonly string[];
+  // Starts the worker with background jobs, described for this kind of session.
+  jobs?: JobSession;
 }
 
 // The `inspect` profile: the project and the system read-only, a temporary home and /tmp, no
 // network, no host processes, and only the worker's own files besides.
 export const inspectLaunch = (options: InspectOptions): WorkerLaunch => {
-  const worker = sandboxedWorker(options.tools);
+  const worker = sandboxedWorker(options.tools, options.jobs);
   const env = sandboxEnv(options.hostEnv, options.home);
   const identity = identityFiles(options.home);
   const inputs = [identity.passwd, identity.group, HOSTS, NSSWITCH].map((text) =>

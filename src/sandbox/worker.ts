@@ -4,7 +4,8 @@ import { parseArgs } from 'node:util';
 import { thrownToolError } from '../agent/tool-broker.ts';
 import { errorMessage } from '../errors.ts';
 import { BUILTIN_TOOLS } from '../tools/index.ts';
-import { removeOutputFiles } from '../tools/output-files.ts';
+import { createJobTools, JobRegistry } from '../tools/jobs.ts';
+import { jobLogs, removeOutputFiles } from '../tools/output-files.ts';
 import { killAllProcessGroups } from '../tools/process.ts';
 import { type Tool, type ToolResult, toolError } from '../tools/types.ts';
 import { LineSplitter } from './lines.ts';
@@ -84,11 +85,12 @@ export const runWorker = (argv: readonly string[]): void => {
   const out = createWriteStream('', { fd: WORKER_TO_HOST_FD });
   // Without the host there is no one to answer, so a failed write ends the worker.
   out.on('error', () => process.exit(1));
-  const send = (message: WorkerToHost): void => {
-    out.write(encodeMessage(message));
-  };
   const running = new Map<string, AbortController>();
   let stopping = false;
+  // Nothing is sent once the worker stops: the stream is ending, and the host no longer listens.
+  const send = (message: WorkerToHost): void => {
+    if (!stopping) out.write(encodeMessage(message));
+  };
   const stop = (code: number): void => {
     if (stopping) return;
     stopping = true;
@@ -117,19 +119,40 @@ export const runWorker = (argv: readonly string[]): void => {
     return;
   }
   let toolNames: string[];
+  let jobSession: string | undefined;
   try {
     const { values } = parseArgs({
       args: [...argv],
-      options: { tools: { type: 'string' } },
+      options: { tools: { type: 'string' }, jobs: { type: 'string' } },
       strict: true,
       allowPositionals: false,
     });
     toolNames = (values.tools ?? '').split(',').filter((name) => name.length > 0);
+    jobSession = values.jobs;
   } catch (error) {
     fail(`invalid worker arguments: ${errorMessage(error)}`);
     return;
   }
   const available = new Map(BUILTIN_TOOLS.map((tool) => [tool.name, tool]));
+  if (jobSession !== undefined) {
+    if (jobSession !== 'interactive' && jobSession !== 'one-shot') {
+      fail(`the worker has no job session named ${jobSession}`);
+      return;
+    }
+    // The jobs live here; the host learns each fact as it happens, in order, on the same
+    // descriptor as the results: a job's start before the result of the call that started it,
+    // and its events before whatever they let resume.
+    let seq = 0;
+    const registry = new JobRegistry(jobLogs, {
+      started: (jobId) => send({ type: 'job.started', jobId }),
+      occurred: (event) => {
+        seq += 1;
+        send({ type: 'job.event', seq, event });
+      },
+      shown: (jobId) => send({ type: 'job.shown', jobId }),
+    });
+    for (const tool of createJobTools(registry, jobSession)) available.set(tool.name, tool);
+  }
   const tools = new Map<string, Tool>();
   for (const name of toolNames) {
     const tool = available.get(name);

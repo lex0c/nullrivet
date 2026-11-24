@@ -1,5 +1,6 @@
 import { errorMessage } from '../errors.ts';
 import { BUILTIN_TOOLS } from '../tools/index.ts';
+import { createJobTools, type JobSession } from '../tools/jobs.ts';
 import type { SandboxProfile, SandboxScope } from '../tools/policy.ts';
 import { inspectLaunch, sandboxHost, sandboxProject } from './bwrap.ts';
 import { WorkerBackend } from './worker-backend.ts';
@@ -19,12 +20,14 @@ export const startSandbox = async (
   cwd: string,
   env: Record<string, string | undefined>,
   readOnlyDirs: readonly string[],
+  jobs: JobSession,
 ): Promise<StartedSandbox | { error: string }> => {
   const host = sandboxHost();
   if (typeof host === 'string') return { error: host };
   const project = await sandboxProject(cwd, env);
   if ('error' in project) return project;
-  const tools = BUILTIN_TOOLS.map((tool) => tool.name);
+  // The job tools run in the worker too, with the registry their jobs live in.
+  const tools = [...BUILTIN_TOOLS, ...createJobTools(null, jobs)].map((tool) => tool.name);
   try {
     const backend = await WorkerBackend.start({
       launch: inspectLaunch({
@@ -35,8 +38,10 @@ export const startSandbox = async (
         hostEnv: env,
         tools,
         readOnlyDirs,
+        jobs,
       }),
       tools,
+      jobs: true,
     });
     return { backend, scope: { profile, root: project.root }, cwd: project.cwd };
   } catch (error) {

@@ -1,4 +1,7 @@
+import { constants } from 'node:os';
 import { isAbsolute, resolve } from 'node:path';
+import type { JobEvent } from '../tools/jobs.ts';
+import type { SavedOutput } from '../tools/output-files.ts';
 import type { ToolResult } from '../tools/types.ts';
 
 // The entry point runs the sandbox worker instead of the CLI when its first argument is this. It
@@ -36,10 +39,17 @@ export type HostToWorker =
   | { type: 'tool.cancel'; id: string }
   | { type: 'worker.shutdown' };
 
+// Background jobs run in the worker, which sends each fact as it happens: a job started, became
+// ready or ended (with a sequence number), or was shown to the model by a tool.
 export type WorkerToHost =
   | { type: 'worker.ready'; protocol: number; tools: string[] }
   | { type: 'tool.result'; id: string; result: ToolResult }
-  | { type: 'worker.error'; message: string };
+  | { type: 'worker.error'; message: string }
+  | { type: 'job.started'; jobId: string }
+  | { type: 'job.event'; seq: number; event: JobEvent }
+  | { type: 'job.shown'; jobId: string };
+
+export type JobMessage = Extract<WorkerToHost, { type: 'job.started' | 'job.event' | 'job.shown' }>;
 
 type Parsed<T> = { ok: true; message: T } | { ok: false; reason: string };
 
@@ -110,6 +120,147 @@ const readResult = (value: unknown): ToolResult | string => {
   };
 };
 
+// A job id: the registry's random prefix and a positive sequence number a JavaScript number holds
+// exactly.
+export const JOB_ID_PATTERN = /^([0-9a-f]{16})-([1-9][0-9]{0,14})$/;
+
+// The parts of a job log, in the sandbox's /tmp. The directory can change during a job, when
+// something removed it and the output code made a new one, so each part is checked on its own.
+const JOB_LOG_PART = /^\/tmp\/nullrivet-[A-Za-z0-9]{6}\/[0-9]{1,15}-job\.[0-9]{3}\.txt$/;
+// A job's output is limited to 64 MiB in parts of 10 MiB.
+const MAX_JOB_LOG_PARTS = 8;
+
+const isCount = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+
+// The reasons the output code writes end with an error message from the system; the note gets
+// only the kind of failure. Any other text is replaced, since the note is trusted by the model.
+const STOP_CATEGORIES = [
+  'saving failed',
+  'write failed',
+  'could not create an output file',
+  'closing an output file failed',
+];
+const LIMIT_REASON =
+  /^the [0-9]+(\.[0-9])?(B|KB|MB) limit (per output|for the output files of this process) was reached$/;
+const JOB_INTERRUPTIONS = [
+  'the job reached its max_runtime_ms',
+  'the job was stopped with bash_kill',
+  'the processes the job left running were killed',
+];
+
+const reduceStopReason = (text: string): string => {
+  if (LIMIT_REASON.test(text)) return text;
+  const category = STOP_CATEGORIES.find(
+    (prefix) => text === prefix || text.startsWith(`${prefix}:`),
+  );
+  return category ?? 'saving failed';
+};
+
+const reduceInterruption = (text: string): string =>
+  JOB_INTERRUPTIONS.includes(text) ? text : 'following the process failed';
+
+const readSavedOutput = (value: unknown): SavedOutput | string => {
+  if (!isPlainObject(value)) return 'a job log that is not an object';
+  if (
+    !hasExactKeys(
+      value,
+      ['parts', 'savedBytes', 'receivedBytes'],
+      ['stopReason', 'interrupted', 'binary'],
+    )
+  ) {
+    return 'a job log with unknown or missing fields';
+  }
+  const { parts, savedBytes, receivedBytes, stopReason, interrupted, binary } = value;
+  if (
+    !Array.isArray(parts) ||
+    parts.length > MAX_JOB_LOG_PARTS ||
+    !parts.every((part) => typeof part === 'string' && JOB_LOG_PART.test(part))
+  ) {
+    return 'a job log whose parts are not log files of the sandbox';
+  }
+  if (!isCount(savedBytes) || !isCount(receivedBytes) || savedBytes > receivedBytes) {
+    return 'a job log with invalid sizes';
+  }
+  if (
+    stopReason !== undefined &&
+    (typeof stopReason !== 'string' || stopReason.length > MAX_ERROR_CHARS)
+  ) {
+    return 'a job log with an invalid stop reason';
+  }
+  if (
+    interrupted !== undefined &&
+    (typeof interrupted !== 'string' || interrupted.length > MAX_ERROR_CHARS)
+  ) {
+    return 'a job log with an invalid interruption';
+  }
+  if (binary !== undefined && typeof binary !== 'boolean') return 'a job log with an invalid flag';
+  return {
+    parts: parts as string[],
+    savedBytes,
+    receivedBytes,
+    ...(stopReason === undefined ? {} : { stopReason: reduceStopReason(stopReason) }),
+    ...(interrupted === undefined ? {} : { interrupted: reduceInterruption(interrupted) }),
+    ...(binary === undefined ? {} : { binary }),
+  };
+};
+
+const FINISHED_STATUSES = ['completed', 'failed', 'stopped', 'timed_out'];
+
+const readJobEvent = (value: unknown): JobEvent | string => {
+  if (!isPlainObject(value)) return 'a job event that is not an object';
+  const { type, jobId, at } = value;
+  if (typeof jobId !== 'string' || !JOB_ID_PATTERN.test(jobId))
+    return 'a job event with an invalid job id';
+  if (!isCount(at)) return 'a job event with an invalid time';
+  if (type === 'job.ready') {
+    if (
+      !hasExactKeys(value, ['type', 'jobId', 'at', 'afterMs', 'log']) ||
+      !isCount(value.afterMs)
+    ) {
+      return 'a malformed job.ready event';
+    }
+    const log = readSavedOutput(value.log);
+    if (typeof log === 'string') return log;
+    return { type, jobId, at, afterMs: value.afterMs, log };
+  }
+  if (type === 'job.finished') {
+    const { durationMs, status, exitCode, signal } = value;
+    if (
+      !hasExactKeys(value, [
+        'type',
+        'jobId',
+        'at',
+        'durationMs',
+        'status',
+        'exitCode',
+        'signal',
+        'log',
+      ]) ||
+      !isCount(durationMs) ||
+      typeof status !== 'string' ||
+      !FINISHED_STATUSES.includes(status) ||
+      !(exitCode === null || (isCount(exitCode) && exitCode <= 255)) ||
+      !(signal === null || (typeof signal === 'string' && Object.hasOwn(constants.signals, signal)))
+    ) {
+      return 'a malformed job.finished event';
+    }
+    const log = value.log === null ? null : readSavedOutput(value.log);
+    if (typeof log === 'string') return log;
+    return {
+      type,
+      jobId,
+      at,
+      durationMs,
+      status: status as Extract<JobEvent, { type: 'job.finished' }>['status'],
+      exitCode,
+      signal: signal as NodeJS.Signals | null,
+      log,
+    };
+  }
+  return 'a job event of an unknown type';
+};
+
 // Reads a line from the worker. The worker runs commands the model chose, so the line is
 // untrusted: anything that is not exactly one of the messages above is refused with the reason.
 export const parseWorkerMessage = (line: string): Parsed<WorkerToHost> => {
@@ -146,6 +297,27 @@ export const parseWorkerMessage = (line: string): Parsed<WorkerToHost> => {
         return { ok: false, reason: 'a malformed worker.error message' };
       }
       return { ok: true, message: { type: 'worker.error', message } };
+    }
+    case 'job.started':
+    case 'job.shown': {
+      const { jobId } = value;
+      if (
+        !hasExactKeys(value, ['type', 'jobId']) ||
+        typeof jobId !== 'string' ||
+        !JOB_ID_PATTERN.test(jobId)
+      ) {
+        return { ok: false, reason: `a malformed ${value.type} message` };
+      }
+      return { ok: true, message: { type: value.type, jobId } };
+    }
+    case 'job.event': {
+      const { seq } = value;
+      if (!hasExactKeys(value, ['type', 'seq', 'event']) || !isCount(seq) || seq < 1) {
+        return { ok: false, reason: 'a malformed job.event message' };
+      }
+      const event = readJobEvent(value.event);
+      if (typeof event === 'string') return { ok: false, reason: event };
+      return { ok: true, message: { type: 'job.event', seq, event } };
     }
     default:
       return { ok: false, reason: 'a message of an unknown type' };

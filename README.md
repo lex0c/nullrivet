@@ -253,11 +253,11 @@ not trust, such as reviewing an unknown repository:
 - Sockets other than IP (Unix, vsock and the rest) and the kernel keyrings are out of reach, and
   processes left behind end with the session.
 
-The execution mode still applies inside: `readonly` with `inspect` only reads. Background jobs are
-not offered in a sandbox yet. The sandbox does not limit CPU, memory or the number of processes,
-so it is not a defence against code meant to exhaust them. A sandbox that cannot start stops the
-session with the reason; nullrivet never falls back to running the tools without it. Details and
-the profiles planned next: [docs/SANDBOX.md](docs/SANDBOX.md).
+The execution mode still applies inside: `readonly` with `inspect` only reads. Background jobs run
+inside the sandbox too, with their logs in its `/tmp`. The sandbox does not limit CPU, memory or the
+number of processes, so it is not a defence against code meant to exhaust them. A sandbox that
+cannot start stops the session with the reason; nullrivet never falls back to running the tools
+without it. Details and the profiles planned next: [docs/SANDBOX.md](docs/SANDBOX.md).
 
 ## Tools
 

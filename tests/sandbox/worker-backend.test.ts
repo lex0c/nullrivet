@@ -6,6 +6,7 @@ import { BackendLostError, executeToolCall } from '../../src/agent/tool-broker.t
 import { WorkerBackend, type WorkerBackendOptions } from '../../src/sandbox/worker-backend.ts';
 import { workerCommand } from '../../src/sandbox/worker-command.ts';
 import { BUILTIN_TOOLS } from '../../src/tools/index.ts';
+import { createJobTools } from '../../src/tools/jobs.ts';
 import type { Tool } from '../../src/tools/types.ts';
 
 // The worker makes itself non-dumpable through prctl, which exists on Linux only.
@@ -163,13 +164,15 @@ describe.if(linux)('WorkerBackend with the real worker', () => {
 
 describe.if(linux)('WorkerBackend with a worker that breaks the protocol', () => {
   const violations: [string, string][] = [
-    ['malformed', 'the worker sent a line that is not a JSON object'],
+    ['malformed', 'the worker broke the protocol: a line that is not a JSON object'],
     ['oversized', 'the worker sent a line over the size limit'],
     ['unknown-id', 'the worker sent a result for an unknown call id other'],
-    ['job-event', 'the worker sent a message of an unknown type'],
+    ['job-event', 'the worker broke the protocol: a malformed job.event message'],
+    ['job-started', 'the worker sent job.started, but it runs no background jobs'],
+    ['unknown-type', 'the worker broke the protocol: a message of an unknown type'],
     ['relative-path', 'touchedPaths holds a path that is not absolute and normalized'],
     ['large-meta', 'the result meta is too large'],
-    ['extra-field', 'the result has unknown or missing fields'],
+    ['extra-field', 'the worker broke the protocol: the result has unknown or missing fields'],
   ];
   for (const [scenario, reason] of violations) {
     test(`${scenario}: the backend is lost and the call fails`, async () => {
@@ -180,6 +183,14 @@ describe.if(linux)('WorkerBackend with a worker that breaks the protocol', () =>
       expect(backend.failure()).toContain(reason);
     });
   }
+
+  test('a job message from a worker without jobs is reported once, as it was sent', async () => {
+    const backend = track(await fakeWorker('job-started'));
+    await expect(backend.execute(tool('read_file'), { path: '/' }, context())).rejects.toThrow(
+      BackendLostError,
+    );
+    expect(backend.failure()).toBe('the worker sent job.started, but it runs no background jobs');
+  });
 
   test('a second result for the same call is a violation', async () => {
     const backend = track(await fakeWorker('duplicate'));
@@ -217,4 +228,131 @@ describe.if(linux)('WorkerBackend with a worker that breaks the protocol', () =>
       'read_file did not return within 200 ms of its cancellation',
     );
   });
+});
+
+describe.if(linux)('background jobs in the worker', () => {
+  const jobTools = createJobTools(null, 'one-shot');
+  const jobTool = (name: string): Tool => {
+    const found = jobTools.find((t) => t.name === name);
+    if (found === undefined) throw new Error(`no tool ${name}`);
+    return found;
+  };
+  const startWithJobs = async () => {
+    const tools = ['bash', ...jobTools.map((t) => t.name)];
+    const backend = track(
+      await WorkerBackend.start({
+        launch: { command: workerCommand(tools, 'one-shot'), env: env() },
+        tools,
+        jobs: true,
+      }),
+    );
+    const jobs = backend.jobs;
+    if (jobs === undefined) throw new Error('no job projection');
+    return { backend, jobs };
+  };
+  const waitUntil = async (check: () => boolean, ms = 10_000): Promise<boolean> => {
+    const deadline = Date.now() + ms;
+    while (!check() && Date.now() < deadline) await Bun.sleep(20);
+    return check();
+  };
+  const jobIdOf = (content: string): string => {
+    const match = /Started background job (\S+) /.exec(content);
+    if (match?.[1] === undefined) throw new Error(`no job id in: ${content}`);
+    return match[1];
+  };
+
+  test('a job is known before its start returns, and its end arrives as it happens', async () => {
+    const { backend, jobs } = await startWithJobs();
+    const result = await backend.execute(
+      jobTool('bash_background'),
+      { command: 'echo hi; sleep 0.2' },
+      context(),
+    );
+    const id = jobIdOf(result.content);
+    expect(jobs.startedCount).toBe(1);
+    expect(jobs.running()).toBe(1);
+    expect(await waitUntil(() => jobs.pendingEvents().length === 1)).toBe(true);
+    expect(jobs.pendingEvents()[0]).toMatchObject({
+      type: 'job.finished',
+      jobId: id,
+      status: 'completed',
+    });
+    expect(jobs.running()).toBe(0);
+  });
+
+  test('a job ready and ended in one chunk gives a single note', async () => {
+    const { backend, jobs } = await startWithJobs();
+    await backend.execute(
+      jobTool('bash_background'),
+      { command: 'echo READY', ready_pattern: 'READY' },
+      context(),
+    );
+    expect(await waitUntil(() => jobs.running() === 0)).toBe(true);
+    expect(jobs.pendingEvents().map((event) => event.type)).toEqual(['job.finished']);
+  });
+
+  test('a job shown by bash_jobs or bash_kill leaves no note to repeat it', async () => {
+    const { backend, jobs } = await startWithJobs();
+    const quick = jobIdOf(
+      (await backend.execute(jobTool('bash_background'), { command: 'sleep 0.3' }, context()))
+        .content,
+    );
+    const waited = await backend.execute(
+      jobTool('bash_jobs'),
+      { id: quick, wait_ms: 5_000 },
+      context(),
+    );
+    expect(waited.content).toContain('completed with exit code 0');
+    const slow = jobIdOf(
+      (await backend.execute(jobTool('bash_background'), { command: 'sleep 30' }, context()))
+        .content,
+    );
+    const killed = await backend.execute(jobTool('bash_kill'), { id: slow }, context());
+    expect(killed.content).toContain('was stopped with bash_kill');
+    expect(jobs.running()).toBe(0);
+    expect(jobs.pendingEvents()).toEqual([]);
+  });
+
+  test('an end arriving during another call, and a read during a wait, are handled in order', async () => {
+    const { backend, jobs } = await startWithJobs();
+    const quick = jobIdOf(
+      (await backend.execute(jobTool('bash_background'), { command: 'sleep 0.2' }, context()))
+        .content,
+    );
+    // The job ends while this command runs; its event is received before the command's result.
+    const ran = await backend.execute(
+      tool('bash'),
+      { command: 'sleep 0.6; echo after' },
+      context(),
+    );
+    expect(ran.content).toContain('after');
+    expect(jobs.pendingEvents()).toMatchObject([{ type: 'job.finished', jobId: quick }]);
+    const slow = jobIdOf(
+      (await backend.execute(jobTool('bash_background'), { command: 'sleep 0.5' }, context()))
+        .content,
+    );
+    const waiting = backend.execute(jobTool('bash_jobs'), { id: slow, wait_ms: 5_000 }, context());
+    const echoed = await backend.execute(tool('bash'), { command: 'echo meanwhile' }, context());
+    expect(echoed.content).toContain('meanwhile');
+    expect(jobs.running()).toBe(1);
+    expect((await waiting).content).toContain('completed with exit code 0');
+    expect(jobs.running()).toBe(0);
+  });
+
+  test('a job the worker forgets as soon as it ends is still counted as ended here', async () => {
+    const { backend, jobs } = await startWithJobs();
+    const long = jobIdOf(
+      (await backend.execute(jobTool('bash_background'), { command: 'sleep 60' }, context()))
+        .content,
+    );
+    for (let i = 0; i < 50; i++) {
+      await backend.execute(jobTool('bash_background'), { command: 'true' }, context());
+    }
+    expect(await waitUntil(() => jobs.running() === 1, 20_000)).toBe(true);
+    jobs.markDelivered(jobs.pendingEvents());
+    // Ending the long job makes it the oldest of 51 finished jobs, which the worker then forgets.
+    await backend.execute(jobTool('bash_kill'), { id: long }, context());
+    expect(jobs.running()).toBe(0);
+    expect(backend.failure()).toBeNull();
+  }, 60_000);
 });

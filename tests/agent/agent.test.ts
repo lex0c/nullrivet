@@ -8,6 +8,7 @@ import type { AgentEvent } from '../../src/agent/events.ts';
 import { IN_PROCESS_BACKEND } from '../../src/agent/tool-broker.ts';
 import { InstructionsLoader } from '../../src/instructions/agents-loader.ts';
 import type { GenerateRequest } from '../../src/providers/types.ts';
+import { JobProjection } from '../../src/sandbox/job-projection.ts';
 import { FENCE } from '../../src/sanitize/fence.ts';
 import { removeOutputFiles } from '../../src/tools/output-files.ts';
 import {
@@ -500,7 +501,7 @@ describe('background jobs', () => {
 });
 
 describe('tool backend', () => {
-  test('background jobs are refused with a backend other than the in-process one', async () => {
+  test('background jobs are refused with a backend that does not run them', async () => {
     const backend = { execute: IN_PROCESS_BACKEND.execute };
     await expect(
       createAgent({
@@ -512,7 +513,7 @@ describe('tool backend', () => {
         instructions: null,
         backgroundJobs: 'interactive',
       }),
-    ).rejects.toThrow('background jobs need the in-process tool backend');
+    ).rejects.toThrow('background jobs need a tool backend that runs them');
     const agent = await createAgent({
       provider: createMockProvider([]),
       tools: [],
@@ -522,5 +523,55 @@ describe('tool backend', () => {
       instructions: null,
     });
     expect(agent.backgroundWork()).toEqual({ jobs: 0, subagents: 0, queuedSubagents: 0 });
+  });
+
+  test('with a backend that runs the jobs, the agent offers their tools and reports their events', async () => {
+    const jobs = new JobProjection();
+    const received: string[] = [];
+    const backend = {
+      execute: async (tool: { name: string }) => {
+        received.push(tool.name);
+        return { content: 'started in the backend', isError: false };
+      },
+      jobs,
+    };
+    const provider = createMockProvider([
+      toolTurn([{ id: 'b1', name: 'bash_background', args: { command: 'sleep 1' } }]),
+      textTurn('started'),
+      textTurn('noted'),
+    ]);
+    const agent = await createAgent({
+      provider,
+      tools: [],
+      toolBackend: backend,
+      mode: 'auto',
+      cwd: '/tmp',
+      instructions: null,
+      backgroundJobs: 'one-shot',
+    });
+    await agent.run('start it');
+    expect(provider.calls[0]?.req.tools?.map((t) => t.name)).toContain('bash_background');
+    expect(received).toEqual(['bash_background']);
+    const id = '0123456789abcdef-1';
+    const log = { parts: [], savedBytes: 0, receivedBytes: 0 };
+    expect(jobs.receive({ type: 'job.started', jobId: id })).toBeNull();
+    expect(agent.backgroundWork().jobs).toBe(1);
+    const event = {
+      type: 'job.finished' as const,
+      jobId: id,
+      at: Date.now(),
+      durationMs: 1000,
+      status: 'completed' as const,
+      exitCode: 0,
+      signal: null,
+      log,
+    };
+    expect(jobs.receive({ type: 'job.event', seq: 1, event })).toBeNull();
+    expect(agent.hasBackgroundEvents()).toBe(true);
+    expect(agent.backgroundWork().jobs).toBe(0);
+    await agent.runOnBackgroundEvents();
+    const last = provider.calls.at(-1)?.req.messages.at(-1)?.content;
+    expect(JSON.stringify(last)).toContain(`Background job ${id} completed with exit code 0`);
+    expect(agent.hasBackgroundEvents()).toBe(false);
   });
 });

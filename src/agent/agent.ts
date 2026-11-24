@@ -4,6 +4,7 @@ import { contextBudget } from '../context/budget.ts';
 import type { InstructionFile, InstructionsLoader } from '../instructions/agents-loader.ts';
 import type { Provider, ProviderEffort } from '../providers/types.ts';
 import {
+  type BackgroundJobs,
   createJobTools,
   describeJobEvent,
   type JobEvent,
@@ -209,10 +210,14 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
       ? undefined
       : Math.min(options.timeLimitMs, MAX_TIME_LIMIT_MS);
   const toolBackend = options.toolBackend;
-  // Jobs live in a registry of this process, so with any other backend their commands would run
-  // outside it.
-  if (options.backgroundJobs !== undefined && toolBackend !== IN_PROCESS_BACKEND) {
-    throw new Error('background jobs need the in-process tool backend');
+  // Jobs run where the tools do: in a registry of this process with the in-process backend, or in
+  // the backend itself, which reports them. Any other backend would leave their commands outside it.
+  if (
+    options.backgroundJobs !== undefined &&
+    toolBackend !== IN_PROCESS_BACKEND &&
+    toolBackend.jobs === undefined
+  ) {
+    throw new Error('background jobs need a tool backend that runs them');
   }
   const subagents =
     options.delegation !== true
@@ -231,11 +236,17 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
           isGitRepo: isInsideGitRepo,
         });
   const delegate = subagents === null ? [] : [createDelegateTool(subagents)];
-  let jobs: JobRegistry | null = null;
+  let jobs: BackgroundJobs | null = null;
   const jobTools: Tool[] = [];
   if (options.backgroundJobs !== undefined) {
-    jobs = new JobRegistry();
-    jobTools.push(...createJobTools(jobs, options.backgroundJobs));
+    if (toolBackend.jobs !== undefined) {
+      jobs = toolBackend.jobs;
+      jobTools.push(...createJobTools(null, options.backgroundJobs));
+    } else {
+      const registry = new JobRegistry();
+      jobs = registry;
+      jobTools.push(...createJobTools(registry, options.backgroundJobs));
+    }
   }
   const tools = new Map(
     [...options.tools, ...delegate, ...jobTools].map((tool) => [tool.name, tool]),

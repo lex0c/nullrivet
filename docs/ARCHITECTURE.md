@@ -78,6 +78,7 @@ src/
     seccomp.ts             the seccomp program installed in the sandbox
     worker.ts              the worker process: runs tools for the host over the protocol
     worker-backend.ts      the host side: a tool backend that validates every worker message
+    job-projection.ts      the host's view of the jobs the worker runs, fed by its facts
     worker-command.ts      how the worker is started, from source or from the binary
     protocol.ts, lines.ts  the JSON lines protocol and its line framing
   instructions/
@@ -451,8 +452,9 @@ The CLI edge does the rest:
 - **Continuing.** The file records the model, effort, mode and sandbox profile it was last run
   with. The model and effort are used when the invocation does not choose them; the mode and the
   sandbox only produce a warning, when a session continues in `auto` after `readonly` or without
-  the sandbox it ran in, because permissions come from the invocation alone. `AGENTS.md` files are not stored, since
-  they are added when each request is built, so a continued session reads them again from disk.
+  the sandbox it ran in, because permissions come from the invocation alone. `AGENTS.md` files
+  are not stored, since they are added when each request is built, so a continued session reads
+  them again from disk.
 - **Prompt history.** The file also holds the prompt history of the interactive session, with the
   prompt of each one-shot run added, so a continued session recalls them. A new entry alone is
   enough to save the file again.

@@ -12,6 +12,7 @@ import type { FetchLike } from '../providers/discovery.ts';
 import { type ModelOverrides, resolveModel } from '../providers/resolve.ts';
 import { type StartedSandbox, startSandbox } from '../sandbox/start.ts';
 import { BUILTIN_TOOLS } from '../tools/index.ts';
+import type { JobSession } from '../tools/jobs.ts';
 import { outputFiles } from '../tools/output-files.ts';
 import { parseCli, USAGE, UsageError } from './args.ts';
 import { formatModelList } from './list-models.ts';
@@ -99,6 +100,7 @@ export const runCli = async (io: CliIO): Promise<number> => {
       : composePrompt(config.prompt, await io.readStdin());
   if (io.signal.aborted) return fail('aborted while reading stdin', EXIT_CODES.aborted);
   const interactive = prompt.length === 0 && io.terminal !== null && !config.json;
+  const jobSession: JobSession = interactive ? 'interactive' : 'one-shot';
   if (prompt.length === 0 && !interactive) {
     return fail('no prompt given; pass the task as an argument or on stdin');
   }
@@ -140,7 +142,7 @@ export const runCli = async (io: CliIO): Promise<number> => {
         EXIT_CODES.error,
       );
     }
-    const started = await startSandbox(config.sandbox, cwd, io.env, [reports]);
+    const started = await startSandbox(config.sandbox, cwd, io.env, [reports], jobSession);
     if ('error' in started) return fail(started.error, EXIT_CODES.error);
     sandbox = started;
   }
@@ -169,8 +171,8 @@ export const runCli = async (io: CliIO): Promise<number> => {
       provider: resolved.provider,
       tools: BUILTIN_TOOLS,
       toolBackend: sandbox?.backend ?? IN_PROCESS_BACKEND,
-      // Jobs run in this process; until they can run in the sandbox, a sandboxed session has none.
-      ...(sandbox === null ? { backgroundJobs: interactive ? 'interactive' : 'one-shot' } : {}),
+      // In a sandboxed session, the jobs run in the sandbox, which reports them to the agent.
+      backgroundJobs: jobSession,
       ...(sandbox === null ? {} : { sandbox: sandbox.scope }),
       // Subagents run in the background and report when the session is free to listen; a one-shot
       // run ends with its task, so its main agent does the work itself.
