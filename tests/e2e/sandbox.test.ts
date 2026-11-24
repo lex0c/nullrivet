@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -150,6 +151,28 @@ describe.if(sandboxTestsRun)('--sandbox inspect', () => {
     },
     40_000,
   );
+
+  test('a session saved in the sandbox warns when it continues without one', async () => {
+    const { home, project } = workspace();
+    server.handle(() => ({ text: 'ok' }));
+    const env = cliEnv(server, { HOME: home });
+    const first = startCli(['--sandbox', 'inspect', '--session', 's.json', 'look'], {
+      env,
+      cwd: project,
+    });
+    expect((await first.finished).code).toBe(0);
+    expect(JSON.parse(readFileSync(join(project, 's.json'), 'utf8')).sandbox).toBe('inspect');
+    const second = startCli(['--session', 's.json', 'go on'], { env, cwd: project });
+    expect((await second.finished).code).toBe(0);
+    expect(second.events).toContainEqual(
+      expect.objectContaining({
+        type: 'warning',
+        message: expect.stringContaining(
+          'last ran its tools in the inspect sandbox and continues without one; pass --sandbox inspect',
+        ),
+      }),
+    );
+  }, 30_000);
 
   test('refuses a project that contains the home directory', async () => {
     const { home } = workspace();

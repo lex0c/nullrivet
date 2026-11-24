@@ -41,6 +41,7 @@ const state = (text = 'hello'): SessionState => {
     model: 'openai/gpt-5.4-mini',
     effort: 'medium',
     mode: 'readonly',
+    sandbox: undefined,
     cwd: '/work',
     conversation: c.snapshot(),
     history: [text],
@@ -69,6 +70,32 @@ describe('SessionFile', () => {
       history: ['hello'],
     });
     expect(reopened.data?.conversation).toEqual(state().conversation);
+  });
+
+  test('the sandbox profile is optional, checked, and saved only when there is one', async () => {
+    const parse = (sandbox: unknown) =>
+      parseSessionFile(
+        JSON.stringify({
+          format: SESSION_FORMAT,
+          version: 1,
+          createdAt: 'a',
+          updatedAt: 'b',
+          ...state(),
+          sandbox,
+        }),
+      );
+    const absent = parse(undefined);
+    expect(absent.ok && absent.data.sandbox).toBeUndefined();
+    const inspect = parse('inspect');
+    expect(inspect.ok && inspect.data.sandbox).toBe('inspect');
+    const unknown = parse('none');
+    expect(unknown.ok ? 'ok' : unknown.error).toBe('sandbox must be inspect');
+    const path = join(tempDir(), 's.json');
+    const { file } = await openOk(path);
+    await file.save(state());
+    expect(readFileSync(path, 'utf8')).not.toContain('"sandbox"');
+    await file.save({ ...state(), sandbox: 'inspect' });
+    expect(JSON.parse(readFileSync(path, 'utf8')).sandbox).toBe('inspect');
   });
 
   test('the prompt history is optional, checked, and kept to its limit when loaded', () => {

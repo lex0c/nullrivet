@@ -448,9 +448,10 @@ The CLI edge does the rest:
   detaches the file rather than saving an empty conversation over it.
 - **Exit.** The interactive session saves once more on the way out, since a turn interrupted then
   may not reach its own checkpoint.
-- **Continuing.** The file records the model, effort and mode it was last run with. The model and
-  effort are used when the invocation does not choose them; the mode only produces a warning,
-  because permissions come from the invocation alone. `AGENTS.md` files are not stored, since
+- **Continuing.** The file records the model, effort, mode and sandbox profile it was last run
+  with. The model and effort are used when the invocation does not choose them; the mode and the
+  sandbox only produce a warning, when a session continues in `auto` after `readonly` or without
+  the sandbox it ran in, because permissions come from the invocation alone. `AGENTS.md` files are not stored, since
   they are added when each request is built, so a continued session reads them again from disk.
 - **Prompt history.** The file also holds the prompt history of the interactive session, with the
   prompt of each one-shot run added, so a continued session recalls them. A new entry alone is

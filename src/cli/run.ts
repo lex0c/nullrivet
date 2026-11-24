@@ -192,6 +192,11 @@ export const runCli = async (io: CliIO): Promise<number> => {
           'this session was last run in readonly mode and continues in auto mode; pass --permission readonly to keep it read-only',
         );
       }
+      if (resumed.sandbox !== undefined && config.sandbox === undefined) {
+        warnings.push(
+          `this session last ran its tools in the ${resumed.sandbox} sandbox and continues without one; pass --sandbox ${resumed.sandbox} to keep them in it`,
+        );
+      }
       if (resumed.cwd !== workCwd) {
         warnings.push(`this session was last run in ${resumed.cwd}; it continues in ${workCwd}`);
       }

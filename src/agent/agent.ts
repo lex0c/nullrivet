@@ -106,6 +106,8 @@ export interface Agent {
   backgroundWork(): BackgroundWork;
   readonly conversation: Conversation;
   readonly bootWarnings: readonly string[];
+  // The sandbox the tools run in, fixed for the agent's life; undefined when they run in process.
+  readonly sandbox: SandboxScope | undefined;
   mode: ExecutionMode;
   effort: ProviderEffort | undefined;
   provider: Provider;
@@ -323,6 +325,7 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
   const agent: Agent = {
     conversation,
     bootWarnings,
+    sandbox: options.sandbox,
     mode: options.mode,
     effort: options.effort,
     provider: options.provider,

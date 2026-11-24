@@ -7,7 +7,13 @@ import { errorMessage } from '../errors.ts';
 import type { ProviderEffort } from '../providers/types.ts';
 import { atomicWrite } from '../tools/atomic-write.ts';
 import { isNotFoundError } from '../tools/file-io.ts';
-import { type ExecutionMode, isExecutionMode } from '../tools/policy.ts';
+import {
+  type ExecutionMode,
+  isExecutionMode,
+  isSandboxProfile,
+  SANDBOX_PROFILES,
+  type SandboxProfile,
+} from '../tools/policy.ts';
 import { EFFORT_LEVELS } from './args.ts';
 import { PROMPT_HISTORY_LIMIT, type PromptHistory } from './prompt-history.ts';
 
@@ -31,6 +37,9 @@ export interface SessionData {
   effort?: ProviderEffort;
   // Recorded to warn about a change, never applied: permissions come from the invocation only.
   mode: ExecutionMode;
+  // The sandbox the tools last ran in, absent for none. Recorded, like the mode, to warn when a
+  // conversation built in a sandbox, possibly on untrusted data, continues without one.
+  sandbox?: SandboxProfile;
   cwd: string;
   conversation: ConversationSnapshot;
   // Texts submitted in the interactive session, oldest first, for recalling them.
@@ -58,7 +67,7 @@ export const parseSessionFile = (text: string): Parsed => {
       error: `its format version ${String(value.version)} is not supported by this nullrivet`,
     };
   }
-  const { createdAt, updatedAt, model, effort, mode, cwd } = value;
+  const { createdAt, updatedAt, model, effort, mode, sandbox, cwd } = value;
   if (
     typeof createdAt !== 'string' ||
     typeof updatedAt !== 'string' ||
@@ -69,6 +78,9 @@ export const parseSessionFile = (text: string): Parsed => {
   }
   if (typeof mode !== 'string' || !isExecutionMode(mode)) {
     return { ok: false, error: 'mode must be auto or readonly' };
+  }
+  if (sandbox !== undefined && (typeof sandbox !== 'string' || !isSandboxProfile(sandbox))) {
+    return { ok: false, error: `sandbox must be ${SANDBOX_PROFILES.join(' or ')}` };
   }
   if (effort !== undefined && !EFFORT_LEVELS.includes(effort as ProviderEffort)) {
     return { ok: false, error: `effort must be one of ${EFFORT_LEVELS.join(', ')}` };
@@ -87,6 +99,7 @@ export const parseSessionFile = (text: string): Parsed => {
       model,
       ...(effort === undefined ? {} : { effort: effort as ProviderEffort }),
       mode,
+      ...(sandbox === undefined ? {} : { sandbox }),
       cwd,
       conversation: conversation.snapshot,
       history: history.slice(-PROMPT_HISTORY_LIMIT),
@@ -114,6 +127,7 @@ export interface SessionState {
   model: string;
   effort: ProviderEffort | undefined;
   mode: ExecutionMode;
+  sandbox: SandboxProfile | undefined;
   cwd: string;
   // Read while the state is serialized, before the save waits for anything, so the conversation
   // written is the one at the time of the call.
@@ -201,6 +215,7 @@ export class SessionFile {
       model: state.model,
       ...(state.effort === undefined ? {} : { effort: state.effort }),
       mode: state.mode,
+      ...(state.sandbox === undefined ? {} : { sandbox: state.sandbox }),
       cwd: state.cwd,
       conversation: state.conversation,
       history: state.history,
@@ -307,6 +322,7 @@ export class SessionLink {
       model: this.agent.provider.id,
       effort: this.agent.effort,
       mode: this.agent.mode,
+      sandbox: this.agent.sandbox?.profile,
       cwd: this.cwd,
       conversation: {
         messages: [...this.agent.conversation.messages()],

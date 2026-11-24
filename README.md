@@ -334,8 +334,8 @@ nullrivet --session ci.json "Fix the first failure"   # same conversation, next 
 - The file is written atomically after each step, compaction and task, and when you leave the
   interactive session; a crash loses at most the step in progress.
 - Continuing uses the session's last model and effort unless the invocation sets them. The
-  execution mode always comes from the invocation: pass `--permission readonly` again to keep a
-  session read-only.
+  execution mode and the sandbox always come from the invocation: pass `--permission readonly` or
+  `--sandbox inspect` again to keep them. Continuing without them prints a warning.
 - `/session <file>` saves to a new file from then on, and the previous file keeps the conversation
   so far; `/session off` stops saving; `/session` shows the state. `/clear` stops saving too.
 - The file also keeps the prompt history, one-shot prompts included, so `↑` recalls them when the
