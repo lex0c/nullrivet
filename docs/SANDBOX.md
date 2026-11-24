@@ -193,7 +193,11 @@ type WorkerToHost =
 - Bound read-only: `/usr`, and `/bin`, `/sbin`, `/lib`, `/lib64`, `/lib32` as links or
   directories as on the host; `/etc/ld.so.cache` and `/etc/alternatives` when present; and the
   worker's own files: the binary, or bun and the `src` directory. Not the package root above it,
-  which may hold a `.env` with keys.
+  which may hold a `.env` with keys. They are bound under `/.nullrivet-worker`, not at their host
+  paths, so the tools, the worker's command line and the home directory do not show where
+  nullrivet is installed. The install path is not secret all the same: `/proc/self/mountinfo`
+  names the source of every bind. Hiding it would mean copying the runtime, about 100 MB, into
+  memory for every session.
 - Generated: `/etc/passwd` and `/etc/group` with only root and the user, since the host's list
   every account; `/etc/hosts` with only `localhost`; `/etc/nsswitch.conf` naming files only; and
   `/etc/localtime` as a link to the host's zone.

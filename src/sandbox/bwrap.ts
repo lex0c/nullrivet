@@ -6,7 +6,7 @@ import { isWithinDirectory } from '../tools/paths.ts';
 import { HOST_TO_WORKER_FD, WORKER_TO_HOST_FD } from './protocol.ts';
 import { type SyscallArch, sandboxArch, seccompProgram } from './seccomp.ts';
 import type { WorkerLaunch } from './worker-backend.ts';
-import { workerCommand, workerFiles } from './worker-command.ts';
+import { SANDBOX_WORKER_DIR, sandboxedWorker } from './worker-command.ts';
 
 type Env = Record<string, string | undefined>;
 
@@ -161,6 +161,11 @@ export const sandboxProject = async (
     error: `the sandbox cannot expose ${root}: it contains ${what}. Start nullrivet in a directory that does not, such as the project's own.`,
   });
   if (root === '/') return refuse('the whole filesystem');
+  if (isWithinDirectory(SANDBOX_WORKER_DIR, root)) {
+    return {
+      error: `the sandbox keeps its own files in ${SANDBOX_WORKER_DIR}, which cannot be the project`,
+    };
+  }
   // HOME can name another directory than the account's, whose files are the user's all the same.
   for (const dir of [home, await realpathOrNull(accountHome())]) {
     if (dir !== null && isWithinDirectory(root, dir)) return refuse(`the home directory ${dir}`);
@@ -256,6 +261,7 @@ export interface InspectOptions {
 // The `inspect` profile: the project and the system read-only, a temporary home and /tmp, no
 // network, no host processes, and only the worker's own files besides.
 export const inspectLaunch = (options: InspectOptions): WorkerLaunch => {
+  const worker = sandboxedWorker(options.tools);
   const env = sandboxEnv(options.hostEnv, options.home);
   const identity = identityFiles(options.home);
   const inputs = [identity.passwd, identity.group, HOSTS, NSSWITCH].map((text) =>
@@ -306,7 +312,7 @@ export const inspectLaunch = (options: InspectOptions): WorkerLaunch => {
     '--ro-bind',
     options.root,
     options.root,
-    ...workerFiles().flatMap((path) => ['--ro-bind', path, path]),
+    ...worker.mounts.flatMap(({ source, target }) => ['--ro-bind', source, target]),
     ...options.readOnlyDirs.flatMap((path) => ['--ro-bind', path, path]),
     '--seccomp',
     String(seccompFd),
@@ -316,7 +322,7 @@ export const inspectLaunch = (options: InspectOptions): WorkerLaunch => {
     '/',
   ];
   return {
-    command: [options.host.bwrap, ...args, '--', ...workerCommand(options.tools)],
+    command: [options.host.bwrap, ...args, '--', ...worker.command],
     env,
     inputs: [...inputs, seccompProgram(options.host.arch)],
   };

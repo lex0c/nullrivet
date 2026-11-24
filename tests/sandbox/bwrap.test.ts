@@ -144,6 +144,13 @@ describe.if(runs)('the inspect sandbox', () => {
     expect(await sh(backend, 'cat /proc/keys 2>&1 | head -1')).not.toMatch(/keyring/);
   });
 
+  test('the worker runs from a fixed path, not from where nullrivet is installed', async () => {
+    const out = await sh(backend, "tr '\\0' ' ' < /proc/2/cmdline; echo; ls -a ~");
+    expect(out).toContain('/.nullrivet-worker/');
+    expect(out).not.toContain(process.execPath);
+    expect(out).not.toContain(realpathSync(join(import.meta.dir, '../../src')));
+  });
+
   test("the project's .env and bunfig.toml are not loaded", async () => {
     expect(
       await sh(backend, 'echo "dotenv=${DOTENV_LEAK:-none}"; ls /tmp/evil-ran 2>&1'),
