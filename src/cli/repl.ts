@@ -4,6 +4,7 @@ import type { AgentEvent } from '../agent/events.ts';
 import { errorMessage } from '../errors.ts';
 import { formatTokens } from '../format.ts';
 import type { ResolveResult } from '../providers/resolve.ts';
+import type { SandboxProfile } from '../tools/policy.ts';
 import { applyKey, type InputState, inputWithText } from '../tui/input-editor.ts';
 import { createKeyParser, type KeyEvent } from '../tui/keys.ts';
 import { formatPermanent } from '../tui/permanent.ts';
@@ -60,6 +61,8 @@ export interface ReplOptions {
   stdin: NodeJS.ReadStream;
   stdout: NodeJS.WriteStream;
   env: Record<string, string | undefined>;
+  // The sandbox the tools run in, for the status line and the banner.
+  sandbox?: SandboxProfile;
 }
 
 export const formatStats = (status: StatusState): string => {
@@ -97,6 +100,7 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
     let state: TuiState = createInitialState({
       model: agent.provider.id,
       mode: agent.mode,
+      ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
       effort: agent.effort,
       cwd: options.cwd,
       home: homedir(),
@@ -550,6 +554,7 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
           version: options.version,
           model: agent.provider.id,
           mode: agent.mode,
+          ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
           effort: agent.effort,
           cwd: options.cwd,
           home: homedir(),

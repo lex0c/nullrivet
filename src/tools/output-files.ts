@@ -127,9 +127,15 @@ export class OutputFiles {
   private openInDirectory(name: string): { path: string; fd: number } {
     // Resolved because TMPDIR can be relative, and the tools the model passes the path to resolve
     // relative paths against the session directory, not the process directory.
-    this.dir ??= this.fs.mkdtempSync(join(resolve(this.root()), 'nullrivet-'));
-    const path = join(this.dir, name);
+    const path = join(this.directory(), name);
     return { path, fd: this.fs.openSync(path, 'wx', 0o600) };
+  }
+
+  // The directory, created now if it does not exist yet, for a sandbox that has to expose it
+  // before the first file is written.
+  directory(): string {
+    this.dir ??= this.fs.mkdtempSync(join(resolve(this.root()), 'nullrivet-'));
+    return this.dir;
   }
 
   availableBytes(): number {

@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { stat } from 'node:fs/promises';
+import { realpath, stat } from 'node:fs/promises';
 import { contextBudget } from '../context/budget.ts';
 import { headTailSummary } from '../context/output-reduction.ts';
 import { errorMessage } from '../errors.ts';
@@ -9,7 +9,8 @@ import type { Provider, ProviderEffort } from '../providers/types.ts';
 import { optionalString, requireNonEmptyString } from '../tools/args.ts';
 import { fileSystemError } from '../tools/file-io.ts';
 import { finishOutput, outputFiles } from '../tools/output-files.ts';
-import { resolvePath } from '../tools/paths.ts';
+import { isWithinDirectory, resolvePath } from '../tools/paths.ts';
+import type { SandboxScope } from '../tools/policy.ts';
 import { type Tool, type ToolResult, toolError } from '../tools/types.ts';
 import { Conversation } from './conversation.ts';
 import type {
@@ -63,6 +64,9 @@ export interface SubagentRuntime {
   tools: readonly Tool[];
   // The parent's backend, so a subagent's calls run where the parent's do.
   toolBackend: ToolBackend;
+  // Set when the backend is a sandbox. A subagent cannot start outside its project, where the
+  // host-side checks of its directory would read files the sandbox hides.
+  sandbox?: SandboxScope;
   // Null when AGENTS.md loading is disabled.
   instructions: InstructionsLoader | null;
   stallMs: number;
@@ -121,6 +125,7 @@ export type SubagentStopReason =
   | 'context_full'
   | 'output_limit'
   | 'provider_error'
+  | 'sandbox_lost'
   | 'internal_error';
 
 const LIMIT_REASONS: Record<TurnLimit, SubagentStopReason> = {
@@ -314,6 +319,10 @@ export class SubagentRegistry implements PendingEventSource<SubagentEvent> {
 
   get defaultCwd(): string {
     return this.runtime.cwd;
+  }
+
+  get sandboxRoot(): string | undefined {
+    return this.runtime.sandbox?.root;
   }
 
   get maxSteps(): number {
@@ -574,6 +583,7 @@ export class SubagentRegistry implements PendingEventSource<SubagentEvent> {
               date: localDate(),
               isGitRepo,
               role: 'subagent',
+              ...(runtime.sandbox === undefined ? {} : { sandbox: runtime.sandbox }),
             }),
           projectContext: () => projectContext,
           instructions,
@@ -592,6 +602,8 @@ export class SubagentRegistry implements PendingEventSource<SubagentEvent> {
       );
       return {
         ...classify(result),
+        // A turn that ended on a lost backend reports it as such, not as a provider failure.
+        ...(result.backendLost === true ? { reason: 'sandbox_lost' as const } : {}),
         steps: result.steps,
         report: finalAnswer(conversation),
       };
@@ -600,6 +612,20 @@ export class SubagentRegistry implements PendingEventSource<SubagentEvent> {
     }
   }
 }
+
+// The check of a subagent's directory under a sandbox. The host reads files the sandbox hides,
+// so a path outside the project is refused before anything is read, a path inside it is resolved
+// before it is examined, and every refusal is the same: a link in the project to a path outside
+// it must not tell whether that path exists or what it is.
+const isDirectoryInside = async (root: string, path: string): Promise<boolean> => {
+  if (!isWithinDirectory(root, path)) return false;
+  try {
+    const real = await realpath(path);
+    return isWithinDirectory(root, real) && (await stat(real)).isDirectory();
+  } catch {
+    return false;
+  }
+};
 
 export const createDelegateTool = (registry: SubagentRegistry): Tool => ({
   name: 'delegate',
@@ -633,18 +659,31 @@ export const createDelegateTool = (registry: SubagentRegistry): Tool => ({
   },
   // The subagent only reads, so delegating is allowed in readonly mode.
   effect: 'read',
+  // The registry lives in this process; the subagent's own tool calls go to the session backend.
+  runsOnHost: true,
   async execute(input, ctx): Promise<ToolResult> {
     const title = requireNonEmptyString(input, 'title').slice(0, TITLE_MAX_CHARS);
     const objective = requireNonEmptyString(input, 'objective');
     const context = optionalString(input, 'context');
     const cwdArg = optionalString(input, 'cwd');
     const cwd = cwdArg === undefined ? registry.defaultCwd : resolvePath(cwdArg, ctx.cwd);
-    try {
-      if (!(await stat(cwd)).isDirectory()) {
-        return toolError('fs.not_directory', `cwd is not a directory: ${cwd}`);
+    const root = registry.sandboxRoot;
+    if (root !== undefined) {
+      if (!(await isDirectoryInside(root, cwd))) {
+        return toolError(
+          'sandbox.outside',
+          `cwd is not a directory inside the project the sandbox exposes: ${cwd}`,
+          `Use a directory inside ${root}.`,
+        );
       }
-    } catch (error) {
-      return fileSystemError(error, 'read', cwd);
+    } else {
+      try {
+        if (!(await stat(cwd)).isDirectory()) {
+          return toolError('fs.not_directory', `cwd is not a directory: ${cwd}`);
+        }
+      } catch (error) {
+        return fileSystemError(error, 'read', cwd);
+      }
     }
     // An interrupt while the directory was checked has already cancelled the subagents; one
     // registered now would escape it.

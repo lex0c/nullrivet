@@ -8,6 +8,8 @@ const AGENT_SECRET_ENV_KEYS = new Set([
   'GEMINI_API_KEY',
   'XAI_API_KEY',
   'OLLAMA_API_KEY',
+  // Never read by nullrivet, but a credential of the same account.
+  'ANTHROPIC_AUTH_TOKEN',
 ]);
 
 export const scrubAgentEnv = (

@@ -110,6 +110,8 @@ export interface TurnResult {
   message?: string;
   // Set when the reason is `budget`.
   limit?: TurnLimit;
+  // Set when the turn ended with `error` because its tool backend was lost.
+  backendLost?: true;
   usage: UsageInfo;
   steps: number;
 }
@@ -334,6 +336,7 @@ export const runTurn = async (
     endReason: AgentEndReason,
     endMessage?: string,
     endLimit?: TurnLimit,
+    backendLost?: true,
   ): TurnResult => {
     // A task stopped by its time limit ends at a limit, like the step limit, not as an interrupt.
     const timedOut = endReason === 'aborted' && signal.reason instanceof TimeLimitReached;
@@ -349,6 +352,7 @@ export const runTurn = async (
       reason,
       ...(message === undefined ? {} : { message }),
       ...(limit === undefined ? {} : { limit }),
+      ...(backendLost === undefined || reason !== 'error' ? {} : { backendLost }),
       usage,
       steps,
     };
@@ -628,6 +632,14 @@ export const runTurn = async (
     }
     await deps.checkpoint?.();
     if (signal.aborted) return end('aborted');
+    // A lost backend refuses every later call, so the turn ends instead of spending its remaining
+    // steps on refusals.
+    const lost = deps.toolBackend.failure?.() ?? null;
+    if (lost !== null) {
+      const message = `the tool sandbox stopped: ${lost}`;
+      emit({ type: 'error', message });
+      return end('error', message, undefined, true);
+    }
     overflowRecovered = false;
   }
 

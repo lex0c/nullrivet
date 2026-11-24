@@ -147,6 +147,42 @@ describe('InstructionsLoader', () => {
     expect(other.warnings[0]).toContain('was not loaded: it links to');
   });
 
+  describe('confined to a sandbox root', () => {
+    test('ignores paths outside the root, also once their links are resolved', async () => {
+      const app = await repo('app');
+      await write(join(app, 'AGENTS.md'), 'app rules');
+      const other = await repo('other');
+      await write(join(other, 'AGENTS.md'), 'other rules');
+      await symlink(other, join(app, 'linked'));
+      const loader = new InstructionsLoader({ home: root, root: app });
+      expect((await loader.discover([join(other, 'x.ts')])).files).toEqual([]);
+      expect((await loader.discover([join(app, 'linked', 'x.ts')])).files).toEqual([]);
+      expect((await loader.discover([join(app, 'x.ts')])).files.map((f) => f.content)).toEqual([
+        'app rules',
+      ]);
+      expect(await loader.governing([join(other, 'x.ts')])).toEqual([]);
+    });
+
+    test('stops the walk at the root, inside a larger repository', async () => {
+      const mono = await repo('mono');
+      await write(join(mono, 'AGENTS.md'), 'repository rules');
+      await write(join(mono, 'pkg', 'AGENTS.md'), 'package rules');
+      const loader = new InstructionsLoader({ home: root, root: join(mono, 'pkg') });
+      const { files } = await loader.discover([join(mono, 'pkg', 'src', 'a.ts')]);
+      expect(files.map((f) => f.content)).toEqual(['package rules']);
+    });
+
+    test('keeps the root when reloading', async () => {
+      const app = await repo('app');
+      await write(join(app, 'AGENTS.md'), 'app rules');
+      const other = await repo('other');
+      await write(join(other, 'AGENTS.md'), 'other rules');
+      const loader = new InstructionsLoader({ home: root, root: app });
+      expect((await loader.reload([other])).files).toEqual([]);
+      expect((await loader.fork().discover([other])).files).toEqual([]);
+    });
+  });
+
   test('truncates large files and enforces the total limit', async () => {
     const a = await repo('a');
     const b = await repo('b');

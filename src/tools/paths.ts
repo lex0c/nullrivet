@@ -16,6 +16,13 @@ export const displayPath = (abs: string, cwd: string): string => {
   return rel === '' || rel === '..' || rel.startsWith('../') || isAbsolute(rel) ? abs : rel;
 };
 
+// Whether `path` is `dir` or inside it. Both must be absolute, with symbolic links resolved when
+// the answer has to hold for the files they name.
+export const isWithinDirectory = (dir: string, path: string): boolean => {
+  const rel = relative(dir, path);
+  return rel !== '..' && !rel.startsWith('../') && !isAbsolute(rel);
+};
+
 // The `path` argument of a file tool, when it is usable; invalid input is reported by the tool.
 export const pathArgument = (input: Record<string, unknown>, cwd: string): string[] =>
   typeof input.path === 'string' && input.path.length > 0 ? [resolvePath(input.path, cwd)] : [];

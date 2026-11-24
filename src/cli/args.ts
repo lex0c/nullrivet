@@ -2,7 +2,13 @@ import { parseArgs } from 'node:util';
 import { MAX_TIME_LIMIT_MS } from '../agent/agent.ts';
 import { errorMessage } from '../errors.ts';
 import type { ProviderEffort } from '../providers/types.ts';
-import { type ExecutionMode, isExecutionMode } from '../tools/policy.ts';
+import {
+  type ExecutionMode,
+  isExecutionMode,
+  isSandboxProfile,
+  SANDBOX_PROFILES,
+  type SandboxProfile,
+} from '../tools/policy.ts';
 
 export const EFFORT_LEVELS: readonly ProviderEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
 
@@ -10,6 +16,7 @@ export interface CliConfig {
   model: string | undefined;
   effort: ProviderEffort | undefined;
   mode: ExecutionMode;
+  sandbox: SandboxProfile | undefined;
   cwd: string;
   json: boolean;
   agentsMd: boolean;
@@ -39,6 +46,7 @@ Options:
   -m, --model <id>            Model as <family>/<model>, e.g. anthropic/claude-sonnet-5-5
   -e, --effort <level>        Reasoning effort: ${EFFORT_LEVELS.join(', ')}
   -p, --permission <mode>     auto (default) or readonly
+      --sandbox <profile>     Run the tools in a sandbox (Linux, Bubblewrap): inspect
   -C, --cwd <dir>             Starting directory (does not restrict file access)
       --json                  Emit agent events as NDJSON on stdout
       --no-agents             Do not load AGENTS.md project instructions
@@ -53,8 +61,8 @@ Options:
   -v, --version               Show the version
 
 Environment:
-  NULLRIVET_MODEL, NULLRIVET_EFFORT, NULLRIVET_PERMISSION, NULLRIVET_MAX_STEPS,
-  NULLRIVET_TIMEOUT
+  NULLRIVET_MODEL, NULLRIVET_EFFORT, NULLRIVET_PERMISSION, NULLRIVET_SANDBOX,
+  NULLRIVET_MAX_STEPS, NULLRIVET_TIMEOUT
   ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY, OLLAMA_API_KEY,
   GEMINI_API_KEY, XAI_API_KEY
                               Credentials of each provider family`;
@@ -93,6 +101,14 @@ const parseEffort = (value: string | undefined, name: string): ProviderEffort | 
   return value as ProviderEffort;
 };
 
+const parseSandbox = (value: string | undefined, name: string): SandboxProfile | undefined => {
+  if (value === undefined || value === '') return undefined;
+  if (!isSandboxProfile(value)) {
+    throw new UsageError(`${name} must be ${SANDBOX_PROFILES.join(' or ')}, got '${value}'`);
+  }
+  return value;
+};
+
 const parseMode = (value: string | undefined, name: string): ExecutionMode | undefined => {
   if (value === undefined || value === '') return undefined;
   if (!isExecutionMode(value))
@@ -116,6 +132,7 @@ export const parseCli = (
         model: { type: 'string', short: 'm' },
         effort: { type: 'string', short: 'e' },
         permission: { type: 'string', short: 'p' },
+        sandbox: { type: 'string' },
         cwd: { type: 'string', short: 'C' },
         json: { type: 'boolean' },
         'no-agents': { type: 'boolean' },
@@ -147,6 +164,9 @@ export const parseCli = (
       parseMode(str('permission'), '--permission') ??
       parseMode(env.NULLRIVET_PERMISSION, 'NULLRIVET_PERMISSION') ??
       'auto',
+    sandbox:
+      parseSandbox(str('sandbox'), '--sandbox') ??
+      parseSandbox(env.NULLRIVET_SANDBOX, 'NULLRIVET_SANDBOX'),
     cwd: str('cwd') ?? defaultCwd,
     json: values.json === true,
     agentsMd: values['no-agents'] !== true,

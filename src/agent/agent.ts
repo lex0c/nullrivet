@@ -10,7 +10,7 @@ import {
   JobRegistry,
   type JobSession,
 } from '../tools/jobs.ts';
-import type { ExecutionMode } from '../tools/policy.ts';
+import type { ExecutionMode, SandboxScope } from '../tools/policy.ts';
 import { MAX_TIMER_DELAY_MS } from '../tools/process.ts';
 import type { Tool } from '../tools/types.ts';
 import { type CompactionOutcome, compactConversation } from './compactor.ts';
@@ -42,8 +42,12 @@ export const MAX_TIME_LIMIT_MS = MAX_TIMER_DELAY_MS;
 export interface AgentOptions {
   provider: Provider;
   tools: readonly Tool[];
-  // Where the tool calls of this agent and of its subagents run. In process when omitted.
-  toolBackend?: ToolBackend;
+  // Where the tool calls of this agent and of its subagents run. Required, so that a session with
+  // a sandbox profile cannot run its tools in this process by omission.
+  toolBackend: ToolBackend;
+  // Set when toolBackend is a sandbox: the system prompts state its limits, and delegate refuses
+  // to start a subagent outside its project.
+  sandbox?: SandboxScope;
   mode: ExecutionMode;
   cwd: string;
   // Null disables AGENTS.md loading.
@@ -202,7 +206,12 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
     options.timeLimitMs === undefined
       ? undefined
       : Math.min(options.timeLimitMs, MAX_TIME_LIMIT_MS);
-  const toolBackend = options.toolBackend ?? IN_PROCESS_BACKEND;
+  const toolBackend = options.toolBackend;
+  // Jobs live in a registry of this process, so with any other backend their commands would run
+  // outside it.
+  if (options.backgroundJobs !== undefined && toolBackend !== IN_PROCESS_BACKEND) {
+    throw new Error('background jobs need the in-process tool backend');
+  }
   const subagents =
     options.delegation !== true
       ? null
@@ -212,6 +221,7 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
           cwd: options.cwd,
           tools: options.tools,
           toolBackend,
+          ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
           instructions: options.instructions,
           stallMs: options.stallMs ?? DEFAULT_STALL_MS,
           maxSteps,
@@ -246,6 +256,7 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
       date: localDate(),
       isGitRepo,
       ...(subagents === null ? {} : { delegation: { maxRunning: subagents.maxRunning } }),
+      ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
     });
   // Rendered when the instructions are loaded, not for every request.
   let projectContextText = renderProjectContext(bootInstructions);

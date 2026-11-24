@@ -101,6 +101,7 @@ export const formatPermanent = (item: PermanentItem, caps: Capabilities): string
       const identity = [
         terminalText(item.model),
         item.mode,
+        ...(item.sandbox === undefined ? [] : [`${item.sandbox} sandbox`]),
         ...(item.effort === undefined ? [] : [`effort ${item.effort}`]),
       ].join(' · ');
       const lines = [

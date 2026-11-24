@@ -270,4 +270,12 @@ describe('readFileDiff', () => {
     ];
     for (const diff of malformed) expect(readFileDiff({ diff })).toBeNull();
   });
+
+  test('returns null for a diff larger than lineDiff produces', () => {
+    const line = { type: 'add', text: 'x', newLine: 1 };
+    expect(readFileDiff({ diff: { ...valid, snippet: Array(10).fill(line) } })).not.toBeNull();
+    expect(readFileDiff({ diff: { ...valid, snippet: Array(11).fill(line) } })).toBeNull();
+    const long = { ...line, text: 'x'.repeat(501) };
+    expect(readFileDiff({ diff: { ...valid, snippet: [long] } })).toBeNull();
+  });
 });

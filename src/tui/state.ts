@@ -1,5 +1,5 @@
 import type { AgentEndReason, AgentEvent, BackgroundWork, CompactReason } from '../agent/events.ts';
-import type { ExecutionMode } from '../tools/policy.ts';
+import type { ExecutionMode, SandboxProfile } from '../tools/policy.ts';
 import type { InputState } from './input-editor.ts';
 import { splitSettledMarkdown } from './markdown-stream.ts';
 
@@ -16,6 +16,8 @@ export interface UsageTotals {
 export interface StatusState {
   model: string;
   mode: ExecutionMode;
+  // Fixed for the session, shown next to the mode.
+  sandbox?: SandboxProfile;
   effort: string | undefined;
   cwd: string;
   home: string;
@@ -81,6 +83,7 @@ export type PermanentItem =
       version: string;
       model: string;
       mode: ExecutionMode;
+      sandbox?: SandboxProfile;
       effort: string | undefined;
       cwd: string;
       home: string;

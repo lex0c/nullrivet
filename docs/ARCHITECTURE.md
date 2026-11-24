@@ -17,15 +17,17 @@ file.
   NDJSON output and the interactive session are consumers of the same events.
 - **Policy enforced in code.** The execution mode is checked by the tool broker before every tool
   call, not only by choosing which tools the model sees.
-- **Not a sandbox.** The working directory is a starting point, not a boundary. Isolation, when
-  needed, comes from the operating system.
+- **Not a sandbox by default.** The working directory is a starting point, not a boundary.
+  Isolation, when needed, comes from the operating system: `--sandbox inspect` runs the tools in
+  Bubblewrap ([SANDBOX.md](SANDBOX.md)).
 
 ## Module map
 
 ```
 src/
-  main.ts                  process entry: signals, stdin, exit code
+  main.ts                  process entry: the CLI, or the sandbox worker when started as one
   cli/
+    host-main.ts           the CLI process: signals, stdin, exit code
     args.ts                flags, environment variables, defaults
     run.ts                 resolve the model, create the agent, run one task or the session
     repl.ts                interactive session controller
@@ -70,6 +72,14 @@ src/
     jobs.ts                background jobs: registry, events, and their three tools
     output-files.ts        complete output of reduced results, saved in parts to temporary files
     args.ts, paths.ts, env.ts
+  sandbox/
+    start.ts               starts the session's sandbox, or says why it cannot
+    bwrap.ts               the inspect profile: project root, mounts, environment, Bubblewrap
+    seccomp.ts             the seccomp program installed in the sandbox
+    worker.ts              the worker process: runs tools for the host over the protocol
+    worker-backend.ts      the host side: a tool backend that validates every worker message
+    worker-command.ts      how the worker is started, from source or from the binary
+    protocol.ts, lines.ts  the JSON lines protocol and its line framing
   instructions/
     agents-loader.ts       AGENTS.md discovery and rendering
   context/
@@ -381,10 +391,10 @@ only reads: the main agent is the only one that changes files or runs commands.
 - **Report.** When a run ends, the registry announces a pending event, like a job that ended. The
   runtime note holds only facts the runtime observed: id, status, a reason it chose itself when
   the run stopped early (`cancelled`, `time_limit`, `step_limit`, `context_full`, `output_limit`,
-  `provider_error`, `internal_error`), steps, tool errors and tokens. The title, any message that
-  came with the stop (possibly from a provider) and the report follow as fenced data: a model's
-  text never gets the authority of a note. The user is shown the title and the same facts instead
-  of the note (`display` of a runtime notice).
+  `provider_error`, `sandbox_lost`, `internal_error`), steps, tool errors and tokens. The title,
+  any message that came with the stop (possibly from a provider) and the report follow as fenced
+  data: a model's text never gets the authority of a note. The user is shown the title and the
+  same facts instead of the note (`display` of a runtime notice).
 - **Batches.** The job and subagent registries expose their pending events without consuming
   them, and the agent marks as delivered only those it selects for a batch. A batch takes every
   job event and the reports in the order they ended, while their data fits a budget of a quarter

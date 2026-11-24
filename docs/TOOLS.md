@@ -21,7 +21,9 @@ Common behavior:
 
 - **Paths** are absolute or relative to the starting directory; `~` is expanded. Paths outside
   the starting directory, `..` and symlinks are allowed on purpose. Access is limited only by
-  operating system permissions.
+  operating system permissions, or, with `--sandbox inspect`, by what the sandbox exposes: the
+  project read-only, a temporary home and `/tmp`, no network ([SANDBOX.md](SANDBOX.md)). The
+  background job tools are not offered in a sandbox yet.
 - **Arguments** come from the model and are validated by each tool. Invalid arguments come back as
   an `input.invalid` error result.
 - **Errors** come back to the model as text of the form `error [<code>]: <message>`, followed by a
@@ -278,11 +280,11 @@ subagent's report reaches the model later, as data.
   request, as for [background jobs](#background-jobs). The note holds only what the runtime
   observed: the id, the status (`completed`, `failed`, `cancelled` or `budget`), the reason when it
   stopped early (`cancelled`, `time_limit`, `step_limit`, `context_full`, `output_limit`,
-  `provider_error`, `internal_error`), the steps, tool errors and tokens. The title, any message
-  that came with the stop and the report follow as data, fenced like piped stdin: they are text
-  from models and services, not from the runtime. The session shows a line with the subagent's
-  title and the same facts. While the session is idle, a report starts a turn of its own. Files
-  may have changed since the subagent read them.
+  `provider_error`, `sandbox_lost`, `internal_error`), the steps, tool errors and tokens. The
+  title, any message that came with the stop and the report follow as data, fenced like piped
+  stdin: they are text from models and services, not from the runtime. The session shows a line
+  with the subagent's title and the same facts. While the session is idle, a report starts a turn
+  of its own. Files may have changed since the subagent read them.
 - **Batches.** Each request carries new report data up to a quarter of the context window
   (at least 2 KiB) and at most 32 KiB, and always at least one report; the others wait for the
   next step or turn. The data of one report stays within that budget with everything it holds: the

@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type Agent, createAgent } from '../../src/agent/agent.ts';
+import { IN_PROCESS_BACKEND } from '../../src/agent/tool-broker.ts';
 import { PromptHistory } from '../../src/cli/prompt-history.ts';
 import { SessionLink } from '../../src/cli/session-file.ts';
 import { parseSlash, runSlash, type SlashContext, suggestCommands } from '../../src/cli/slash.ts';
@@ -20,6 +21,7 @@ interface Harness {
 
 const harness = async (resolve?: (id: string) => ResolveResult, cwd = '/tmp'): Promise<Harness> => {
   const agent = await createAgent({
+    toolBackend: IN_PROCESS_BACKEND,
     provider: createMockProvider([]),
     tools: [],
     mode: 'auto',

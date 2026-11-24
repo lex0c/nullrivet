@@ -59,6 +59,29 @@ describe('composeLive', () => {
     expect(medium).not.toContain('↑12k');
   });
 
+  test('the footer and the banner name the sandbox next to the mode', () => {
+    const sandboxed = { ...base(), status: { ...base().status, sandbox: 'inspect' as const } };
+    expect(footer(sandboxed, 140)).toContain(
+      'auto mode on · inspect sandbox (shift+tab to change)',
+    );
+    expect(footer(base(), 140)).not.toContain('sandbox');
+    const banner = formatPermanent(
+      {
+        kind: 'banner',
+        version: '1.0.0',
+        model: 'ollama/m',
+        mode: 'readonly',
+        sandbox: 'inspect',
+        effort: undefined,
+        cwd: '/work',
+        home: '/home/u',
+        instructions: 0,
+      },
+      caps(80),
+    ).map(stripAnsi);
+    expect(banner).toContain('  ollama/m · readonly · inspect sandbox');
+  });
+
   test('the footer names the mode and, while a task runs, how to interrupt it', () => {
     const readonly = { ...base(), status: { ...base().status, mode: 'readonly' as const } };
     expect(footer(readonly, 140)).toContain('readonly mode on (shift+tab to change)');

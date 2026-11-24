@@ -24,6 +24,10 @@ export interface Tool {
   description: string;
   inputSchema: ProviderToolInputSchema;
   effect: ToolEffect;
+  // The tool acts on the agent rather than on files, commands or the network, such as delegate,
+  // which starts a subagent. It runs in the nullrivet process whatever backend the session uses;
+  // every other tool runs on the session's backend.
+  runsOnHost?: boolean;
   // Paths a call will change, known before it runs. The AGENTS.md files that govern them are
   // loaded first, so instructions the model has not seen reach it before the change, not after.
   targetPaths?(input: Record<string, unknown>, cwd: string): string[];

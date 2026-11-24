@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createAgent } from '../../src/agent/agent.ts';
 import { Conversation } from '../../src/agent/conversation.ts';
+import { IN_PROCESS_BACKEND } from '../../src/agent/tool-broker.ts';
 import { PromptHistory } from '../../src/cli/prompt-history.ts';
 import {
   parseSessionFile,
@@ -179,6 +180,7 @@ describe('SessionFile', () => {
 describe('SessionLink', () => {
   const agentWith = async () =>
     createAgent({
+      toolBackend: IN_PROCESS_BACKEND,
       provider: createMockProvider([]),
       tools: [],
       mode: 'auto',

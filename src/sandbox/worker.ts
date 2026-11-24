@@ -1,0 +1,201 @@
+import { dlopen, FFIType } from 'bun:ffi';
+import { createReadStream, createWriteStream } from 'node:fs';
+import { parseArgs } from 'node:util';
+import { thrownToolError } from '../agent/tool-broker.ts';
+import { errorMessage } from '../errors.ts';
+import { BUILTIN_TOOLS } from '../tools/index.ts';
+import { removeOutputFiles } from '../tools/output-files.ts';
+import { killAllProcessGroups } from '../tools/process.ts';
+import { type Tool, type ToolResult, toolError } from '../tools/types.ts';
+import { LineSplitter } from './lines.ts';
+import {
+  encodeMessage,
+  HOST_TO_WORKER_FD,
+  isTouchedPath,
+  MAX_LINE_BYTES,
+  MAX_META_BYTES,
+  MAX_TOUCHED_PATHS,
+  PROTOCOL_VERSION,
+  parseHostMessage,
+  WORKER_TO_HOST_FD,
+  type WorkerToHost,
+} from './protocol.ts';
+
+const PR_SET_DUMPABLE = 4;
+
+// The commands the worker starts run as the same user in the same namespaces. While the worker is
+// dumpable they can open its /proc entries: read its environment and descriptors, and write to the
+// protocol pipe. A process that is not dumpable has those entries owned by root, out of their
+// reach. Returns why that could not be done, or null.
+const makeNotDumpable = (): string | null => {
+  if (process.platform !== 'linux') return 'the sandbox worker runs on Linux only';
+  try {
+    const libc = dlopen('libc.so.6', {
+      prctl: {
+        args: [FFIType.i32, FFIType.u64, FFIType.u64, FFIType.u64, FFIType.u64],
+        returns: FFIType.i32,
+      },
+    });
+    try {
+      return libc.symbols.prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) === 0
+        ? null
+        : 'prctl(PR_SET_DUMPABLE, 0) failed';
+    } finally {
+      libc.close();
+    }
+  } catch (error) {
+    return `prctl could not be called: ${errorMessage(error)}`;
+  }
+};
+
+// The host stops the sandbox on a result over the protocol's bounds, so a legitimate result is
+// held to them: meta that is too large is left out, and only the first valid touched paths are
+// kept, which leaves the AGENTS.md files of the others undiscovered.
+const resultMessage = (id: string, result: ToolResult): string => {
+  const meta =
+    result.meta === undefined ||
+    Buffer.byteLength(JSON.stringify(result.meta), 'utf8') > MAX_META_BYTES
+      ? undefined
+      : result.meta;
+  const touchedPaths = result.touchedPaths?.filter(isTouchedPath).slice(0, MAX_TOUCHED_PATHS);
+  const line = encodeMessage({
+    type: 'tool.result',
+    id,
+    result: {
+      content: result.content,
+      isError: result.isError,
+      ...(meta === undefined ? {} : { meta }),
+      ...(touchedPaths === undefined ? {} : { touchedPaths }),
+    },
+  });
+  if (Buffer.byteLength(line, 'utf8') <= MAX_LINE_BYTES) return line;
+  // The host stops the sandbox on a longer line, so a result that large is replaced by an error.
+  return encodeMessage({
+    type: 'tool.result',
+    id,
+    result: toolError('tool.result_too_large', 'the tool result is too large to return'),
+  });
+};
+
+// Runs tools for the host over the protocol descriptors until the host sends worker.shutdown or
+// closes its end. The host authorizes every call; the worker only carries out the ones it is
+// sent, among the tools it was started with.
+export const runWorker = (argv: readonly string[]): void => {
+  const out = createWriteStream('', { fd: WORKER_TO_HOST_FD });
+  // Without the host there is no one to answer, so a failed write ends the worker.
+  out.on('error', () => process.exit(1));
+  const send = (message: WorkerToHost): void => {
+    out.write(encodeMessage(message));
+  };
+  const running = new Map<string, AbortController>();
+  let stopping = false;
+  const stop = (code: number): void => {
+    if (stopping) return;
+    stopping = true;
+    for (const controller of running.values()) controller.abort();
+    killAllProcessGroups();
+    removeOutputFiles();
+    out.end(() => process.exit(code));
+  };
+  const fail = (message: string): void => {
+    send({ type: 'worker.error', message });
+    stop(1);
+  };
+
+  process.on('exit', () => {
+    killAllProcessGroups();
+    removeOutputFiles();
+  });
+  // An interrupt is the host's to handle: it cancels calls over the protocol.
+  process.on('SIGINT', () => undefined);
+  process.on('SIGTERM', () => stop(143));
+  process.on('SIGHUP', () => stop(129));
+
+  const dumpable = makeNotDumpable();
+  if (dumpable !== null) {
+    fail(dumpable);
+    return;
+  }
+  let toolNames: string[];
+  try {
+    const { values } = parseArgs({
+      args: [...argv],
+      options: { tools: { type: 'string' } },
+      strict: true,
+      allowPositionals: false,
+    });
+    toolNames = (values.tools ?? '').split(',').filter((name) => name.length > 0);
+  } catch (error) {
+    fail(`invalid worker arguments: ${errorMessage(error)}`);
+    return;
+  }
+  const available = new Map(BUILTIN_TOOLS.map((tool) => [tool.name, tool]));
+  const tools = new Map<string, Tool>();
+  for (const name of toolNames) {
+    const tool = available.get(name);
+    if (tool === undefined) {
+      fail(`the worker has no tool named ${name}`);
+      return;
+    }
+    tools.set(name, tool);
+  }
+
+  const execute = async (
+    id: string,
+    name: string,
+    input: Record<string, unknown>,
+    cwd: string,
+  ): Promise<void> => {
+    const controller = new AbortController();
+    running.set(id, controller);
+    const tool = tools.get(name);
+    let result: ToolResult;
+    if (tool === undefined) {
+      result = toolError('tool.unknown', `the sandbox does not run ${name}`);
+    } else {
+      try {
+        result = await tool.execute(input, { cwd, signal: controller.signal });
+      } catch (error) {
+        result = thrownToolError(name, error);
+      }
+    }
+    running.delete(id);
+    if (!stopping) out.write(resultMessage(id, result));
+  };
+
+  const splitter = new LineSplitter(
+    MAX_LINE_BYTES,
+    (line) => {
+      // A chunk can hold more lines after the one that stopped the worker; none of them starts a
+      // call.
+      if (stopping) return;
+      const message = parseHostMessage(line);
+      if (message === null) {
+        fail('the host sent a malformed message');
+        return;
+      }
+      switch (message.type) {
+        case 'tool.execute':
+          if (running.has(message.id)) {
+            fail(`the host reused the call id ${message.id}`);
+            return;
+          }
+          void execute(message.id, message.name, message.input, message.cwd);
+          return;
+        case 'tool.cancel':
+          running.get(message.id)?.abort();
+          return;
+        case 'worker.shutdown':
+          stop(0);
+          return;
+      }
+    },
+    () => fail('a host message exceeds the line limit'),
+  );
+  const input = createReadStream('', { fd: HOST_TO_WORKER_FD });
+  input.on('data', (chunk) => splitter.push(chunk as Buffer));
+  input.on('end', () => stop(0));
+  input.on('error', () => stop(1));
+
+  send({ type: 'worker.ready', protocol: PROTOCOL_VERSION, tools: [...tools.keys()] });
+};

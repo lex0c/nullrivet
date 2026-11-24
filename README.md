@@ -13,7 +13,7 @@ inspecting git repositories.
 - **Two execution modes.** `auto` runs every tool without confirmation; `readonly` exposes only
   read tools and is enforced by the tool broker, not just by the prompt.
 - **Not confined to a directory.** `--cwd` is only the starting point. Tools can reach any path the
-  operating system allows.
+  operating system allows, unless they run in the [sandbox](#sandbox).
 - **Project instructions.** Existing `AGENTS.md` files are read and applied to the directories they
   govern.
 - **Pipe-friendly.** Plain answers on stdout, diagnostics on stderr, or NDJSON events with `--json`.
@@ -101,6 +101,7 @@ it until end of file, so programs that start nullrivet without piping anything s
 | `-m, --model <id>` | Model as `<family>/<model>`, e.g. `openrouter/deepseek/deepseek-v4-flash`. Required unless `NULLRIVET_MODEL` is set. |
 | `-e, --effort <level>` | Reasoning effort: `low`, `medium`, `high`, `xhigh`, `max`. Ignored by models without reasoning. |
 | `-p, --permission <mode>` | `auto` (default) or `readonly`. |
+| `--sandbox <profile>` | Run the tools in a sandbox. Linux with Bubblewrap; the profile is `inspect`. See [Sandbox](#sandbox). |
 | `-C, --cwd <dir>` | Starting directory for relative paths, commands and `AGENTS.md` lookup. It does not restrict file access. |
 | `--json` | Emit agent events as NDJSON on stdout. |
 | `--no-agents` | Do not load `AGENTS.md` files. |
@@ -128,6 +129,7 @@ Flags take precedence over environment variables, which take precedence over the
 | `NULLRIVET_MODEL` | Default model id. |
 | `NULLRIVET_EFFORT` | Default reasoning effort. |
 | `NULLRIVET_PERMISSION` | Default execution mode. |
+| `NULLRIVET_SANDBOX` | Default sandbox profile. |
 | `NULLRIVET_MAX_STEPS` | Default step limit, per task and per subagent. |
 | `NULLRIVET_TIMEOUT` | Default time limit per task and per subagent (without it, 30 minutes per subagent). |
 | `NULLRIVET_<FAMILY>_BASE_URL` | Endpoint of a provider family, e.g. `NULLRIVET_OPENAI_BASE_URL`. |
@@ -233,8 +235,29 @@ modes: only the main agent changes files or runs commands.
 
 `auto` is **not a sandbox**: commands run with your privileges, and anything the agent reads (files,
 command output, `AGENTS.md`) can carry prompt injection. Run nullrivet as an unprivileged user, and
-in a container or VM for risky work ([trust boundaries](docs/ARCHITECTURE.md#trust-boundaries)).
-`readonly` prevents changes made through nullrivet's tools, not the reading of sensitive files.
+in a container or VM for risky work ([trust boundaries](docs/ARCHITECTURE.md#trust-boundaries)), or
+use the [sandbox](#sandbox). `readonly` prevents changes made through nullrivet's tools, not the
+reading of sensitive files.
+
+### Sandbox
+
+`--sandbox inspect` runs the tools that touch files, commands and the network in a worker process
+inside [Bubblewrap](https://github.com/containers/bubblewrap), on Linux, for work on code you do
+not trust, such as reviewing an unknown repository:
+
+- The project (the repository around the working directory, or the directory itself) and the
+  system directories are read-only. The home directory and `/tmp` are temporary and empty of your
+  files; nothing written there reaches your machine.
+- No network, no host processes, no host environment: provider keys and other variables stay
+  outside, and the tools see a minimal environment.
+- Unix sockets and the kernel keyrings are out of reach, and processes left behind end with the
+  session.
+
+The execution mode still applies inside: `readonly` with `inspect` only reads. Background jobs are
+not offered in a sandbox yet. The sandbox does not limit CPU, memory or the number of processes,
+so it is not a defence against code meant to exhaust them. A sandbox that cannot start stops the
+session with the reason; nullrivet never falls back to running the tools without it. Details and
+the profiles planned next: [docs/SANDBOX.md](docs/SANDBOX.md).
 
 ## Tools
 
@@ -348,8 +371,8 @@ as CI does. Evaluations against real models: [docs/EVALS.md](docs/EVALS.md).
 - [docs/MODELS.md](docs/MODELS.md): model resolution, the catalog, discovery and provider settings.
 - [docs/TUI.md](docs/TUI.md): the interactive interface: rendering, streaming Markdown, keys.
 - [docs/EVALS.md](docs/EVALS.md): evaluations against real models.
-- [docs/SANDBOX.md](docs/SANDBOX.md): proposal, not implemented: an opt-in sandbox for the tools
-  and a network scope for authorized security work.
+- [docs/SANDBOX.md](docs/SANDBOX.md): the `inspect` sandbox, and the design of the profiles and
+  the network scope planned for authorized security work.
 
 ## License
 

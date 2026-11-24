@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  BackendLostError,
   executeToolCall,
   IN_PROCESS_BACKEND,
   type ToolBackend,
@@ -173,5 +174,71 @@ describe('dispatch to the backend', () => {
     );
     expect(result.meta?.errorCode).toBe('tool.crashed');
     expect(result.content).toContain('bash failed unexpectedly: worker exited');
+  });
+});
+
+describe('routing and a lost backend', () => {
+  const recording = (failure: () => string | null = () => null) => {
+    const received: string[] = [];
+    const backend: ToolBackend = {
+      execute: async (tool) => {
+        received.push(tool.name);
+        return { content: 'from backend', isError: false };
+      },
+      failure,
+    };
+    return { backend, received };
+  };
+
+  test('runs a tool that acts on the host in process, and every other on the backend', async () => {
+    calls.length = 0;
+    const { backend, received } = recording();
+    const tools = [{ ...ok('delegate', 'read'), runsOnHost: true }, ok('read_file', 'read')];
+    const host = await executeToolCall(
+      { id: 'c1', name: 'delegate', input: {} },
+      context(tools, { backend }),
+    );
+    const sandboxed = await executeToolCall(
+      { id: 'c2', name: 'read_file', input: {} },
+      context(tools, { backend }),
+    );
+    expect(host.content).toBe('delegate ran');
+    expect(sandboxed.content).toBe('from backend');
+    expect(calls).toEqual(['delegate']);
+    expect(received).toEqual(['read_file']);
+  });
+
+  test('refuses every call once the backend is lost, host tools included', async () => {
+    calls.length = 0;
+    const { backend, received } = recording(() => 'the worker exited');
+    const tools = [{ ...ok('delegate', 'read'), runsOnHost: true }, ok('read_file', 'read')];
+    for (const name of ['read_file', 'delegate']) {
+      const result = await executeToolCall(
+        { id: 'c1', name, input: {} },
+        context(tools, { backend }),
+      );
+      expect(result.meta?.errorCode).toBe('sandbox.lost');
+      expect(result.content).toContain(
+        `${name} was not executed: the tool sandbox stopped (the worker exited)`,
+      );
+    }
+    expect(received).toEqual([]);
+    expect(calls).toEqual([]);
+  });
+
+  test('reports a call the backend lost while it ran as such, not as a crash', async () => {
+    const backend: ToolBackend = {
+      execute: async () => {
+        throw new BackendLostError('the worker exited');
+      },
+    };
+    const result = await executeToolCall(
+      { id: 'c1', name: 'bash', input: {} },
+      context([ok('bash', 'exec')], { backend }),
+    );
+    expect(result.meta?.errorCode).toBe('sandbox.lost');
+    expect(result.content).toContain(
+      'bash did not complete: the tool sandbox stopped (the worker exited)',
+    );
   });
 });

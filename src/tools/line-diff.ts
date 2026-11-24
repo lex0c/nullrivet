@@ -380,7 +380,9 @@ const isDiffLine = (value: unknown): value is DiffLine => {
   );
 };
 
-// The diff in a tool result's meta, or null when there is none or it is not well formed.
+// The diff in a tool result's meta, or null when there is none or it is not well formed. The meta
+// may come from a process outside nullrivet, such as a sandboxed worker, so a diff larger than the
+// one lineDiff produces is refused rather than rendered.
 export const readFileDiff = (meta: Record<string, unknown> | undefined): FileDiff | null => {
   const value = meta?.diff;
   if (typeof value !== 'object' || value === null) return null;
@@ -388,6 +390,9 @@ export const readFileDiff = (meta: Record<string, unknown> | undefined): FileDif
   const count = (key: string): boolean =>
     typeof diff[key] === 'number' && Number.isInteger(diff[key]) && (diff[key] as number) >= 0;
   if (!count('added') || !count('removed') || !count('hiddenChanges')) return null;
-  if (!Array.isArray(diff.snippet) || !diff.snippet.every(isDiffLine)) return null;
+  if (!Array.isArray(diff.snippet) || diff.snippet.length > SNIPPET_LINES) return null;
+  if (!diff.snippet.every((line) => isDiffLine(line) && line.text.length <= MAX_LINE_CHARS)) {
+    return null;
+  }
   return value as FileDiff;
 };

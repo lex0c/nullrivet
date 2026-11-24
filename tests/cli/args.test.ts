@@ -34,3 +34,20 @@ describe('--timeout', () => {
     expect(parseCli(['go'], {}, '/tmp').timeLimitMs).toBeUndefined();
   });
 });
+
+describe('--sandbox', () => {
+  test('takes a known profile, from the flag before the environment', () => {
+    expect(parseCli(['--sandbox', 'inspect', 'go'], {}, '/tmp').sandbox).toBe('inspect');
+    expect(parseCli(['go'], { NULLRIVET_SANDBOX: 'inspect' }, '/tmp').sandbox).toBe('inspect');
+    expect(parseCli(['go'], {}, '/tmp').sandbox).toBeUndefined();
+  });
+
+  test('refuses any other profile, naming the source', () => {
+    expect(() => parseCli(['--sandbox', 'security', 'go'], {}, '/tmp')).toThrow(
+      "--sandbox must be inspect, got 'security'",
+    );
+    expect(() => parseCli(['go'], { NULLRIVET_SANDBOX: 'none' }, '/tmp')).toThrow(
+      "NULLRIVET_SANDBOX must be inspect, got 'none'",
+    );
+  });
+});

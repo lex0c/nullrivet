@@ -1,7 +1,9 @@
 # Sandbox and engagement scope
 
-Status: proposal. Phase 1, the ToolBroker, is implemented; nothing else is. The document records
-the design, the facts checked on a Linux host while preparing it, and the decisions taken on it.
+Status: phases 1 and 2a are implemented: the ToolBroker, and the worker with the `inspect` profile
+(`--sandbox inspect`). Background jobs in the sandbox (2b) and the later phases are not. The
+document records the design, the facts checked on a Linux host while preparing it, and the
+decisions taken on it.
 
 ## Purpose
 
@@ -75,9 +77,13 @@ nullrivet host process                         sandbox (bubblewrap)
 - **ToolBroker.** One place where every tool call is authorized and dispatched
   (`src/agent/tool-broker.ts`). It checks the mode and the `AGENTS.md` files a write needs, then
   hands the call to a backend; subagents' calls go through it too. The in-process backend runs the
-  tool in the nullrivet process, as before. Later phases add the profile and the engagement window
-  to the checks, and the worker as a backend.
-- **Worker.** A Bun process started inside the sandbox once per session. It hosts the same tool
+  tool in the nullrivet process, as before; the worker backend (`src/sandbox/worker-backend.ts`)
+  runs it in the sandbox. A tool that acts on the agent rather than on files, commands or the
+  network declares it (`delegate`) and runs in process whatever the backend: the broker decides,
+  not the backend, since a worker receives only a tool's name. Later phases add the engagement
+  window to the checks.
+- **Worker.** A Bun process started inside the sandbox once per session: nullrivet's own entry
+  point with a reserved argument, from source or from the compiled binary. It hosts the same tool
   implementations and loads only those the profile allows. The file tools must run there too: a
   sandbox around `bash` alone would leave `read_file` and `grep` reading the host.
 - **What stays on the host.** The agent loop, the providers and their keys, the TUI, the session
@@ -124,8 +130,18 @@ be set up stops the session with the reason: no profile falls back to running un
 
 ## Worker protocol
 
-One JSON object per line in each direction, over the worker's stdin and stdout. stderr is read
-for diagnostics only.
+One JSON object per line in each direction, over descriptors 3 (host to worker) and 4 (worker to
+host). The worker's stdin and stdout are `/dev/null`, and its stderr is shown only to explain a
+start that failed. Bubblewrap's init process, PID 1 of the sandbox, keeps the sandbox's standard
+streams open: with the protocol on stdout, `echo ... > /proc/1/fd/1` from a command reached the
+host's pipe. Checked with the descriptors: the init process holds only `/dev/null`, its stderr
+socket (which `/proc` cannot open) and an eventfd.
+
+The worker's first action is `prctl(PR_SET_DUMPABLE, 0)`, through `bun:ffi`. Commands run as the
+same user in the same namespaces, and a dumpable worker would let them read its environment and
+descriptors through `/proc/2` and write to the protocol. Checked: `/proc/2/fd` and
+`/proc/2/environ` refuse a command with "Permission denied". A worker that cannot make the call
+does not start.
 
 ```ts
 type HostToWorker =
@@ -136,54 +152,104 @@ type HostToWorker =
 type WorkerToHost =
   | { type: 'worker.ready'; protocol: 1; tools: string[] }
   | { type: 'tool.result'; id: string; result: ToolResult }
-  | { type: 'job.event'; event: JobEvent }
   | { type: 'worker.error'; message: string };
+// Phase 2b adds job events.
 ```
 
 - **Correlation.** The host generates the ids, unique per session. Each `tool.execute` gets exactly
   one `tool.result`.
 - **Untrusted input.** The worker executes commands the model chose, so everything it sends is
-  data to validate, not a statement to trust. The host checks each message against its type, the
-  sizes a `ToolResult` may have today and the job identifiers it knows. A line over 8 MiB, a
-  malformed message, a result for an unknown or already answered id, or a tool name the host did
-  not send stops the sandbox.
+  data to validate, not a statement to trust. The host checks each message against its type, with
+  no field missing or added, and bounds what a result may carry: `meta` up to 64 KiB, at most 64
+  touched paths, each absolute, normalized and without NUL. The worker holds its own results to
+  these bounds before sending them, since a tool can exceed them (git reports every path it was
+  given): it leaves out a larger `meta` and keeps the first 64 valid paths. A line over 8 MiB, a
+  malformed message, a result for an unknown or already answered id, a message of an unknown type
+  or a `worker.error` stops the sandbox. A call to a tool the worker does not run is refused on the
+  host without stopping it.
 - **Readiness.** The host sends nothing before `worker.ready`, whose tool list must match what the
-  profile allows.
+  profile allows, within 10 s of the start.
 - **Cancellation.** `tool.cancel` aborts the call's signal in the worker, which still answers with
-  the interrupted result. A call that does not answer within the kill grace of the process code
-  (2 s) counts as failed.
-- **Background jobs.** Job events are forwarded as `job.event` and feed the existing job
-  notices, so the model sees jobs as today.
+  the interrupted result. A cancelled command gets SIGTERM, SIGKILL after the 2 s kill grace, and up
+  to the same grace for its output to close, so the host waits twice the grace plus 3 s (7 s).
+  A call that does not answer in that time stops the sandbox.
+- **Background jobs** (phase 2b). Job events are forwarded as `job.event` and feed the existing
+  job notices, so the model sees jobs as today. Until then a sandboxed session offers no job
+  tools, and the agent refuses background jobs with any backend but the in-process one.
 - **Disconnection.** If the worker exits or its pipe closes, pending calls fail with the reason,
   jobs are reported as lost, and the session stops using tools: a session whose boundary failed
   does not continue on another one. The same holds after a protocol violation. The backend then
   stays in a terminal state that the broker checks before every call: each later call is refused
-  with an error code of its own, not as a crash of the tool, and is never sent to the in-process
-  backend. A tool that fails, times out or rejects its arguments is a result, and changes nothing
-  in the backend's state.
+  with `sandbox.lost`, not as a crash of the tool, and is never sent to the in-process backend.
+  The turn ends with an error after the batch, and a subagent's report says `sandbox_lost`. A tool
+  that fails, times out or rejects its arguments is a result, and changes nothing in the
+  backend's state.
 - **Shutdown.** `worker.shutdown` at exit; the sandbox is torn down whether or not the worker
-  answers.
+  answers. Bubblewrap runs in a process group of its own, which the exit handler kills with the
+  command groups, and `--die-with-parent` ends the sandbox when nullrivet is killed outright.
 
 ## Files
 
-- Bound read-only: `/usr` and the links that lead to it (`/bin`, `/lib`, `/lib64`), the parts of
-  `/etc` tools need (`/etc/ssl`, `/etc/passwd`, a generated `/etc/hosts` and `/etc/resolv.conf`),
-  and the Bun binary.
-- The project at its host path, so paths in tool results and in the conversation are the same
+- Bound read-only: `/usr`, and `/bin`, `/sbin`, `/lib`, `/lib64`, `/lib32` as links or
+  directories as on the host; `/etc/ld.so.cache` and `/etc/alternatives` when present; and the
+  worker's own files: the binary, or bun and the `src` directory. Not the package root above it,
+  which may hold a `.env` with keys.
+- Generated: `/etc/passwd` and `/etc/group` with only root and the user, since the host's list
+  every account; `/etc/hosts` with only `localhost`; `/etc/nsswitch.conf` naming files only; and
+  `/etc/localtime` as a link to the host's zone.
+- The project at its real path, so paths in tool results and in the conversation are the same
   inside and outside: read-only in `inspect`, an overlay in `workspace` and `security`.
-- The session's saved output directory, created by the host in memory-backed storage and bound
-  writable, so the host reads saved output without asking the worker. The worker writes its files
-  directly in it, without a subdirectory of its own.
-- New `/proc`, minimal `/dev`, tmpfs `/tmp` and home. `/sys` is not bound from the host. Checked:
-  with the host root bound, `/sys/class/net` listed the host's interfaces from inside a sandbox
-  with its own network namespace.
+- In phase 2a the worker's saved output stays in the sandbox's own `/tmp`, and the directory where
+  the host saves subagent reports is bound read-only at its path. The writable directory shared
+  with the host, described under Files the worker writes, comes with its first consumer, the
+  evidence log (phase 5).
+- New `/proc`, with `/proc/keys` and `/proc/key-users` masked; minimal `/dev`; tmpfs `/tmp`
+  (1 GiB) and home (256 MiB); and the root remounted read-only last, since Bubblewrap's own root
+  is otherwise writable. `/sys` is not bound from the host. Checked: with the host root bound,
+  `/sys/class/net` listed the host's interfaces from inside a sandbox with its own network
+  namespace.
 - Never bound: the host home, `~/.ssh`, `~/.aws` and other credential directories, the Docker
-  socket, `SSH_AUTH_SOCK`, and the saved output of other sessions.
+  socket, `SSH_AUTH_SOCK`, `/run`, and the saved output of other sessions.
+
+The project root is the nearest ancestor of the working directory with a `.git` entry, or the
+working directory itself, with symbolic links resolved. It is refused when it is `/`, the home
+directory or one of its ancestors, or when it contains `/tmp`, `/run`, `$XDG_RUNTIME_DIR`, the
+directory of `SSH_AUTH_SOCK` or the Docker socket: a project inside `/tmp` is accepted, `/tmp`
+itself is not. A `.git` that is a file, as in a worktree or a submodule, is not followed, because
+a repository could point it anywhere; git inside the sandbox then cannot find the repository.
+
+The environment is built from nothing: a fixed `PATH` of system directories, since a relative
+entry of the host's would run a program planted in the project, then `HOME`, `TMPDIR`, `USER`,
+`LOGNAME`, `LANG`, `TZ` and `LC_*`. Bubblewrap is started with the same environment, not only told
+to clear it: its init process keeps the environment it was started with, readable from inside
+through `/proc/1/environ`.
+
+### Seccomp
+
+Bubblewrap installs a seccomp program (`src/sandbox/seccomp.ts`) before the worker starts, and
+every command inherits it. It denies with EPERM:
+
+- `keyctl`, `add_key` and `request_key`: the kernel keyrings are shared with the host, and can
+  hold credentials such as Kerberos tickets;
+- `socket` with `AF_UNIX`: a read-only bind does not stop a connection to a host socket inside the
+  project, including one created after the start. `socketpair` stays allowed, since it only makes
+  a pair connected to itself. Abstract sockets belong to the network namespace.
+- `io_uring_setup`, `io_uring_enter` and `io_uring_register`: an io_uring operation creates a
+  socket without the `socket` call, so the rule above would not hold. Checked: a command in the
+  sandbox created a Unix socket through io_uring and connected to a host socket in the project
+  until these calls were denied.
+- on x86_64, any call of the x32 ABI, which shares the architecture value and would otherwise
+  reach the same calls under other numbers.
+
+A call through another architecture's ABI, such as i386 through `int 0x80`, gets ENOSYS. The
+supported architectures are x86_64 and arm64. Checked in Bubblewrap 0.13 with the program: Bun,
+its process spawning, worker threads and git run; `socket(AF_UNIX)`, `io_uring_setup`, `keyctl`
+and `keyctl` with the x32 bit get EPERM.
 
 ### Memory-backed storage
 
-Writable layers live in `$XDG_RUNTIME_DIR`, a per-user tmpfs on systems with systemd, so an
-abnormal exit leaves nothing on disk, and what remains is removed when the user's last session
+From phase 3, writable layers live in `$XDG_RUNTIME_DIR`, a per-user tmpfs on systems with systemd,
+so an abnormal exit leaves nothing on disk, and what remains is removed when the user's last session
 ends or at reboot. The variable's value is not taken on trust: the host checks with `statfs` that
 the directory is a tmpfs, and that it belongs to the user with mode 0700. Checked: `statfs` in Bun
 reported tmpfs (`0x1021994`) for the runtime directory and another type for `/home`. Without a
@@ -192,9 +258,10 @@ directory that passes, the profiles that need one stop, unless the operator pass
 
 ### Files the worker writes
 
-The worker can create any entry in the saved output directory, including a symbolic link to a host
-file it cannot see. A host that followed it would read that file with its own access, on the
-worker's behalf, and could copy it into the evidence log. So the host:
+Phase 2a shares no writable directory with the worker; this applies once a phase does. The worker
+can create any entry in such a directory, including a symbolic link to a host file it cannot see. A
+host that followed it would read that file with its own access, on the worker's behalf, and could
+copy it into the evidence log. So the host:
 
 - never opens a path as a worker message gives it: a path is accepted only when it names an entry
   directly inside the directory the host created, in the fixed pattern of the output code
@@ -419,15 +486,23 @@ CPU, memory and process limits use cgroups when the user's systemd manager can c
 which stop the session when unavailable, a missing limit is a warning: limits protect stability,
 not the boundary.
 
+Not implemented yet. In phase 2a only the sizes of the sandbox's `/tmp` and home are limited:
+`inspect` isolates files, network, processes and credentials, and gives no protection against a
+command that exhausts CPU, memory or the process table. Code meant to do that waits for these
+limits or for the virtual machine backend.
+
 ## Lifecycle
 
-- The sandbox starts at the first tool call of a session with a profile, and lives until exit or
+- The sandbox starts with the session, before the model is resolved, so a session that cannot
+  have one stops with the reason before any request leaves the machine. It lives until exit or
   until a ChangeSet is applied, after which the next tool call starts a new one. Background jobs
   and saved output need a shared, lasting environment; one sandbox per call would lose both.
 - Bubblewrap keeps a minimal reaper of its own as PID 1 of the sandbox's PID namespace, so the
   worker is not PID 1. When the sandbox's main process ends, the namespace ends with every
   process in it. Checked: a process left behind that ignores SIGTERM and writes to `/dev/null` did
   not survive the end of the sandbox. `--die-with-parent` ties the sandbox to the nullrivet process.
+  Tested: a process left with `setsid` that ignores SIGTERM ends when the session closes, when
+  nullrivet gets SIGTERM or SIGKILL, and when a command kills the worker.
 - Timeouts and aborts reach the worker as `tool.cancel`, and the worker signals the command's
   process group inside the namespace, as `src/tools/process.ts` does today.
 - `/clear` keeps the sandbox, as it keeps background jobs; exit destroys it.
@@ -446,24 +521,29 @@ not the boundary.
 ## Phases
 
 0. **Checks.** Bun inside the sandbox, the end of the PID namespace, rootless nftables, nested user
-   namespaces, `no_new_privs`, `openat2` through `bun:ffi`, and `statfs` and `O_NOFOLLOW` in Bun
-   (done). pasta with the firewall, and ruleset changes from outside a running sandbox: the tests
-   listed under User-mode networking.
+   namespaces, `no_new_privs`, `openat2` through `bun:ffi`, `statfs` and `O_NOFOLLOW` in Bun, and
+   the seccomp program with Bun, its spawning and worker threads (done). pasta with the firewall,
+   and ruleset changes from outside a running sandbox: the tests listed under User-mode
+   networking.
 1. **ToolBroker** (done). Every tool call goes through the broker and the in-process backend. No
    change in behavior; existing tests pass with only the backend added to their setup.
-2. **Worker and `inspect`.** The worker protocol, first tested without a sandbox, then inside
-   Bubblewrap with no network. The rules for files the worker writes apply from this phase, since
-   the saved output directory is shared from the start. Three points the in-process backend does
-   not raise:
-   - The broker, not the backend, decides which tools run on the host, from a declaration on
-     each tool: a worker receives only a tool's name, and has no `delegate`.
-   - `delegate` checks its directory argument with the host's view of the files; under a profile,
-     that check has to use the sandbox's view.
-   - The backend becomes a required option of the agent, chosen explicitly by the command line,
-     so a session with a profile cannot run its tools in process by omission.
-   - Routing tests: `delegate` runs only on the host; the file, `git`, `bash` and job tools run in
-     the worker; subagents use the same backend; a routing failure never falls back to the
-     in-process backend.
+2. **Worker and `inspect`** (2a, done). The worker protocol, tested first with the worker started
+   directly and with a worker that breaks the protocol, then inside Bubblewrap with no network.
+   With it:
+   - the broker, not the backend, decides which tools run on the host, from a declaration on each
+     tool (`runsOnHost`): a worker receives only a tool's name, and has no `delegate`;
+   - under a profile, `delegate` and the `AGENTS.md` discovery consider only paths inside the
+     project, before and after their links are resolved;
+   - the backend is a required option of the agent, chosen by the command line, so a session with
+     a profile cannot run its tools in process by omission;
+   - routing tests: `delegate` runs in process, every other tool and the subagents' calls on the
+     session backend, and a lost backend is never replaced by the in-process one.
+2b. **Background jobs in the worker.** The worker is the source of truth for the processes, their
+   logs and their state; `bash_jobs` and `bash_kill` are forwarded to it like any other call. The
+   host keeps only a projection of what the agent loop and the interface read synchronously: each
+   job's id, status, start and end, and whether it is ready. It is fed by job events that carry a
+   sequence number, which gives marking events as delivered an explicit meaning and keeps an event
+   from counting twice. Two parties never control the same processes.
 3. **`workspace`.** The ChangeSet, with the baseline, the stop before reading and the
    descriptor-based resolution, specified and tested on its own before the overlay is wired in.
 4. **`security`.** Only after the network isolation tests pass: the engagement file, the ruleset,
@@ -489,3 +569,5 @@ behind; read a provider key from the environment; send the host a malformed or o
 3. **passt as a requirement of `security`:** accepted. A namespace whose only way out is an HTTP
    proxy cannot carry the non-HTTP tools security work needs.
 4. **macOS:** no sandbox profile until the virtual machine backend.
+5. **Background jobs in a sandbox:** deferred to phase 2b. Until then a sandboxed session offers
+   no job tools, has no job registry, and a direct call to a job tool is refused as unknown.

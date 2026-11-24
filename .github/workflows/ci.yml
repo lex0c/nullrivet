@@ -41,6 +41,15 @@ jobs:
         with:
           bun-version: 1.4.4
       - run: bun install --frozen-lockfile
+      # The sandbox tests need Bubblewrap and unprivileged user namespaces, which Ubuntu's
+      # AppArmor policy restricts by default. With NULLRIVET_TEST_REQUIRE_SANDBOX set, a sandbox
+      # that cannot start fails those tests instead of skipping them.
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          echo NULLRIVET_TEST_REQUIRE_SANDBOX=1 >> "$GITHUB_ENV"
       - run: bun test
       # The end-to-end tests again, against the compiled executable, which resolves its embedded
       # modules differently from the sources.

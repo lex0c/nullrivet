@@ -1,9 +1,10 @@
 import { open, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, relative } from 'node:path';
+import { dirname, join } from 'node:path';
 import { errorMessage } from '../errors.ts';
 import { stripAnsi } from '../sanitize/ansi.ts';
 import { fenced } from '../sanitize/fence.ts';
+import { isWithinDirectory } from '../tools/paths.ts';
 
 export const INSTRUCTIONS_FILE_NAME = 'AGENTS.md';
 const DEFAULT_MAX_FILE_BYTES = 16 * 1024;
@@ -29,6 +30,11 @@ export interface InstructionsLoaderOptions {
   maxTotalBytes?: number;
   maxDepth?: number;
   home?: string;
+  // Under a sandbox profile, the project directory the sandbox exposes, with symbolic links
+  // resolved. Paths outside it are ignored, before and after their links are resolved, and the
+  // walk stops at it: the paths come from the model and from the sandboxed worker, and the host
+  // must not read, on their behalf, an AGENTS.md the sandbox does not show.
+  root?: string;
 }
 
 const exists = async (path: string): Promise<boolean> => {
@@ -74,12 +80,14 @@ export class InstructionsLoader {
   private readonly maxTotalBytes: number;
   private readonly maxDepth: number;
   private readonly home: string;
+  private readonly root: string | undefined;
 
   constructor(options: InstructionsLoaderOptions = {}) {
     this.maxFileBytes = options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
     this.maxTotalBytes = options.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES;
     this.maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
     this.home = options.home ?? homedir();
+    this.root = options.root;
   }
 
   list(): InstructionFile[] {
@@ -107,6 +115,7 @@ export class InstructionsLoader {
       maxTotalBytes: this.maxTotalBytes,
       maxDepth: this.maxDepth,
       home: this.home,
+      ...(this.root === undefined ? {} : { root: this.root }),
     });
   }
 
@@ -163,11 +172,13 @@ export class InstructionsLoader {
   }
 
   private async startDirectory(path: string): Promise<string | null> {
+    if (!this.confined(path)) return null;
     let current = path;
     for (let depth = 0; depth <= this.maxDepth; depth++) {
       try {
         const info = await stat(current);
-        return await realpath(info.isDirectory() ? current : dirname(current));
+        const start = await realpath(info.isDirectory() ? current : dirname(current));
+        return this.confined(start) ? start : null;
       } catch {
         // A path that does not exist yet (a file about to be created) is governed by the
         // instructions of its nearest existing ancestor.
@@ -192,7 +203,7 @@ export class InstructionsLoader {
     let current = start;
     for (let depth = 0; depth < this.maxDepth; depth++) {
       dirs.push(current);
-      if (await this.isGitRoot(current)) break;
+      if (current === this.root || (await this.isGitRoot(current))) break;
       const parent = dirname(current);
       if (parent === current || parent === '/') break;
       if (parent === this.home && !(await this.isGitRoot(parent))) break;
@@ -215,13 +226,17 @@ export class InstructionsLoader {
     }
     if (resolved !== null && resolved !== candidate) {
       const boundary = await this.linkBoundary(dir);
-      if (!isWithin(boundary, resolved)) {
+      if (!isWithinDirectory(boundary, resolved) || !this.confined(resolved)) {
         warnings?.push(`${candidate} was not loaded: it links to ${resolved}, outside ${boundary}`);
         resolved = null;
       }
     }
     this.lookups.set(dir, resolved);
     return resolved;
+  }
+
+  private confined(path: string): boolean {
+    return this.root === undefined || isWithinDirectory(this.root, path);
   }
 
   // The files are loaded without any action of the model and sent to the provider, so an
@@ -265,11 +280,6 @@ export class InstructionsLoader {
     return file;
   }
 }
-
-const isWithin = (root: string, path: string): boolean => {
-  const rel = relative(root, path);
-  return rel !== '..' && !rel.startsWith('../') && !isAbsolute(rel);
-};
 
 export const renderInstructionFiles = (files: readonly InstructionFile[]): string =>
   files

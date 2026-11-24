@@ -59,4 +59,29 @@ describe('buildSystemPrompt', () => {
     expect(before(prompt('readonly'))).toBe(before(prompt('auto')));
     expect(before(prompt('auto')).length).toBeGreaterThan(1_000);
   });
+
+  test('under a sandbox, states its limits instead of the full access of the user', () => {
+    const sandboxed = (mode: 'auto' | 'readonly') =>
+      buildSystemPrompt({
+        cwd: '/work',
+        mode,
+        platform: 'linux',
+        date: '2026-01-02',
+        isGitRepo: true,
+        sandbox: { profile: 'inspect', root: '/work' },
+      });
+    const auto = sandboxed('auto');
+    expect(auto).not.toContain('There is no sandbox');
+    expect(auto).toContain('inside the sandbox described below');
+    expect(auto).toContain('# Sandbox: inspect');
+    expect(auto).toContain(
+      'The project directory "/work" and the system directories are read-only',
+    );
+    expect(auto).toContain('There is no network');
+    expect(auto).toContain('Background jobs are not available');
+    expect(auto).not.toContain('paths outside it are accessible');
+    expect(sandboxed('readonly')).toContain('# Sandbox: inspect');
+    expect(prompt('auto')).toContain('There is no sandbox');
+    expect(prompt('auto')).not.toContain('# Sandbox');
+  });
 });
