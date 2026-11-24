@@ -1,5 +1,13 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sandboxTestsRun } from '../helpers/sandbox.ts';
@@ -159,25 +167,40 @@ describe.if(sandboxTestsRun)('--sandbox inspect', () => {
   }, 30_000);
 });
 
-describe.if(process.platform === 'linux')('--sandbox without Bubblewrap', () => {
-  test('stops the session with the reason instead of running unsandboxed', async () => {
+describe('--sandbox and the host it runs on', () => {
+  test('never runs a bwrap found on PATH, such as one a project put there', async () => {
     const { home, project } = workspace();
-    // A PATH with bun and nothing else, so the CLI runs from source but finds no bwrap.
-    const bin = join(tempDir(), 'bin');
-    mkdirSync(bin);
-    symlinkSync(process.execPath, join(bin, 'bun'));
-    const requestsBefore = server.requests.length;
+    const planted = join(project, 'node_modules', '.bin');
+    mkdirSync(planted, { recursive: true });
+    const marker = join(project, 'planted-bwrap-ran');
+    writeFileSync(join(planted, 'bwrap'), `#!/bin/sh\ntouch '${marker}'\nexit 1\n`, {
+      mode: 0o755,
+    });
+    symlinkSync(process.execPath, join(planted, 'bun'));
+    server.handle(toolsThenText([{ name: 'bash', args: { command: 'echo ran' } }]));
     const cli = startCli(['--sandbox', 'inspect', 'look'], {
-      env: cliEnv(server, { HOME: home, PATH: bin }),
+      env: cliEnv(server, { HOME: home, PATH: `${planted}:${process.env.PATH ?? ''}` }),
       cwd: project,
     });
-    expect((await cli.finished).code).toBe(1);
-    expect(cli.events).toContainEqual(
-      expect.objectContaining({
-        type: 'error',
-        message: expect.stringContaining('Bubblewrap (bwrap)'),
-      }),
-    );
-    expect(server.requests.length).toBe(requestsBefore);
+    await cli.finished;
+    expect(existsSync(marker)).toBe(false);
   }, 30_000);
+
+  test.if(process.platform !== 'linux')(
+    'stops the session with the reason where there is no sandbox, without a request',
+    async () => {
+      const { home, project } = workspace();
+      const requestsBefore = server.requests.length;
+      const cli = startCli(['--sandbox', 'inspect', 'look'], {
+        env: cliEnv(server, { HOME: home }),
+        cwd: project,
+      });
+      expect((await cli.finished).code).toBe(1);
+      expect(cli.events).toContainEqual(
+        expect.objectContaining({ type: 'error', message: expect.stringContaining('need Linux') }),
+      );
+      expect(server.requests.length).toBe(requestsBefore);
+    },
+    30_000,
+  );
 });

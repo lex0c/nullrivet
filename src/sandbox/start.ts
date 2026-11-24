@@ -20,7 +20,7 @@ export const startSandbox = async (
   env: Record<string, string | undefined>,
   readOnlyDirs: readonly string[],
 ): Promise<StartedSandbox | { error: string }> => {
-  const host = sandboxHost(env);
+  const host = sandboxHost();
   if (typeof host === 'string') return { error: host };
   const project = await sandboxProject(cwd, env);
   if ('error' in project) return project;

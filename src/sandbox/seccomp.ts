@@ -2,13 +2,16 @@
 // It denies with EPERM:
 // - the key management calls, because the kernel keyrings are shared with the host and can hold
 //   credentials such as Kerberos tickets;
-// - socket(AF_UNIX), because a read-only bind does not stop a connection to a host socket inside
-//   the project, including one created after the sandbox started. socketpair stays allowed: it
-//   only makes a pair already connected to itself. Abstract sockets belong to the network
-//   namespace, which the sandbox does not share.
+// - socket() of any family but IPv4, IPv6 and netlink routing, which the network namespace
+//   isolates. The others are not all isolated by it: AF_UNIX reaches a host socket inside the
+//   project, since a read-only bind does not stop a connection, including to a socket created
+//   after the sandbox started; AF_VSOCK can reach the hypervisor or other machines when vsock
+//   namespaces are global, which is the default. A family is allowed by name, so one added to
+//   the kernel later is denied. socketpair stays allowed: it only makes a pair already connected
+//   to itself.
 // - the io_uring calls, because an io_uring operation creates a socket without the socket call,
-//   which would make the AF_UNIX rule above ineffective. Programs that use io_uring fall back to
-//   the ordinary calls when it cannot be set up.
+//   which would make the rule above ineffective. Programs that use io_uring fall back to the
+//   ordinary calls when it cannot be set up.
 // On x86_64 the x32 ABI shares the architecture value and marks its calls with a bit of the
 // number, so a call with that bit is denied outright rather than matched by number. A call made
 // through another architecture's ABI, such as i386 through int 0x80, gets ENOSYS.
@@ -46,12 +49,16 @@ const X32_SYSCALL_BIT = 0x40000000;
 const IO_URING_SETUP = 425;
 const IO_URING_ENTER = 426;
 const IO_URING_REGISTER = 427;
-const AF_UNIX = 1;
+const AF_INET = 2;
+const AF_INET6 = 10;
+const AF_NETLINK = 16;
+const NETLINK_ROUTE = 0;
 // Offsets in struct seccomp_data: nr, arch, then the arguments from byte 16. The low half of a
 // 64-bit argument comes first on these little-endian architectures.
 const NR = 0;
 const ARCH = 4;
 const ARG0 = 16;
+const ARG2 = 32;
 
 type Label = 'allow' | 'deny' | 'foreign';
 type Instruction =
@@ -76,7 +83,11 @@ export const seccompProgram = (arch: SyscallArch): Uint8Array => {
     { op: 'jeq', k: IO_URING_REGISTER, match: 'deny', miss: 'next' },
     { op: 'jeq', k: table.socket, match: 'next', miss: 'allow' },
     { op: 'load', offset: ARG0 },
-    { op: 'jeq', k: AF_UNIX, match: 'deny', miss: 'allow' },
+    { op: 'jeq', k: AF_INET, match: 'allow', miss: 'next' },
+    { op: 'jeq', k: AF_INET6, match: 'allow', miss: 'next' },
+    { op: 'jeq', k: AF_NETLINK, match: 'next', miss: 'deny' },
+    { op: 'load', offset: ARG2 },
+    { op: 'jeq', k: NETLINK_ROUTE, match: 'allow', miss: 'deny' },
     { op: 'ret', label: 'allow', k: SECCOMP_RET_ALLOW },
     { op: 'ret', label: 'deny', k: SECCOMP_RET_ERRNO | EPERM },
     { op: 'ret', label: 'foreign', k: SECCOMP_RET_ERRNO | ENOSYS },

@@ -101,7 +101,7 @@ it until end of file, so programs that start nullrivet without piping anything s
 | `-m, --model <id>` | Model as `<family>/<model>`, e.g. `openrouter/deepseek/deepseek-v4-flash`. Required unless `NULLRIVET_MODEL` is set. |
 | `-e, --effort <level>` | Reasoning effort: `low`, `medium`, `high`, `xhigh`, `max`. Ignored by models without reasoning. |
 | `-p, --permission <mode>` | `auto` (default) or `readonly`. |
-| `--sandbox <profile>` | Run the tools in a sandbox. Linux with Bubblewrap; the profile is `inspect`. See [Sandbox](#sandbox). |
+| `--sandbox <profile>` | Run the tools in a sandbox. Linux with Bubblewrap 0.8 or later, installed in a system directory; the profile is `inspect`. See [Sandbox](#sandbox). |
 | `-C, --cwd <dir>` | Starting directory for relative paths, commands and `AGENTS.md` lookup. It does not restrict file access. |
 | `--json` | Emit agent events as NDJSON on stdout. |
 | `--no-agents` | Do not load `AGENTS.md` files. |
@@ -250,8 +250,8 @@ not trust, such as reviewing an unknown repository:
   files; nothing written there reaches your machine.
 - No network, no host processes, no host environment: provider keys and other variables stay
   outside, and the tools see a minimal environment.
-- Unix sockets and the kernel keyrings are out of reach, and processes left behind end with the
-  session.
+- Sockets other than IP (Unix, vsock and the rest) and the kernel keyrings are out of reach, and
+  processes left behind end with the session.
 
 The execution mode still applies inside: `readonly` with `inspect` only reads. Background jobs are
 not offered in a sandbox yet. The sandbox does not limit CPU, memory or the number of processes,

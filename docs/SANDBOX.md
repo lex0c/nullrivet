@@ -203,6 +203,9 @@ type WorkerToHost =
   the host saves subagent reports is bound read-only at its path. The writable directory shared
   with the host, described under Files the worker writes, comes with its first consumer, the
   evidence log (phase 5).
+- Those subagent reports are a known limitation: they are written in the host's temporary
+  directory, which may be on disk. They are removed at exit, but an end without the exit handler,
+  such as SIGKILL, leaves them there. Memory-backed storage (phase 3) covers them.
 - New `/proc`, with `/proc/keys` and `/proc/key-users` masked; minimal `/dev`; tmpfs `/tmp`
   (1 GiB) and home (256 MiB); and the root remounted read-only last, since Bubblewrap's own root
   is otherwise writable. `/sys` is not bound from the host. Checked: with the host root bound,
@@ -231,9 +234,12 @@ every command inherits it. It denies with EPERM:
 
 - `keyctl`, `add_key` and `request_key`: the kernel keyrings are shared with the host, and can
   hold credentials such as Kerberos tickets;
-- `socket` with `AF_UNIX`: a read-only bind does not stop a connection to a host socket inside the
-  project, including one created after the start. `socketpair` stays allowed, since it only makes
-  a pair connected to itself. Abstract sockets belong to the network namespace.
+- `socket` of any family but `AF_INET`, `AF_INET6` and `AF_NETLINK` with `NETLINK_ROUTE`, which
+  the network namespace isolates. Others are not all isolated by it: with `AF_UNIX`, a read-only
+  bind does not stop a connection to a host socket inside the project, including one created
+  after the start; `AF_VSOCK` can reach the hypervisor or other machines when vsock namespaces are
+  global, the kernel's default. Families are allowed by name, so one the kernel adds later is
+  denied. `socketpair` stays allowed, since it only makes a pair connected to itself.
 - `io_uring_setup`, `io_uring_enter` and `io_uring_register`: an io_uring operation creates a
   socket without the `socket` call, so the rule above would not hold. Checked: a command in the
   sandbox created a Unix socket through io_uring and connected to a host socket in the project
@@ -243,8 +249,9 @@ every command inherits it. It denies with EPERM:
 
 A call through another architecture's ABI, such as i386 through `int 0x80`, gets ENOSYS. The
 supported architectures are x86_64 and arm64. Checked in Bubblewrap 0.13 with the program: Bun,
-its process spawning, worker threads and git run; `socket(AF_UNIX)`, `io_uring_setup`, `keyctl`
-and `keyctl` with the x32 bit get EPERM.
+its process spawning, worker threads and git run; `socket` with `AF_UNIX`, `AF_VSOCK`, `AF_ALG`
+or the uevent netlink protocol, `io_uring_setup`, `keyctl` and `keyctl` with the x32 bit get
+EPERM, while IPv4, IPv6 and netlink routing sockets are created.
 
 ### Memory-backed storage
 
@@ -509,10 +516,17 @@ limits or for the virtual machine backend.
 
 ## Platforms
 
-- **Linux:** Bubblewrap with overlay support (`--overlay-src`, `--tmp-overlay`; checked on 0.13),
-  unprivileged user namespaces enabled, nftables, and passt for `security`. Some distributions
-  restrict unprivileged user namespaces through AppArmor; the check at start says which
-  requirement is missing.
+- **Linux:** Bubblewrap 0.8.0 or later, for `--disable-userns`, with overlay support for the
+  later profiles (`--overlay-src`, `--tmp-overlay`; checked on 0.13), unprivileged user
+  namespaces enabled, nftables, and passt for `security`. Some distributions restrict
+  unprivileged user namespaces through AppArmor; the check at start says which requirement is
+  missing.
+- Bubblewrap sets the boundary up from outside it, with the user's access, so it is never looked
+  up on `PATH`, where an entry can be a directory the project controls, such as its
+  `node_modules/.bin`. It is taken from `/usr/bin`, `/usr/local/bin`, `/bin` or NixOS's
+  `/run/current-system/sw/bin`, and only when the file and every directory above it are owned by
+  root and writable by no one else (a sticky directory excepted), and it is run by its real
+  path.
 - **macOS:** no Bubblewrap. The profiles stop with that reason until the virtual machine backend
   (Lima, or Apple's container on macOS 26 and later). `sandbox-exec` is deprecated and not used.
 - **Docker** is not a backend in this plan: it needs a daemon and an image, and the same namespace

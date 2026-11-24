@@ -1,4 +1,4 @@
-import { accessSync, constants, lstatSync, readFileSync, readlinkSync } from 'node:fs';
+import { lstatSync, readFileSync, readlinkSync, realpathSync, type Stats } from 'node:fs';
 import { lstat, realpath } from 'node:fs/promises';
 import { homedir, userInfo } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
@@ -22,19 +22,71 @@ const MASKED_PROC_FILES = ['/proc/keys', '/proc/key-users'];
 // The launcher inputs follow the protocol descriptors.
 const FIRST_INPUT_FD = Math.max(HOST_TO_WORKER_FD, WORKER_TO_HOST_FD) + 1;
 
-// Only absolute entries are searched: a relative one would find a bwrap planted in the project.
-export const findBwrap = (env: Env): string | null => {
-  for (const dir of (env.PATH ?? '').split(':')) {
-    if (!isAbsolute(dir)) continue;
-    const candidate = join(dir, 'bwrap');
+// Bubblewrap sets the boundary up from outside it, with the user's access, so it is taken only from
+// system directories, never from PATH: an entry of PATH can be a directory the project controls,
+// such as its node_modules/.bin.
+export const BWRAP_LOCATIONS = [
+  '/usr/bin/bwrap',
+  '/usr/local/bin/bwrap',
+  '/bin/bwrap',
+  '/run/current-system/sw/bin/bwrap',
+];
+const MIN_BWRAP_VERSION = [0, 8, 0];
+
+// The real path of `path` when it is an executable that only root can replace: the file and every
+// directory above it owned by root and writable by no one else, unless the directory is sticky,
+// where an entry owned by root cannot be replaced either. Null otherwise.
+export const trustedExecutable = (path: string): string | null => {
+  let real: string;
+  try {
+    real = realpathSync(path);
+  } catch {
+    return null;
+  }
+  const levels: string[] = [];
+  for (let current = real; ; current = dirname(current)) {
+    levels.push(current);
+    if (dirname(current) === current) break;
+  }
+  for (const level of levels) {
+    let info: Stats;
     try {
-      accessSync(candidate, constants.X_OK);
-      return candidate;
+      info = lstatSync(level);
     } catch {
-      // Not in this directory.
+      return null;
+    }
+    if (info.uid !== 0) return null;
+    const writableByOthers = (info.mode & 0o022) !== 0;
+    if (level === real) {
+      if (!info.isFile() || writableByOthers || (info.mode & 0o111) === 0) return null;
+    } else if (!info.isDirectory() || (writableByOthers && (info.mode & 0o1000) === 0)) {
+      return null;
     }
   }
+  return real;
+};
+
+export const findBwrap = (locations: readonly string[] = BWRAP_LOCATIONS): string | null => {
+  for (const location of locations) {
+    const trusted = trustedExecutable(location);
+    if (trusted !== null) return trusted;
+  }
   return null;
+};
+
+// The version from `bwrap --version` ("bubblewrap 0.9.0"), or null when it does not say.
+export const parseBwrapVersion = (output: string): number[] | null => {
+  const match = /^bubblewrap (\d+)\.(\d+)\.(\d+)/m.exec(output);
+  return match === null ? null : [Number(match[1]), Number(match[2]), Number(match[3])];
+};
+
+const atLeast = (version: readonly number[], minimum: readonly number[]): boolean => {
+  for (let i = 0; i < minimum.length; i++) {
+    const have = version[i] ?? 0;
+    const need = minimum[i] ?? 0;
+    if (have !== need) return have > need;
+  }
+  return true;
 };
 
 export interface SandboxHost {
@@ -42,13 +94,24 @@ export interface SandboxHost {
   arch: SyscallArch;
 }
 
-// What the host needs for a sandbox profile, or why it cannot have one.
-export const sandboxHost = (env: Env): SandboxHost | string => {
+// What the host needs for a sandbox profile, or why it cannot have one. --disable-userns came in
+// Bubblewrap 0.8.0; an older one would refuse the arguments with its own message.
+export const sandboxHost = (
+  locations: readonly string[] = BWRAP_LOCATIONS,
+): SandboxHost | string => {
   if (process.platform !== 'linux') return 'sandbox profiles need Linux, where they use Bubblewrap';
   const arch = sandboxArch();
   if (arch === null) return `sandbox profiles support x86_64 and arm64, not ${process.arch}`;
-  const bwrap = findBwrap(env);
-  if (bwrap === null) return 'sandbox profiles need Bubblewrap (bwrap), which is not on PATH';
+  const bwrap = findBwrap(locations);
+  if (bwrap === null) {
+    return `sandbox profiles need Bubblewrap (bwrap) in a system directory owned by root: ${locations.join(', ')}`;
+  }
+  const output = Bun.spawnSync([bwrap, '--version'], { env: {} }).stdout.toString();
+  const version = parseBwrapVersion(output);
+  if (version === null || !atLeast(version, MIN_BWRAP_VERSION)) {
+    const found = version === null ? 'an unknown version' : `version ${version.join('.')}`;
+    return `sandbox profiles need Bubblewrap ${MIN_BWRAP_VERSION.join('.')} or later; ${bwrap} is ${found}`;
+  }
   return { bwrap, arch };
 };
 

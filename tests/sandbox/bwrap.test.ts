@@ -1,14 +1,24 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { executeToolCall } from '../../src/agent/tool-broker.ts';
 import {
   findBwrap,
   inspectLaunch,
+  parseBwrapVersion,
   sandboxEnv,
   sandboxHost,
   sandboxProject,
+  trustedExecutable,
 } from '../../src/sandbox/bwrap.ts';
 import { seccompProgram } from '../../src/sandbox/seccomp.ts';
 import { WorkerBackend } from '../../src/sandbox/worker-backend.ts';
@@ -16,7 +26,7 @@ import { BUILTIN_TOOLS } from '../../src/tools/index.ts';
 import type { Tool, ToolResult } from '../../src/tools/types.ts';
 import { sandboxTestsRun } from '../helpers/sandbox.ts';
 
-const host = sandboxHost(process.env);
+const host = sandboxHost();
 const runs = sandboxTestsRun;
 
 const tool = (name: string): Tool => {
@@ -196,7 +206,7 @@ describe.if(runs)('the inspect sandbox', () => {
     expect(status).toContain('unshare-failed');
   });
 
-  test('the seccomp program denies keyrings, the x32 ABI, io_uring and Unix sockets', async () => {
+  test('the seccomp program denies keyrings, the x32 ABI, io_uring and sockets other than IP', async () => {
     const python = [
       'import ctypes, errno, socket',
       'libc = ctypes.CDLL(None, use_errno=True)',
@@ -207,11 +217,21 @@ describe.if(runs)('the inspect sandbox', () => {
       // no parameters fails with another error than EPERM.
       'libc.syscall(425, 0, 0)',
       'print("io_uring", errno.errorcode.get(ctypes.get_errno()))',
-      'try:',
-      '    socket.socket(socket.AF_UNIX)',
-      '    print("unix", "created")',
-      'except OSError as e:',
-      '    print("unix", errno.errorcode[e.errno])',
+      // Families are allowed by name. Without the program, vsock fails with EAFNOSUPPORT where
+      // its module is not loaded, and AF_ALG and the uevent netlink protocol succeed.
+      'families = (("unix", socket.AF_UNIX, socket.SOCK_STREAM, 0),',
+      '    ("vsock", socket.AF_VSOCK, socket.SOCK_STREAM, 0),',
+      '    ("alg", socket.AF_ALG, socket.SOCK_SEQPACKET, 0),',
+      '    ("uevent", socket.AF_NETLINK, socket.SOCK_DGRAM, 15),',
+      '    ("route", socket.AF_NETLINK, socket.SOCK_DGRAM, 0),',
+      '    ("inet", socket.AF_INET, socket.SOCK_STREAM, 0),',
+      '    ("inet6", socket.AF_INET6, socket.SOCK_STREAM, 0))',
+      'for name, family, kind, protocol in families:',
+      '    try:',
+      '        socket.socket(family, kind, protocol).close()',
+      '        print(name, "created")',
+      '    except OSError as e:',
+      '        print(name, errno.errorcode[e.errno])',
       'socket.socketpair()',
       'print("socketpair", "ok")',
     ].join('\n');
@@ -221,7 +241,9 @@ describe.if(runs)('the inspect sandbox', () => {
       expect(out).toContain('x32 EPERM');
     }
     expect(out).toContain('io_uring EPERM');
-    expect(out).toContain('unix EPERM');
+    for (const denied of ['unix', 'vsock', 'alg', 'uevent'])
+      expect(out).toContain(`${denied} EPERM`);
+    for (const allowed of ['route', 'inet', 'inet6']) expect(out).toContain(`${allowed} created`);
     expect(out).toContain('socketpair ok');
   });
 
@@ -344,36 +366,65 @@ describe('the sandbox launch', () => {
     });
   });
 
-  test('finds bwrap only in absolute PATH entries', () => {
+  test('takes bwrap only from a file that only root can replace, never from PATH', () => {
     const dir = join(scratch, 'bin');
     mkdirSync(dir, { recursive: true });
+    // A file of the user, as a project's node_modules/.bin could hold.
     writeFileSync(join(dir, 'bwrap'), '#!/bin/sh\n', { mode: 0o755 });
-    expect(findBwrap({ PATH: `bin:${dir}` })).toBe(join(dir, 'bwrap'));
-    expect(findBwrap({ PATH: 'bin:relative/dir' })).toBeNull();
+    expect(trustedExecutable(join(dir, 'bwrap'))).toBeNull();
+    expect(findBwrap([join(dir, 'bwrap')])).toBeNull();
+    expect(trustedExecutable('/nonexistent/bwrap')).toBeNull();
+    // A link resolves to its target, which is what runs.
+    const env = realpathSync('/usr/bin/env');
+    symlinkSync('/usr/bin/env', join(dir, 'env-link'));
+    expect(trustedExecutable(join(dir, 'env-link'))).toBe(env);
+    expect(findBwrap([join(dir, 'bwrap'), '/usr/bin/env'])).toBe(env);
+  });
+
+  test('refuses a missing Bubblewrap and one that does not report a version of 0.8 or later', () => {
+    expect(parseBwrapVersion('bubblewrap 0.9.0\n')).toEqual([0, 9, 0]);
+    expect(parseBwrapVersion('bwrap: Unknown option --version')).toBeNull();
+    if (process.platform !== 'linux') {
+      expect(sandboxHost(['/nonexistent/bwrap'])).toBe(
+        'sandbox profiles need Linux, where they use Bubblewrap',
+      );
+      return;
+    }
+    expect(sandboxHost(['/nonexistent/bwrap'])).toContain(
+      'need Bubblewrap (bwrap) in a system directory owned by root: /nonexistent/bwrap',
+    );
+    // A trusted executable that is not Bubblewrap reports no version it understands.
+    expect(sandboxHost(['/usr/bin/true'])).toContain(
+      'or later; /usr/bin/true is an unknown version',
+    );
   });
 
   test('the seccomp program is the one checked against the kernel', () => {
     expect(Buffer.from(seccompProgram('x64')).toString('hex')).toBe(
       [
         '2000000004000000',
-        '1500000d3e0000c0',
+        '150000113e0000c0',
         '2000000000000000',
-        '45000a0000000040',
-        '15000900fa000000',
-        '15000800f8000000',
-        '15000700f9000000',
-        '15000600a9010000',
-        '15000500aa010000',
-        '15000400ab010000',
-        '1500000229000000',
+        '45000e0000000040',
+        '15000d00fa000000',
+        '15000c00f8000000',
+        '15000b00f9000000',
+        '15000a00a9010000',
+        '15000900aa010000',
+        '15000800ab010000',
+        '1500000629000000',
         '2000000010000000',
-        '1500010001000000',
+        '1500040002000000',
+        '150003000a000000',
+        '1500000310000000',
+        '2000000020000000',
+        '1500000100000000',
         '060000000000ff7f',
         '0600000001000500',
         '0600000026000500',
       ].join(''),
     );
     // No x32 ABI on arm64, so one instruction less.
-    expect(seccompProgram('arm64').length).toBe(15 * 8);
+    expect(seccompProgram('arm64').length).toBe(19 * 8);
   });
 });
