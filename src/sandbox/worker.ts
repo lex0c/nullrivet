@@ -108,10 +108,13 @@ export const runWorker = (argv: readonly string[]): void => {
     killAllProcessGroups();
     removeOutputFiles();
   });
-  // An interrupt is the host's to handle: it cancels calls over the protocol.
-  process.on('SIGINT', () => undefined);
-  process.on('SIGTERM', () => stop(143));
-  process.on('SIGHUP', () => stop(129));
+  // The host stops the worker over the protocol, or kills its group; it never signals it. A signal
+  // comes from a command in the sandbox, which runs as the same user and can see the worker, such
+  // as `pkill bun` meant for a dev server: it must not end the session's tools. SIGKILL cannot be
+  // ignored, and still loses the sandbox.
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'] as const) {
+    process.on(signal, () => undefined);
+  }
 
   const dumpable = makeNotDumpable();
   if (dumpable !== null) {

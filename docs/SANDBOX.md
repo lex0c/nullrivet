@@ -190,6 +190,10 @@ type WorkerToHost =
   The turn ends with an error after the batch, and a subagent's report says `sandbox_lost`. A tool
   that fails, times out or rejects its arguments is a result, and changes nothing in the
   backend's state.
+- **Signals.** Commands run as the same user and can see the worker by name: `pkill bun`, meant
+  for a dev server, reaches it too. The host never signals the worker, so the worker ignores
+  SIGINT, SIGTERM, SIGHUP and SIGQUIT. SIGKILL cannot be ignored: a command that sends it ends the
+  worker, and the sandbox is lost.
 - **Shutdown.** `worker.shutdown` at exit; the sandbox is torn down whether or not the worker
   answers. Bubblewrap runs in a process group of its own, which the exit handler kills with the
   command groups, and `--die-with-parent` ends the sandbox when nullrivet is killed outright.
@@ -217,13 +221,12 @@ not, so the footer stays current. `/clear` marks the known jobs as dropped on th
 main agent has the job tools, and the conversation is cleared between its turns, after the start
 of every job it launched has arrived.
 
-The fields of an event become text of a runtime note, which the model trusts, so the host checks
-or reduces them: log parts must be log files of the sandbox's `/tmp`, at most 15, the most the output code makes
-within its 64 MiB limit; sizes, times and
-exit codes are bounded integers; a signal must be one the system knows; a stop reason or an
-interruption keeps only its kind, without the system message after it, and unknown text becomes a
-generic kind. Text a correct worker can produce when a command interferes, such as a log directory
-made again or a full disk, never stops the sandbox.
+The fields of an event become text of a runtime note, which the model trusts, so the host checks or
+reduces them: log parts must be log files of the sandbox's `/tmp`, at most 15, the most the output
+code makes within its 64 MiB limit; sizes, times and exit codes are bounded integers; a signal must
+be one the system knows; a stop reason or an interruption keeps only its kind, without the system
+message after it, and unknown text becomes a generic kind. Text a correct worker can produce when a
+command interferes, such as a log directory made again or a full disk, never stops the sandbox.
 
 When the sandbox is lost, each job still running gets a `job.lost` note, written by the host
 without the reason of the loss. From then on no event starts a turn of its own, since every tool

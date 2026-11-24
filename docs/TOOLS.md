@@ -188,7 +188,9 @@ Runs a command with `bash -c`.
   [Saved output](#saved-output)). The result ends with the exit code, or with a note that the
   command timed out or was aborted, followed by a line naming the files of each saved stream.
 - **Exit status.** A non-zero exit code is reported but is not a tool error: a failing test run is
-  information the model needs. A timeout or abort is a tool error.
+  information the model needs. A timeout or abort is a tool error. A command killed by a real-time
+  signal (34 to 64) is reported with exit code 0: the process API of Bun 1.4.4 reports it so, and
+  only signals 1 to 31 are named.
 - **Credentials.** The API keys nullrivet uses (`OPENROUTER_API_KEY` and the keys of the other
   supported providers) and every `NULLRIVET_*` variable are removed from the command's
   environment, so a command produced by prompt injection cannot read them. Everything else in the
@@ -358,7 +360,8 @@ that had already ended is left as it was.
   earlier run, still in a resumed session, does not name a job of this one; it is reported as
   `job.unknown`.
 - **States.** `running`, then `completed` (exit code 0), `failed` (another exit code, or a signal
-  nobody asked for), `stopped` (`bash_kill`) or `timed_out` (`max_runtime_ms`). The first ending is
+  nobody asked for; a real-time signal is reported as exit code 0, as for `bash`), `stopped`
+  (`bash_kill`) or `timed_out` (`max_runtime_ms`). The first ending is
   final: a stop or a time limit that arrives after the job ended on its own does not change it.
 - **Log.** stdout and stderr go to one file, in the order they were written, saved like
   [saved output](#saved-output) in parts of up to 10 MiB. The limits are 64 MiB per job and 256 MiB

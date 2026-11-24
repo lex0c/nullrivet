@@ -335,6 +335,20 @@ describe.if(runs)('the end of the inspect sandbox', () => {
     expect(leftover('sleep 31337.1')).toBe(false);
   });
 
+  test('signals that a command sends to the worker by name, such as pkill bun, do not end it', async () => {
+    const backend = await startInspect();
+    await call(backend, 'bash_background', { command: 'sleep 30' });
+    const out = await sh(
+      backend,
+      'pkill bun; pkill -f main.ts; pkill -HUP -f nullrivet; pkill -QUIT bun; sleep 0.3; echo still-here',
+    );
+    expect(out).toContain('still-here');
+    expect(backend.failure()).toBeNull();
+    expect(await sh(backend, 'echo answering')).toContain('answering');
+    expect(backend.jobs?.running()).toBe(1);
+    await backend.close();
+  });
+
   test('killing the worker from inside loses the backend and ends every process', async () => {
     const backend = await startInspect();
     await leave(backend, '31337.2');
