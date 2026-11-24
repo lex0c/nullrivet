@@ -302,8 +302,16 @@ describe.if(runs)('the inspect sandbox', () => {
 
 describe.if(runs)('the end of the inspect sandbox', () => {
   const leftover = (marker: string) => hostProcessArgs().some((args) => args.includes(marker));
-  const leave = (backend: WorkerBackend, marker: string) =>
-    sh(backend, `setsid sh -c 'trap "" TERM; exec sleep ${marker}' >/dev/null 2>&1 & echo started`);
+  // The command returns before the process it leaves has started, so this waits until the host
+  // sees it: a slow machine would otherwise check too early.
+  const leave = async (backend: WorkerBackend, marker: string): Promise<void> => {
+    await sh(
+      backend,
+      `setsid sh -c 'trap "" TERM; exec sleep ${marker}' >/dev/null 2>&1 & echo started`,
+    );
+    const deadline = Date.now() + 5_000;
+    while (!leftover(`sleep ${marker}`) && Date.now() < deadline) await Bun.sleep(50);
+  };
 
   test('a background job runs in the sandbox, its log is readable there, and it ends with it', async () => {
     const backend = await startInspect();
@@ -441,8 +449,9 @@ describe('the sandbox launch', () => {
       'need Bubblewrap (bwrap) in a system directory owned by root: /nonexistent/bwrap',
     );
     // A trusted executable that is not Bubblewrap reports no version it understands.
+    // Named by its real path, which can differ: /usr/bin/true is a link to gnutrue on some systems.
     expect(sandboxHost(['/usr/bin/true'])).toContain(
-      'or later; /usr/bin/true is an unknown version',
+      `or later; ${realpathSync('/usr/bin/true')} is an unknown version`,
     );
   });
 
