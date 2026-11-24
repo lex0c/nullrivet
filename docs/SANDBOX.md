@@ -218,7 +218,8 @@ main agent has the job tools, and the conversation is cleared between its turns,
 of every job it launched has arrived.
 
 The fields of an event become text of a runtime note, which the model trusts, so the host checks
-or reduces them: log parts must be log files of the sandbox's `/tmp`, at most 8; sizes, times and
+or reduces them: log parts must be log files of the sandbox's `/tmp`, at most 15, the most the output code makes
+within its 64 MiB limit; sizes, times and
 exit codes are bounded integers; a signal must be one the system knows; a stop reason or an
 interruption keeps only its kind, without the system message after it, and unknown text becomes a
 generic kind. Text a correct worker can produce when a command interferes, such as a log directory

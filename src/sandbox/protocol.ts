@@ -1,7 +1,7 @@
 import { constants } from 'node:os';
 import { isAbsolute, resolve } from 'node:path';
 import type { JobEvent } from '../tools/jobs.ts';
-import type { SavedOutput } from '../tools/output-files.ts';
+import { MAX_OUTPUT_PARTS, type SavedOutput } from '../tools/output-files.ts';
 import type { ToolResult } from '../tools/types.ts';
 
 // The entry point runs the sandbox worker instead of the CLI when its first argument is this. It
@@ -127,8 +127,9 @@ export const JOB_ID_PATTERN = /^([0-9a-f]{16})-([1-9][0-9]{0,14})$/;
 // The parts of a job log, in the sandbox's /tmp. The directory can change during a job, when
 // something removed it and the output code made a new one, so each part is checked on its own.
 const JOB_LOG_PART = /^\/tmp\/nullrivet-[A-Za-z0-9]{6}\/[0-9]{1,15}-job\.[0-9]{3}\.txt$/;
-// A job's output is limited to 64 MiB in parts of 10 MiB.
-const MAX_JOB_LOG_PARTS = 8;
+// The most parts the output code makes within its limit per output; a line that does not fit at
+// the end of a part starts the next, so parts can hold less than their size.
+const MAX_JOB_LOG_PARTS = MAX_OUTPUT_PARTS;
 
 const isCount = (value: unknown): value is number =>
   typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;

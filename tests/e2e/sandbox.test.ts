@@ -241,6 +241,65 @@ describe.if(sandboxTestsRun)('--sandbox inspect', () => {
     40_000,
   );
 
+  test.skipIf(Bun.which('python3') === null)(
+    'a job of a cleared conversation ends without a turn, and a new job is reported',
+    async () => {
+      const { home, project } = workspace();
+      server.handle((request) => {
+        const text = JSON.stringify(request.messages);
+        if (text.includes('Background job')) return { text: 'noted the end' };
+        if (toolMessages(request).length > 0) return { text: 'started' };
+        const command = text.includes('second task') ? 'sleep 0.5' : 'sleep 2';
+        return { toolCalls: [{ name: 'bash_background', args: { command } }] };
+      });
+      const before = server.requests.length;
+      const sent = () => server.requests.slice(before).map((r) => JSON.stringify(r.messages));
+      const waitFor = async (check: () => boolean, ms: number) => {
+        const deadline = Date.now() + ms;
+        while (!check() && Date.now() < deadline) await Bun.sleep(100);
+        return check();
+      };
+      const child = Bun.spawn(inTerminal(cliCommand(['--sandbox', 'inspect'])), {
+        env: { ...cliEnv(server, { HOME: home }), TERM: 'xterm-256color' },
+        cwd: project,
+        stdin: 'pipe',
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      const type = (text: string) => {
+        child.stdin.write(`${text}\r`);
+        child.stdin.flush();
+      };
+      await Bun.sleep(1_500);
+      type('first task');
+      expect(
+        await waitFor(() => sent().some((m) => m.includes('Started background job')), 10_000),
+      ).toBe(true);
+      const firstJob = /Started background job (\S+) /.exec(
+        sent().find((m) => m.includes('Started background job')) ?? '',
+      )?.[1];
+      expect(firstJob).toBeDefined();
+      await Bun.sleep(500);
+      type('/clear');
+      const afterClear = server.requests.length;
+      // The first job ends about two seconds after it started; its end must not start a turn.
+      await Bun.sleep(3_000);
+      expect(server.requests.length).toBe(afterClear);
+      type('second task');
+      expect(await waitFor(() => sent().some((m) => m.includes('Background job')), 15_000)).toBe(
+        true,
+      );
+      await Bun.sleep(500);
+      type('/exit');
+      const [, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+      expect(code).toBe(0);
+      const notes = sent().filter((m) => m.includes('Background job'));
+      expect(notes.join('\n')).not.toContain(`${firstJob} `);
+      expect(notes.join('\n')).toContain('completed with exit code 0');
+    },
+    60_000,
+  );
+
   test('refuses a project that contains the home directory', async () => {
     const { home } = workspace();
     const cli = startCli(['--sandbox', 'inspect', 'look'], {

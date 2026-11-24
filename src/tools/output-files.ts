@@ -15,6 +15,14 @@ import { BINARY_SCAN_BYTES, binaryOffset, isNotFoundError, MAX_FILE_BYTES } from
 // memory, so each output and the whole process have a limit. Files are never removed while the
 // process runs, so a path given to the model stays valid until it exits.
 const OUTPUT_LIMIT_BYTES = 64 * 1024 * 1024;
+
+// How many parts an output of `limitBytes` can take. A part ends before it is full only when the
+// next piece does not fit in it, and that piece then goes into the next part, so any two parts in a
+// row hold more than a whole part.
+export const maxOutputParts = (limitBytes: number, partBytes: number): number =>
+  2 * Math.ceil(limitBytes / partBytes) + 1;
+
+export const MAX_OUTPUT_PARTS = maxOutputParts(OUTPUT_LIMIT_BYTES, MAX_FILE_BYTES);
 const TOTAL_LIMIT_BYTES = 512 * 1024 * 1024;
 // Only whole lines are written, so parts end at line boundaries; the incomplete last line waits in
 // memory for its newline up to this size, and longer lines are written in pieces.

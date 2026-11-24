@@ -14,6 +14,8 @@ import {
 import { dirname, isAbsolute, join, relative } from 'node:path';
 import {
   describeSavedOutput,
+  MAX_OUTPUT_PARTS,
+  maxOutputParts,
   type OutputFileSystem,
   OutputFiles,
   type OutputFilesOptions,
@@ -63,6 +65,35 @@ const save = (files: OutputFiles, input: Buffer, threshold = 0): SavedOutput => 
 
 const lines = (count: number): string =>
   Array.from({ length: count }, (_, i) => `line ${i} ${'x'.repeat(i % 37)}`).join('\n');
+
+describe('the number of parts', () => {
+  // The worst cases, at a small scale: a part ends early when the next line does not fit in it.
+  test('stays within maxOutputParts however lines fall across parts', () => {
+    const partBytes = 1_000;
+    const limit = 6_400;
+    const line = (n: number) => Buffer.concat([Buffer.alloc(n - 1, 120), Buffer.from('\n')]);
+    const patterns: Buffer[][] = [
+      Array.from({ length: 14 }, () => line(partBytes / 2 + 2)),
+      Array.from({ length: 11 }, () => line(600)),
+      Array.from({ length: 14 }, (_, i) => (i % 2 === 1 ? line(partBytes) : Buffer.from('a\n'))),
+      Array.from({ length: 14 }, (_, i) =>
+        i % 2 === 1 ? Buffer.alloc(partBytes - 10, 121) : Buffer.from('a\n'),
+      ),
+    ];
+    const most = maxOutputParts(limit, partBytes);
+    const { files } = store({ partBytes, outputLimitBytes: limit, lineBufferBytes: 64 });
+    const counts = patterns.map((chunks) => {
+      const spool = files.spool('job', 0);
+      spool.start();
+      for (const chunk of chunks) spool.push(chunk);
+      return spool.finish({ keep: true })?.parts.length ?? 0;
+    });
+    for (const count of counts) expect(count).toBeLessThanOrEqual(most);
+    // The bound is reached closely: one pattern takes more than twice the parts a full split would.
+    expect(Math.max(...counts)).toBeGreaterThan(2 * Math.ceil(limit / partBytes) - 1);
+    expect(MAX_OUTPUT_PARTS).toBe(15);
+  });
+});
 
 describe('output files', () => {
   test('an output under the threshold is not written unless the caller keeps it', () => {

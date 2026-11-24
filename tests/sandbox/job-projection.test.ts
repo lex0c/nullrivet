@@ -243,7 +243,7 @@ describe('job messages from the worker', () => {
   test('refuses malformed or unbounded job messages', () => {
     const refused = [
       finishedMessage({}, { parts: ['/home/user/.ssh/id_rsa'] }),
-      finishedMessage({}, { parts: Array(9).fill('/tmp/nullrivet-AbC123/1-job.001.txt') }),
+      finishedMessage({}, { parts: Array(16).fill('/tmp/nullrivet-AbC123/1-job.001.txt') }),
       finishedMessage({}, { savedBytes: 30 }),
       finishedMessage({ signal: 'SIGFOO', exitCode: null }),
       finishedMessage({ exitCode: 300 }),
@@ -258,5 +258,8 @@ describe('job messages from the worker', () => {
     ];
     for (const line of refused) expect(parsed(line).ok).toBe(false);
     expect(parsed(finishedMessage({ signal: 'SIGTERM', exitCode: null })).ok).toBe(true);
+    // As many parts as the output code can make within its limit per output.
+    const parts = Array(15).fill('/tmp/nullrivet-AbC123/1-job.001.txt');
+    expect(parsed(finishedMessage({}, { parts })).ok).toBe(true);
   });
 });
