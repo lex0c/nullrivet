@@ -366,8 +366,12 @@ and it is read only when no process can change it.
   whose content and mode are unchanged is no change, whatever its times. Modes are kept, and the
   set-user-ID and set-group-ID bits never added; a bit the project's entry already has is kept.
   `.git` is never changed, at any depth, and a directory holding one, or a mount point, is never
-  removed. Devices, FIFOs and sockets are refused. Two names of one inode, a hard link, reach the
-  project as two separate files.
+  removed. Creating a device, FIFO or socket is refused; removing one the project has is applied,
+  since a removal only takes away a name. Two names of one inode, a hard link, reach the project
+  as two separate files. A mode belongs to the inode, shared by every name, and another name can
+  be outside the project, so a mode change to a file with more than one name gives it a new inode
+  instead. An entry that replaces another is a removal and a creation; the removal is applied only
+  with the creation, so a refused or conflicting entry leaves the project's one in place.
 - **Symbolic links.** A link is applied only when it resolves inside the project, or under `/usr`
   with no `..` component, as a Python virtual environment's interpreter link does. It is resolved
   over the tree the project would have, following every link on the way, up to 40, since a link

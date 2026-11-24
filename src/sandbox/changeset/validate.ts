@@ -27,6 +27,8 @@ type Lookup = (path: Buffer[]) => Final;
 type SymlinkChange = Extract<Change, { op: 'symlink' }>;
 
 export const LINK_LEAVES = 'the link leads out of the project';
+// The reason a removal is not applied when the entry the sandbox put in its place is not.
+export const REPLACEMENT_LEFT_OUT = 'the entry that replaces it is not applied';
 
 const split = (path: Buffer): Buffer[] => {
   const parts: Buffer[] = [];
@@ -165,7 +167,18 @@ export const symlinkTargetsInside = (
     if (node.kind === 'dir') return { kind: 'dir' };
     return { kind: 'other' };
   };
-  return refuseLeaving(changes, lookup, projectPath);
+  const checked = refuseLeaving(changes, lookup, projectPath);
+  // A refused link leaves the project's entry at its path in place.
+  const leaving = new Set(
+    checked
+      .filter((change, index) => change.op === 'refuse' && changes[index]?.op === 'symlink')
+      .map((change) => pathKey(change.path)),
+  );
+  return checked.map((change) =>
+    change.op === 'remove' && leaving.has(pathKey(change.path))
+      ? { op: 'refuse', path: change.path, reason: REPLACEMENT_LEFT_OUT }
+      : change,
+  );
 };
 
 // The links of `links`, with each one that leads out refused; over the project as it is, with the

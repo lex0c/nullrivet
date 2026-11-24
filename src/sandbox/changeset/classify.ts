@@ -119,8 +119,9 @@ export const classify = (upper: UpperNode, projectRoot: number): Change[] => {
   // Paths whose removal was refused: what would replace them cannot be applied either.
   const blocked = new Set<string>();
 
-  // A refused removal is reported once, at its path; what the sandbox put there instead is left
-  // out with it.
+  // A removal takes away a name, whatever the entry is: a device, FIFO or socket the project has
+  // is removed like a file, and only creating one is refused. A refused removal is reported once,
+  // at its path; what the sandbox put there instead is left out with it.
   const remove = (dir: number, name: Buffer, path: Buffer[], before: Exclude<Before, 'absent'>) => {
     if (before !== 'dir') {
       changes.push({ op: 'remove', path, before, entries: 1, bytes: 0 });
@@ -197,7 +198,13 @@ export const classify = (upper: UpperNode, projectRoot: number): Change[] => {
               const lowerMode = Number(lowerStat.mode) & 0o7777;
               const kept = keptMode(child.mode, lowerMode);
               if (kept.mode !== lowerMode) {
-                changes.push({ op: 'chmod', path, before: 'file', ...kept });
+                // A mode belongs to the inode, which every hard link shares, and another link can
+                // be outside the project: such a file gets a new inode with the new mode.
+                changes.push(
+                  lowerStat.nlink > 1n
+                    ? { op: 'write', path, before: 'file', node: child, ...kept }
+                    : { op: 'chmod', path, before: 'file', ...kept },
+                );
               }
               break;
             }

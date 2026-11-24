@@ -302,12 +302,15 @@ describe.if(runs)('the inspect sandbox', () => {
 
 describe.if(runs)('the end of the inspect sandbox', () => {
   const leftover = (marker: string) => hostProcessArgs().some((args) => args.includes(marker));
-  // The command returns before the process it leaves has started, so this waits until the host
-  // sees it: a slow machine would otherwise check too early.
+  // The command waits until the process it leaves runs in its own session: the tool signals the
+  // command's process group once the command exits, which would kill a child that had not yet
+  // left it. Then this waits until the host sees the process.
   const leave = async (backend: WorkerBackend, marker: string): Promise<void> => {
+    const ready = `/tmp/left-${marker}`;
     await sh(
       backend,
-      `setsid sh -c 'trap "" TERM; exec sleep ${marker}' >/dev/null 2>&1 & echo started`,
+      `setsid sh -c 'trap "" TERM; touch ${ready}; exec sleep ${marker}' >/dev/null 2>&1 & ` +
+        `for i in $(seq 100); do [ -e ${ready} ] && break; sleep 0.05; done; echo started`,
     );
     const deadline = Date.now() + 5_000;
     while (!leftover(`sleep ${marker}`) && Date.now() < deadline) await Bun.sleep(50);

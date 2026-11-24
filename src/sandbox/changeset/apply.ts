@@ -31,7 +31,7 @@ import {
   unlinkAt,
 } from './dirfd.ts';
 import { childKey, pathKey } from './snapshot.ts';
-import { linksInsideProject } from './validate.ts';
+import { linksInsideProject, REPLACEMENT_LEFT_OUT } from './validate.ts';
 
 // Applies the changes to the project, one entry at a time, after checking each against what the
 // project held when the sandbox started. Timestamps are taken as signs of change: an entry whose
@@ -289,22 +289,39 @@ export const applyChanges = (changes: readonly Change[], options: ApplyOptions):
                 throw new Conflict('the file changed on the host');
               options.afterCheck?.(change);
               const temp = writeTemp(dir, change.path, change.node.hash, change.mode);
-              ensureInside(dir, change.path);
-              renameBeneath(dir, temp, dir, name, RENAME_EXCHANGE);
-              // The exchange changes the change time of both files; the old one is identified by
-              // its inode, and its size and modification time show whether it was written since.
-              const post = fstatSync(fd, { bigint: true });
-              const swapped = lstatAt(dir, temp);
-              if (
-                swapped.ino !== pre.ino ||
-                post.size !== pre.size ||
-                post.mtimeNs !== pre.mtimeNs
-              ) {
-                renameBeneath(dir, temp, dir, name, RENAME_EXCHANGE);
-                unlinkAt(dir, temp);
-                throw new Conflict('the file changed on the host');
+              // What the temporary name holds: the new file until the exchange, the project's
+              // file after it. The project's file is deleted only once the new one is confirmed in
+              // its place; when that is not known, it stays under the temporary name.
+              let holds: 'new' | 'old' | 'unknown' = 'new';
+              try {
+                ensureInside(dir, change.path);
+                try {
+                  renameBeneath(dir, temp, dir, name, RENAME_EXCHANGE);
+                } catch (error) {
+                  if (error instanceof SysError && error.code === 'ENOENT') {
+                    throw new Conflict('the file changed on the host');
+                  }
+                  throw error;
+                }
+                holds = 'unknown';
+                // The exchange changes the change time of both files; the old one is identified
+                // by its inode, and its size and modification time show whether it was written
+                // since.
+                const post = fstatSync(fd, { bigint: true });
+                const swapped = lstatAt(dir, temp);
+                if (
+                  swapped.ino !== pre.ino ||
+                  post.size !== pre.size ||
+                  post.mtimeNs !== pre.mtimeNs
+                ) {
+                  renameBeneath(dir, temp, dir, name, RENAME_EXCHANGE);
+                  holds = 'new';
+                  throw new Conflict('the file changed on the host');
+                }
+                holds = 'old';
+              } finally {
+                if (holds !== 'unknown') unlinkAt(dir, temp);
               }
-              unlinkAt(dir, temp);
               recordAt(dir, name);
             } finally {
               closeSync(fd);
@@ -349,6 +366,10 @@ export const applyChanges = (changes: readonly Change[], options: ApplyOptions):
             if (!unchanged(pre) || !kindMatches(pre, change.before)) {
               throw new Conflict('the entry changed on the host');
             }
+            // The mode of a file with other names would change for all of them.
+            if (pre.isFile() && pre.nlink > 1n) {
+              throw new Conflict('the file has other names on the host');
+            }
             ensureInside(dir, change.path);
             chmodFd(
               fd,
@@ -392,6 +413,7 @@ export const applyChanges = (changes: readonly Change[], options: ApplyOptions):
             return null;
           case 'chmod':
             if (target === null || !unchanged(target)) return 'the entry changed on the host';
+            if (target.isFile() && target.nlink > 1n) return 'the file has other names on the host';
             return null;
           case 'write':
             if (change.before === 'file') {
@@ -480,6 +502,16 @@ export const applyChanges = (changes: readonly Change[], options: ApplyOptions):
     if (change.op === 'mkdir') created.add(key);
     toApply.push(change);
   }
+  // A removal that makes room for an entry is applied only with that entry: when the entry is
+  // left out, the project's one stays.
+  const ready: Change[] = [];
+  for (const change of toApply) {
+    if (change.op === 'remove' && left.has(pathKey(change.path))) {
+      outcome.conflicts.push({ change, reason: REPLACEMENT_LEFT_OUT });
+    } else {
+      ready.push(change);
+    }
+  }
 
   // Applies `list` in order, up to the first failure; true when it reached the end.
   const run = (list: readonly Change[]): boolean => {
@@ -495,28 +527,50 @@ export const applyChanges = (changes: readonly Change[], options: ApplyOptions):
     }
     return true;
   };
-  const entries = toApply.filter((change) => change.op !== 'symlink');
-  const links = toApply.filter((change): change is SymlinkChange => change.op === 'symlink');
+  // Links go last, each with the removal that makes room for it, so that a link refused by the
+  // second check leaves the project's entry at its path in place.
+  const links = ready.filter((change): change is SymlinkChange => change.op === 'symlink');
+  const linkPaths = new Set(links.map((link) => pathKey(link.path)));
+  const makesRoom = (change: Change): boolean =>
+    change.op === 'remove' && linkPaths.has(pathKey(change.path));
+  const roomFor = new Map(
+    ready.filter(makesRoom).map((change) => [pathKey(change.path), change] as const),
+  );
+  const withRoom = (link: Change): Change[] => {
+    const removal = roomFor.get(pathKey(link.path));
+    return removal === undefined ? [link] : [removal, link];
+  };
+  const entries = ready.filter((change) => change.op !== 'symlink' && !makesRoom(change));
 
   try {
     if (!run(entries)) {
-      outcome.notReached.push(...links);
+      outcome.notReached.push(...links.flatMap(withRoom));
     } else if (links.length > 0) {
       let checked: Change[] | null = null;
       try {
         checked = linksInsideProject(links, options.projectRoot, options.projectPath);
       } catch (error) {
+        const [first, ...rest] = links.flatMap(withRoom);
         outcome.stopped = {
-          change: links[0] as Change,
+          change: first as Change,
           reason: `checking the links failed: ${errorMessage(error)}`,
         };
-        outcome.notReached.push(...links.slice(1));
+        outcome.notReached.push(...rest);
       }
       if (checked !== null) {
+        const toRun: Change[] = [];
         for (const change of checked) {
-          if (change.op === 'refuse') outcome.refused.push({ change, reason: change.reason });
+          if (change.op !== 'refuse') {
+            toRun.push(...withRoom(change));
+            continue;
+          }
+          outcome.refused.push({ change, reason: change.reason });
+          const removal = roomFor.get(pathKey(change.path));
+          if (removal !== undefined) {
+            outcome.refused.push({ change: removal, reason: REPLACEMENT_LEFT_OUT });
+          }
         }
-        run(checked.filter((change) => change.op !== 'refuse'));
+        run(toRun);
       }
     }
     try {
@@ -527,7 +581,7 @@ export const applyChanges = (changes: readonly Change[], options: ApplyOptions):
       const reason = `setting the mode of a directory failed: ${errorMessage(error)}`;
       outcome.stopped =
         outcome.stopped === null
-          ? { change: outcome.applied.at(-1) ?? (toApply[0] as Change), reason }
+          ? { change: outcome.applied.at(-1) ?? (ready[0] as Change), reason }
           : { ...outcome.stopped, reason: `${outcome.stopped.reason}; ${reason}` };
     }
   } finally {

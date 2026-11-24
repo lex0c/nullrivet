@@ -3,6 +3,7 @@ import {
   chmodSync,
   constants,
   existsSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -24,7 +25,7 @@ import { type Change, classify } from '../../src/sandbox/changeset/classify.ts';
 import { close, openDirectory, openPath } from '../../src/sandbox/changeset/dirfd.ts';
 import { readUpper, type UpperNode } from '../../src/sandbox/changeset/snapshot.ts';
 import { symlinkTargetsInside } from '../../src/sandbox/changeset/validate.ts';
-import { sandboxTestsRun } from '../helpers/sandbox.ts';
+import { overlayTestsRun } from '../helpers/sandbox.ts';
 import { isRoot } from '../tools/fixtures.ts';
 
 const host = sandboxHost();
@@ -132,7 +133,7 @@ const summary = (outcome: ApplyOutcome) => ({
   stopped: outcome.stopped?.reason ?? null,
 });
 
-describe.if(sandboxTestsRun)('the workspace ChangeSet', () => {
+describe.if(overlayTestsRun)('the workspace ChangeSet', () => {
   test('applies additions, edits, removals, renames and directories, and leaves the rest', async () => {
     const w = workspace({
       'edit.txt': 'old\n',
@@ -322,8 +323,11 @@ describe.if(sandboxTestsRun)('the workspace ChangeSet', () => {
     dirs.push(outside);
     const w = workspace({ 'sub/keep': 'k\n', 'links/keep': 'k\n' });
     symlinkSync(outside, w.file('sub/ext'));
+    symlinkSync('../sub/keep', w.file('links/a'));
     w.start();
-    w.agent('rm sub/ext && mkdir sub/ext && echo mine > sub/ext/key; ln -s ../sub/ext/key links/a');
+    w.agent(
+      'rm sub/ext && mkdir sub/ext && echo mine > sub/ext/key; ln -sfn ../sub/ext/key links/a',
+    );
     // Over the upper layer the link stays inside: sub/ext is the agent's directory there.
     expect(w.changes().filter((change) => change.op === 'refuse')).toEqual([]);
     // The operator replaces the link of the project, so its removal is a conflict; the directory
@@ -336,8 +340,65 @@ describe.if(sandboxTestsRun)('the workspace ChangeSet', () => {
       'sub/ext',
       'sub/ext/key',
     ]);
-    expect(result.refused).toEqual(['links/a: the link leads out of the project']);
-    expect(existsSync(w.file('links/a'))).toBe(false);
+    // The link it replaces stays: its removal goes with the refused link.
+    expect(result.refused).toEqual([
+      'links/a: the link leads out of the project',
+      'links/a: the entry that replaces it is not applied',
+    ]);
+    expect(readlinkSync(w.file('links/a'))).toBe('../sub/keep');
+  });
+
+  test('a link of the project replaced by one that leads out stays as it was', () => {
+    const w = workspace({ 'config.txt': 'c\n' });
+    symlinkSync('config.txt', w.file('config-link'));
+    w.start();
+    w.agent('ln -sfn /etc/passwd config-link');
+    const result = summary(w.apply());
+    expect(result.refused).toEqual([
+      'config-link: the entry that replaces it is not applied',
+      'config-link: the link leads out of the project',
+    ]);
+    expect(result.applied).toEqual([]);
+    expect(readlinkSync(w.file('config-link'))).toBe('config.txt');
+  });
+
+  test('a mode change to a file with another name outside the project leaves that name alone', () => {
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), 'nullrivet-outside-')));
+    dirs.push(outside);
+    const w = workspace();
+    writeFileSync(join(outside, 'secret'), 'shared\n', { mode: 0o600 });
+    chmodSync(join(outside, 'secret'), 0o600);
+    linkSync(join(outside, 'secret'), w.file('alias.txt'));
+    w.start();
+    w.agent('chmod 644 alias.txt');
+    const result = summary(w.apply());
+    expect(result.stopped).toBeNull();
+    expect(result.applied).toEqual(['write alias.txt']);
+    expect(statSync(w.file('alias.txt')).mode & 0o777).toBe(0o644);
+    expect(readFileSync(w.file('alias.txt'), 'utf8')).toBe('shared\n');
+    expect(statSync(join(outside, 'secret')).mode & 0o777).toBe(0o600);
+    expect(statSync(join(outside, 'secret')).nlink).toBe(1);
+  });
+
+  test('FIFOs and sockets the project has are removed, alone or in a directory', () => {
+    const w = workspace({ 'cache/data.txt': 'd\n' });
+    Bun.spawnSync(['mkfifo', w.file('pipe'), w.file('cache/pipe')]);
+    // A socket file stays after the process that bound it ends; Bun removes its own on stop.
+    Bun.spawnSync([
+      'python3',
+      '-I',
+      '-c',
+      'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])',
+      w.file('cache/server.sock'),
+    ]);
+    expect(lstatSync(w.file('cache/server.sock')).isSocket()).toBe(true);
+    w.start();
+    w.agent('rm pipe; rm -r cache');
+    const result = summary(w.apply());
+    expect(result.refused).toEqual([]);
+    expect(result.conflicts).toEqual([]);
+    expect(result.applied.sort()).toEqual(['remove cache', 'remove pipe']);
+    expect(readdirSync(w.project)).toEqual([]);
   });
 
   test('a link through an entry that is not applied is refused in the summary', () => {
@@ -470,6 +531,15 @@ describe.if(sandboxTestsRun)('the workspace ChangeSet', () => {
     expect(readdirSync(w.project).filter((name) => name.startsWith('.nullrivet-'))).toEqual([]);
   });
 
+  test('a file the host deletes between its check and its replacement stays deleted, with no leftover', () => {
+    const w = workspace({ 'race.txt': 'base\n' });
+    w.start();
+    w.agent('echo agent >> race.txt');
+    const outcome = w.apply(undefined, () => rmSync(w.file('race.txt')));
+    expect(outcome.stopped?.reason).toBe('the file changed on the host');
+    expect(readdirSync(w.project)).toEqual([]);
+  });
+
   test('a file over the size limit is not hashed nor applied, a sparse one included', () => {
     const w = workspace();
     w.start();
@@ -484,8 +554,11 @@ describe.if(sandboxTestsRun)('the workspace ChangeSet', () => {
     const w = workspace();
     w.start();
     const name = 'd'.repeat(200);
-    // One level at a time: a shell refuses a path that long in one piece.
-    w.agent(`for i in $(seq 25); do mkdir ${name} && cd ${name}; done && echo deep > leaf.txt`);
+    // One level at a time, by relative calls: a path that long is refused in one piece, and some
+    // shells, dash among them, change directory by the whole path.
+    w.agent(
+      `python3 -I -c "import os\nfor _ in range(25):\n    os.mkdir('${name}'); os.chdir('${name}')\nopen('leaf.txt', 'w').write('deep\\n')"`,
+    );
     const result = summary(w.apply());
     expect(result.stopped).toBeNull();
     expect(result.conflicts).toEqual([]);
