@@ -25,7 +25,8 @@ export type Change =
     }
   | { op: 'mkdir'; path: Buffer[]; mode: number; droppedBits: number }
   | { op: 'symlink'; path: Buffer[]; target: Buffer }
-  | { op: 'chmod'; path: Buffer[]; before: 'file' | 'dir'; mode: number; droppedBits: number }
+  // A mode change of a directory; a file's is a write of a new file.
+  | { op: 'chmod'; path: Buffer[]; mode: number; droppedBits: number }
   | {
       op: 'remove';
       path: Buffer[];
@@ -198,13 +199,10 @@ export const classify = (upper: UpperNode, projectRoot: number): Change[] => {
               const lowerMode = Number(lowerStat.mode) & 0o7777;
               const kept = keptMode(child.mode, lowerMode);
               if (kept.mode !== lowerMode) {
-                // A mode belongs to the inode, which every hard link shares, and another link can
-                // be outside the project: such a file gets a new inode with the new mode.
-                changes.push(
-                  lowerStat.nlink > 1n
-                    ? { op: 'write', path, before: 'file', node: child, ...kept }
-                    : { op: 'chmod', path, before: 'file', ...kept },
-                );
+                // A mode belongs to the inode, which every hard link shares, and a link outside
+                // the project can be made up to the moment the mode is set: the file gets a new
+                // inode with the new mode instead.
+                changes.push({ op: 'write', path, before: 'file', node: child, ...kept });
               }
               break;
             }
@@ -246,7 +244,7 @@ export const classify = (upper: UpperNode, projectRoot: number): Change[] => {
               const lowerMode = Number(lowerStat.mode) & 0o7777;
               const kept = keptMode(child.mode, lowerMode);
               if (kept.mode !== lowerMode) {
-                changes.push({ op: 'chmod', path, before: 'dir', ...kept });
+                changes.push({ op: 'chmod', path, ...kept });
               }
             }
             try {

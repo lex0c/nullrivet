@@ -368,10 +368,11 @@ and it is read only when no process can change it.
   `.git` is never changed, at any depth, and a directory holding one, or a mount point, is never
   removed. Creating a device, FIFO or socket is refused; removing one the project has is applied,
   since a removal only takes away a name. Two names of one inode, a hard link, reach the project
-  as two separate files. A mode belongs to the inode, shared by every name, and another name can
-  be outside the project, so a mode change to a file with more than one name gives it a new inode
-  instead. An entry that replaces another is a removal and a creation; the removal is applied only
-  with the creation, so a refused or conflicting entry leaves the project's one in place.
+  as two separate files. A mode belongs to the inode, shared by every name, and a name outside the
+  project can be made up to the moment the mode is set, so a file whose mode changes gets a new
+  inode with the new mode; only a directory's mode is changed in place. An entry that replaces
+  another is a removal and a creation, applied together; a refused or conflicting entry leaves the
+  project's one in place.
 - **Symbolic links.** A link is applied only when it resolves inside the project, or under `/usr`
   with no `..` component, as a Python virtual environment's interpreter link does. It is resolved
   over the tree the project would have, following every link on the way, up to 40, since a link
@@ -395,15 +396,19 @@ and it is read only when no process can change it.
   concurrent change.
 - **Application.** Stopping the sandbox ends the worker's processes, not the host's: an editor or a
   build can still change a file during the application, so each entry is checked again as it is
-  written. A modified file is written to a temporary file in its directory and exchanged with it
-  (`renameat2` with `RENAME_EXCHANGE`); the file moved out must be the one checked, with the same
-  size and modification time, or the exchange is undone. An addition goes in only where nothing
-  is (`RENAME_NOREPLACE`), in a directory that did not change. A removal first moves the entry to
-  a hidden name in its directory, checks what it moved, and deletes it, or moves it back. Before
+  written. An entry that is replaced, by a new version of a file or by an entry of another type,
+  is made first under a temporary name in its directory and exchanged with the project's
+  (`renameat2` with `RENAME_EXCHANGE`): the path holds one or the other at every moment, and a
+  failure while the new entry is made leaves the project's in place. The entry moved out must be
+  the one checked, with the same modification time, and the same size for a file or the same
+  content for a directory, or the exchange is undone. An addition goes in only where nothing is
+  (`RENAME_NOREPLACE`), in a directory that did not change. A removal first moves the entry to a
+  hidden name in its directory, checks what it moved, and deletes it, or moves it back. Before
   each write, the directory is opened again to confirm it was not moved. The application is
-  atomic per file, not across the project: an entry that changes type is a removal and a
-  creation, and a failure, a new conflict or an interruption of the process stops it, leaving
-  what was applied before. It reports what was applied and what was not.
+  atomic per entry, not across the project: a failure, a new conflict or an interruption of the
+  process stops it, leaving what was applied before. It reports what was applied and what was
+  not; when an entry was taken from its path but could not be deleted, the report gives the
+  hidden name it is left under.
 - **Discarding** removes the upper layer.
 
 Editing the project on the host during a `workspace` session is not supported. The kernel leaves

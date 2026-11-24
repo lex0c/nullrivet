@@ -540,6 +540,64 @@ describe.if(overlayTestsRun)('the workspace ChangeSet', () => {
     expect(readdirSync(w.project)).toEqual([]);
   });
 
+  test.skipIf(isRoot)('a file a link replaces stays when the link cannot be created', () => {
+    const w = workspace({ 'conf/app.cfg': 'c\n', 'conf/other.cfg': 'o\n' });
+    w.start();
+    w.agent('ln -sfn other.cfg conf/app.cfg');
+    const outcome = w.apply(undefined, (change) => {
+      if (change.op === 'symlink') chmodSync(w.file('conf'), 0o555);
+    });
+    expect(outcome.stopped?.reason).toContain('EACCES');
+    expect(outcome.applied).toEqual([]);
+    expect(outcome.notReached.map((c) => `${c.op} ${c.path.join('/')}`)).toEqual([
+      'remove conf/app.cfg',
+    ]);
+    expect(lstatSync(w.file('conf/app.cfg')).isFile()).toBe(true);
+    expect(readFileSync(w.file('conf/app.cfg'), 'utf8')).toBe('c\n');
+    expect(readdirSync(w.file('conf')).sort()).toEqual(['app.cfg', 'other.cfg']);
+  });
+
+  test('a directory a file replaces stays whole when the file cannot be written', () => {
+    const w = workspace({ 'out/a.txt': 'a\n', 'out/sub/b.txt': 'b\n' });
+    w.start();
+    w.agent('rm -r out && echo report > out');
+    const list = w.changes();
+    writeFileSync(join(w.upper, 'out'), 'tampered\n');
+    const outcome = w.apply(list);
+    expect(outcome.stopped?.reason).toBe('a file of the sandbox changed after it was read');
+    expect(outcome.applied).toEqual([]);
+    expect(readFileSync(w.file('out/a.txt'), 'utf8')).toBe('a\n');
+    expect(readFileSync(w.file('out/sub/b.txt'), 'utf8')).toBe('b\n');
+    expect(readdirSync(w.project)).toEqual(['out']);
+  });
+
+  test('a directory the host writes to between its check and its replacement stays, with what the host wrote', () => {
+    const w = workspace({ 'out/a.txt': 'a\n' });
+    w.start();
+    w.agent('rm -r out && ln -s a.txt out');
+    const outcome = w.apply(undefined, () => writeFileSync(w.file('out/host.txt'), 'h\n'));
+    expect(outcome.stopped?.reason).toBe('the directory changed on the host');
+    expect(readdirSync(w.file('out')).sort()).toEqual(['a.txt', 'host.txt']);
+    expect(readdirSync(w.project)).toEqual(['out']);
+  });
+
+  test('a name made outside the project between the check of a file and its mode change keeps its mode', () => {
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), 'nullrivet-outside-')));
+    dirs.push(outside);
+    const w = workspace({ 'tool.sh': 'echo\n' });
+    chmodSync(w.file('tool.sh'), 0o644);
+    w.start();
+    w.agent('chmod 755 tool.sh');
+    const outcome = w.apply(undefined, () => linkSync(w.file('tool.sh'), join(outside, 'alias')));
+    const result = summary(outcome);
+    expect(result.stopped).toBeNull();
+    expect(result.applied).toEqual(['write tool.sh']);
+    expect(statSync(w.file('tool.sh')).mode & 0o777).toBe(0o755);
+    expect(readFileSync(w.file('tool.sh'), 'utf8')).toBe('echo\n');
+    expect(statSync(join(outside, 'alias')).mode & 0o777).toBe(0o644);
+    expect(readFileSync(join(outside, 'alias'), 'utf8')).toBe('echo\n');
+  });
+
   test('a file over the size limit is not hashed nor applied, a sparse one included', () => {
     const w = workspace();
     w.start();

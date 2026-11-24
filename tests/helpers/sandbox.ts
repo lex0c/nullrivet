@@ -13,7 +13,9 @@ export const sandboxTestsRun = usable || process.env.NULLRIVET_TEST_REQUIRE_SAND
 
 // The overlay options came in Bubblewrap 0.10.0. The overlay tests are skipped with an older one,
 // as Ubuntu 24.04 ships, and decided by its version, not by a trial mount: on a version that has
-// them, an overlay that fails is a failure.
+// them, an overlay that fails is a failure. NULLRIVET_TEST_REQUIRE_OVERLAY, set in CI where the
+// Bubblewrap installed has them, runs them whatever the version found, so a runner that loses
+// them fails instead of skipping them.
 const OVERLAY_VERSION = [0, 10, 0];
 const bwrapHasOverlays = (): boolean => {
   if (typeof host === 'string') return false;
@@ -28,4 +30,5 @@ const bwrapHasOverlays = (): boolean => {
   return true;
 };
 
-export const overlayTestsRun = sandboxTestsRun && bwrapHasOverlays();
+export const overlayTestsRun =
+  (sandboxTestsRun && bwrapHasOverlays()) || process.env.NULLRIVET_TEST_REQUIRE_OVERLAY === '1';

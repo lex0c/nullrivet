@@ -30,7 +30,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15, macos-15-intel]
+        include:
+          # Ubuntu 26.04 ships Bubblewrap 0.11, with the overlay options the workspace profile
+          # uses: the overlay tests must run there, on both architectures.
+          - os: ubuntu-latest
+            overlays: true
+          - os: ubuntu-26.04-arm
+            overlays: true
+          # Ubuntu 24.04 ships Bubblewrap 0.9, without them: the inspect profile is tested there,
+          # and the overlay tests are skipped.
+          - os: ubuntu-24.04
+          - os: macos-15
+          - os: macos-15-intel
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
@@ -50,6 +61,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends bubblewrap
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           echo NULLRIVET_TEST_REQUIRE_SANDBOX=1 >> "$GITHUB_ENV"
+      - if: matrix.overlays
+        run: echo NULLRIVET_TEST_REQUIRE_OVERLAY=1 >> "$GITHUB_ENV"
       - run: bun test
       # The end-to-end tests again, against the compiled executable, which resolves its embedded
       # modules differently from the sources.

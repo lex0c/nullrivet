@@ -9,7 +9,7 @@ import {
   writeSync,
 } from 'node:fs';
 import { errorMessage } from '../../errors.ts';
-import type { Change } from './classify.ts';
+import type { Before, Change } from './classify.ts';
 import {
   chmodFd,
   lstatAt,
@@ -39,9 +39,11 @@ import { linksInsideProject, REPLACEMENT_LEFT_OUT } from './validate.ts';
 // The project's own processes are trusted; the content to write comes from the upper layer, which
 // is not, and is checked against the hash taken when the layer was read.
 //
-// Each file is replaced whole or not at all; an entry that changes type is removed and then
-// created, two steps. The set is not a transaction: a failure, or an interruption of this process,
-// leaves the entries before it applied.
+// An entry of the project that is replaced, by a new version or by an entry of another type, is
+// exchanged with the new one, made beforehand under a temporary name: its path holds one or the
+// other at every moment, and a failure before the exchange leaves the project's in place. The set
+// is not a transaction: a failure, or an interruption of this process, leaves the entries before
+// it applied.
 //
 // Symbolic links are created last, each checked again over the project as it then is: an entry a
 // link leads through may not have been applied.
@@ -54,8 +56,8 @@ export interface ApplyOptions {
   // Changes since this time, in nanoseconds, are the host's: entries changed at or after it are
   // conflicts.
   since: bigint;
-  // Called between the check of a file and its replacement, where a change on the host races with
-  // this process. Only tests use it, to make that change at that moment.
+  // Called between the check of an entry and its replacement, where a change on the host races
+  // with this process. Only tests use it, to make that change at that moment.
   afterCheck?: (change: Change) => void;
 }
 
@@ -76,10 +78,35 @@ export interface ApplyOutcome {
 
 type Stat = ReturnType<typeof lstatAt>;
 type SymlinkChange = Extract<Change, { op: 'symlink' }>;
+type RemoveChange = Extract<Change, { op: 'remove' }>;
+type Creation = Extract<Change, { op: 'write' | 'mkdir' | 'symlink' }>;
+type Existing = Exclude<Before, 'absent'>;
 
 class Conflict extends Error {
   override name = 'Conflict';
 }
+
+// The project's entry is no longer at its path, and deleting it failed: the change is applied,
+// and the error names where what is left of the entry stays.
+class NotDeleted extends Error {
+  override name = 'NotDeleted';
+}
+
+// The project's entry, identified by its inode as it was checked. A directory is held open, to
+// check what it holds once it is detached.
+interface Held {
+  stat: Stat;
+  dir: number | null;
+}
+
+// Codes of opening a directory that was there at the check: something else has its name now.
+const REPLACED = new Set(['ENOENT', 'ENOTDIR', 'ELOOP', 'EXDEV']);
+
+const changedOnHost = (before: Existing): string => {
+  if (before === 'file') return 'the file changed on the host';
+  if (before === 'dir') return 'the directory changed on the host';
+  return 'the entry changed on the host';
+};
 
 const parentKey = (path: readonly Buffer[]): string => pathKey(path.slice(0, -1));
 const inodeKey = (stat: { dev: bigint; ino: bigint }): string => `${stat.dev}:${stat.ino}`;
@@ -224,51 +251,153 @@ export const applyChanges = (changes: readonly Change[], options: ApplyOptions):
     return upperFd;
   };
 
-  // Moves an entry to a trash name, checks it is still what was checked, and deletes it; or puts
-  // it back. Deleting a detached entry cannot race with a change made under its name.
-  const removeEntry = (dir: number, name: Buffer, before: Change & { op: 'remove' }): void => {
-    const trash = tempName('trash');
-    ensureInside(dir, before.path);
-    if (before.before === 'dir') {
-      const fd = openDirectoryBeneath(dir, name);
-      try {
-        const pre = fstatSync(fd, { bigint: true });
-        if (!unchanged(pre)) throw new Conflict('the directory changed on the host');
-        renameBeneath(dir, name, dir, trash, RENAME_NOREPLACE);
-        // The entry renamed must be the directory held open: another one can have taken its name
-        // since it was opened.
-        const moved = lstatAt(dir, trash);
-        const post = fstatSync(fd, { bigint: true });
-        if (
-          moved.dev !== pre.dev ||
-          moved.ino !== pre.ino ||
-          post.mtimeNs !== pre.mtimeNs ||
-          !treeUnchanged(fd)
-        ) {
-          renameBeneath(dir, trash, dir, name, RENAME_NOREPLACE);
-          throw new Conflict('something in the directory changed on the host');
-        }
-        removeTree(fd);
-      } finally {
-        closeSync(fd);
+  const holdEntry = (dir: number, name: Buffer, before: Existing): Held => {
+    const conflict = changedOnHost(before);
+    if (before !== 'dir') {
+      const stat = lstatAtOrNull(dir, name);
+      if (stat === null || !unchanged(stat) || !kindMatches(stat, before)) {
+        throw new Conflict(conflict);
       }
-      rmdirAt(dir, trash);
-      return;
+      return { stat, dir: null };
     }
-    const pre = lstatAt(dir, name);
-    if (!unchanged(pre) || kindMatches(pre, before.before) === false) {
-      throw new Conflict('the entry changed on the host');
+    let fd: number;
+    try {
+      fd = openDirectoryBeneath(dir, name);
+    } catch (error) {
+      if (error instanceof SysError && REPLACED.has(error.code)) throw new Conflict(conflict);
+      throw error;
     }
-    renameBeneath(dir, name, dir, trash, RENAME_NOREPLACE);
-    const post = lstatAt(dir, trash);
-    if (post.ino !== pre.ino || post.mtimeNs !== pre.mtimeNs || post.size !== pre.size) {
-      renameBeneath(dir, trash, dir, name, RENAME_NOREPLACE);
-      throw new Conflict('the entry changed on the host');
+    const stat = fstatSync(fd, { bigint: true });
+    if (!unchanged(stat)) {
+      closeSync(fd);
+      throw new Conflict(conflict);
     }
-    unlinkAt(dir, trash);
+    return { stat, dir: fd };
   };
 
-  const applyOne = (change: Change): void => {
+  // Whether the entry now under `name` is the one held, unchanged since it was checked: another
+  // one can have taken its name since, or it can have been written. Moving an entry changes its
+  // change time, so its modification time and size are compared instead.
+  const stillHeld = (dir: number, name: Buffer, held: Held): boolean => {
+    const moved = lstatAt(dir, name);
+    if (
+      moved.dev !== held.stat.dev ||
+      moved.ino !== held.stat.ino ||
+      moved.mtimeNs !== held.stat.mtimeNs
+    ) {
+      return false;
+    }
+    return held.dir === null ? moved.size === held.stat.size : treeUnchanged(held.dir);
+  };
+
+  // Deletes the project's entry, detached under `trash`: a change made under its old name cannot
+  // reach it.
+  const deleteHeld = (dir: number, trash: Buffer, held: Held): void => {
+    try {
+      if (held.dir === null) {
+        unlinkAt(dir, trash);
+      } else {
+        removeTree(held.dir);
+        rmdirAt(dir, trash);
+      }
+    } catch (error) {
+      throw new NotDeleted(
+        `deleting the project's entry failed, and it is left as ${trash.toString()} in the same ` +
+          `directory: ${errorMessage(error)}`,
+      );
+    }
+  };
+
+  // Moves an entry to a trash name, checks it is still what was checked, and deletes it; or puts
+  // it back.
+  const removeEntry = (dir: number, name: Buffer, change: RemoveChange): void => {
+    const held = holdEntry(dir, name, change.before);
+    try {
+      ensureInside(dir, change.path);
+      const trash = tempName('trash');
+      try {
+        renameBeneath(dir, name, dir, trash, RENAME_NOREPLACE);
+      } catch (error) {
+        if (error instanceof SysError && error.code === 'ENOENT') {
+          throw new Conflict(changedOnHost(change.before));
+        }
+        throw error;
+      }
+      if (!stillHeld(dir, trash, held)) {
+        renameBeneath(dir, trash, dir, name, RENAME_NOREPLACE);
+        throw new Conflict(changedOnHost(change.before));
+      }
+      deleteHeld(dir, trash, held);
+    } finally {
+      if (held.dir !== null) closeSync(held.dir);
+    }
+  };
+
+  // Makes the entry of `change` under a temporary name in `dir`. A directory is made empty and
+  // open to its owner; it gets its mode once it is in place.
+  const createAt = (dir: number, change: Creation): Buffer => {
+    if (change.op === 'write') return writeTemp(dir, change.path, change.node.hash, change.mode);
+    const temp = tempName('new');
+    if (change.op === 'mkdir') mkdirAt(dir, temp, 0o700);
+    else symlinkAt(change.target, dir, temp);
+    return temp;
+  };
+
+  // Puts the entry of `change` in place of the project's entry at `name`, by exchanging the two.
+  // The project's entry is deleted once it is confirmed to be the one checked; otherwise the
+  // exchange is undone and the new entry deleted.
+  const replaceEntry = (dir: number, name: Buffer, before: Existing, change: Creation): void => {
+    const held = holdEntry(dir, name, before);
+    try {
+      options.afterCheck?.(change);
+      const temp = createAt(dir, change);
+      // What the temporary name holds: the new entry until the exchange, the project's after it.
+      // When that is not known, nothing under it is deleted.
+      let holds: 'new' | 'old' | 'unknown' = 'new';
+      // The new file or directory, to record the times it is left with.
+      let made: number | null = null;
+      try {
+        if (change.op !== 'symlink') made = openPathBeneath(dir, temp);
+        ensureInside(dir, change.path);
+        try {
+          renameBeneath(dir, temp, dir, name, RENAME_EXCHANGE);
+        } catch (error) {
+          if (error instanceof SysError && error.code === 'ENOENT') {
+            throw new Conflict(changedOnHost(before));
+          }
+          throw error;
+        }
+        holds = 'unknown';
+        let same = false;
+        try {
+          same = stillHeld(dir, temp, held);
+        } finally {
+          if (!same) {
+            renameBeneath(dir, temp, dir, name, RENAME_EXCHANGE);
+            holds = 'new';
+          }
+        }
+        if (!same) throw new Conflict(changedOnHost(before));
+        holds = 'old';
+        if (made !== null) {
+          if (change.op === 'mkdir') chmodFd(made, writableDirectory(change.path, change.mode));
+          record(made);
+        }
+      } finally {
+        if (made !== null) closeSync(made);
+        if (holds === 'new') {
+          if (change.op === 'mkdir') rmdirAt(dir, temp);
+          else unlinkAt(dir, temp);
+        }
+      }
+      deleteHeld(dir, temp, held);
+    } finally {
+      if (held.dir !== null) closeSync(held.dir);
+    }
+  };
+
+  // Applies one change; `replacing` is the removal that makes room for it, done in the same step.
+  const applyOne = (change: Change, replacing?: RemoveChange): void => {
     if (change.op === 'refuse') return;
     const name = nameOf(change.path);
     withParent(change.path, (dir) => {
@@ -282,54 +411,15 @@ export const applyChanges = (changes: readonly Change[], options: ApplyOptions):
         case 'symlink':
         case 'write': {
           if (change.op === 'write' && change.before === 'file') {
-            const fd = openPathBeneath(dir, name);
-            try {
-              const pre = fstatSync(fd, { bigint: true });
-              if (!pre.isFile() || !unchanged(pre))
-                throw new Conflict('the file changed on the host');
-              options.afterCheck?.(change);
-              const temp = writeTemp(dir, change.path, change.node.hash, change.mode);
-              // What the temporary name holds: the new file until the exchange, the project's
-              // file after it. The project's file is deleted only once the new one is confirmed in
-              // its place; when that is not known, it stays under the temporary name.
-              let holds: 'new' | 'old' | 'unknown' = 'new';
-              try {
-                ensureInside(dir, change.path);
-                try {
-                  renameBeneath(dir, temp, dir, name, RENAME_EXCHANGE);
-                } catch (error) {
-                  if (error instanceof SysError && error.code === 'ENOENT') {
-                    throw new Conflict('the file changed on the host');
-                  }
-                  throw error;
-                }
-                holds = 'unknown';
-                // The exchange changes the change time of both files; the old one is identified
-                // by its inode, and its size and modification time show whether it was written
-                // since.
-                const post = fstatSync(fd, { bigint: true });
-                const swapped = lstatAt(dir, temp);
-                if (
-                  swapped.ino !== pre.ino ||
-                  post.size !== pre.size ||
-                  post.mtimeNs !== pre.mtimeNs
-                ) {
-                  renameBeneath(dir, temp, dir, name, RENAME_EXCHANGE);
-                  holds = 'new';
-                  throw new Conflict('the file changed on the host');
-                }
-                holds = 'old';
-              } finally {
-                if (holds !== 'unknown') unlinkAt(dir, temp);
-              }
-              recordAt(dir, name);
-            } finally {
-              closeSync(fd);
-            }
+            replaceEntry(dir, name, 'file', change);
+            break;
+          }
+          if (!unchanged(parent)) throw new Conflict('its directory changed on the host');
+          if (replacing !== undefined) {
+            replaceEntry(dir, name, replacing.before, change);
             break;
           }
           // An addition: nothing there, in a directory nobody else changed.
-          if (!unchanged(parent)) throw new Conflict('its directory changed on the host');
           if (lstatAtOrNull(dir, name) !== null)
             throw new Conflict('something was created there on the host');
           ensureInside(dir, change.path);
@@ -363,18 +453,11 @@ export const applyChanges = (changes: readonly Change[], options: ApplyOptions):
           const fd = openPathBeneath(dir, name);
           try {
             const pre = fstatSync(fd, { bigint: true });
-            if (!unchanged(pre) || !kindMatches(pre, change.before)) {
-              throw new Conflict('the entry changed on the host');
-            }
-            // The mode of a file with other names would change for all of them.
-            if (pre.isFile() && pre.nlink > 1n) {
-              throw new Conflict('the file has other names on the host');
+            if (!unchanged(pre) || !pre.isDirectory()) {
+              throw new Conflict('the directory changed on the host');
             }
             ensureInside(dir, change.path);
-            chmodFd(
-              fd,
-              change.before === 'dir' ? writableDirectory(change.path, change.mode) : change.mode,
-            );
+            chmodFd(fd, writableDirectory(change.path, change.mode));
             record(fd);
           } finally {
             closeSync(fd);
@@ -412,8 +495,9 @@ export const applyChanges = (changes: readonly Change[], options: ApplyOptions):
             }
             return null;
           case 'chmod':
-            if (target === null || !unchanged(target)) return 'the entry changed on the host';
-            if (target.isFile() && target.nlink > 1n) return 'the file has other names on the host';
+            if (target === null || !unchanged(target) || !target.isDirectory()) {
+              return 'the directory changed on the host';
+            }
             return null;
           case 'write':
             if (change.before === 'file') {
@@ -513,15 +597,40 @@ export const applyChanges = (changes: readonly Change[], options: ApplyOptions):
     }
   }
 
-  // Applies `list` in order, up to the first failure; true when it reached the end.
-  const run = (list: readonly Change[]): boolean => {
-    for (const [index, change] of list.entries()) {
+  // A removal that makes room for an entry is applied with it, as one replacement: the two are
+  // one unit, reported together.
+  const removalAt = new Map(
+    ready
+      .filter((change): change is RemoveChange => change.op === 'remove')
+      .map((change) => [pathKey(change.path), change] as const),
+  );
+  const replaced = new Set(
+    ready
+      .filter((change) => change.op !== 'remove' && removalAt.has(pathKey(change.path)))
+      .map((change) => pathKey(change.path)),
+  );
+  const unitOf = (change: Change): Change[] => {
+    const removal = change.op === 'remove' ? undefined : removalAt.get(pathKey(change.path));
+    return removal === undefined ? [change] : [removal, change];
+  };
+  // Applies `units` in order, up to the first failure; true when it reached the end. The change a
+  // unit stops at is its last: the entry a removal makes room for.
+  const run = (units: readonly Change[][]): boolean => {
+    for (const [index, unit] of units.entries()) {
+      const change = unit.at(-1) as Change;
+      const removal = unit.length > 1 ? (unit[0] as RemoveChange) : undefined;
       try {
-        applyOne(change);
-        outcome.applied.push(change);
+        applyOne(change, removal);
+        outcome.applied.push(...unit);
       } catch (error) {
         outcome.stopped = { change, reason: errorMessage(error) };
-        outcome.notReached.push(...list.slice(index + 1));
+        if (error instanceof NotDeleted) {
+          // The entry is no longer at its path: only deleting it failed.
+          outcome.applied.push(...unit);
+        } else {
+          outcome.notReached.push(...unit.slice(0, -1));
+        }
+        outcome.notReached.push(...units.slice(index + 1).flat());
         return false;
       }
     }
@@ -530,47 +639,42 @@ export const applyChanges = (changes: readonly Change[], options: ApplyOptions):
   // Links go last, each with the removal that makes room for it, so that a link refused by the
   // second check leaves the project's entry at its path in place.
   const links = ready.filter((change): change is SymlinkChange => change.op === 'symlink');
-  const linkPaths = new Set(links.map((link) => pathKey(link.path)));
-  const makesRoom = (change: Change): boolean =>
-    change.op === 'remove' && linkPaths.has(pathKey(change.path));
-  const roomFor = new Map(
-    ready.filter(makesRoom).map((change) => [pathKey(change.path), change] as const),
-  );
-  const withRoom = (link: Change): Change[] => {
-    const removal = roomFor.get(pathKey(link.path));
-    return removal === undefined ? [link] : [removal, link];
-  };
-  const entries = ready.filter((change) => change.op !== 'symlink' && !makesRoom(change));
+  const entries = ready
+    .filter(
+      (change) =>
+        change.op !== 'symlink' && !(change.op === 'remove' && replaced.has(pathKey(change.path))),
+    )
+    .map(unitOf);
 
   try {
     if (!run(entries)) {
-      outcome.notReached.push(...links.flatMap(withRoom));
+      outcome.notReached.push(...links.flatMap(unitOf));
     } else if (links.length > 0) {
       let checked: Change[] | null = null;
       try {
         checked = linksInsideProject(links, options.projectRoot, options.projectPath);
       } catch (error) {
-        const [first, ...rest] = links.flatMap(withRoom);
+        const first = links[0] as SymlinkChange;
         outcome.stopped = {
-          change: first as Change,
+          change: first,
           reason: `checking the links failed: ${errorMessage(error)}`,
         };
-        outcome.notReached.push(...rest);
+        outcome.notReached.push(...links.flatMap(unitOf).filter((change) => change !== first));
       }
       if (checked !== null) {
-        const toRun: Change[] = [];
+        const units: Change[][] = [];
         for (const change of checked) {
           if (change.op !== 'refuse') {
-            toRun.push(...withRoom(change));
+            units.push(unitOf(change));
             continue;
           }
           outcome.refused.push({ change, reason: change.reason });
-          const removal = roomFor.get(pathKey(change.path));
+          const removal = removalAt.get(pathKey(change.path));
           if (removal !== undefined) {
             outcome.refused.push({ change: removal, reason: REPLACEMENT_LEFT_OUT });
           }
         }
-        run(toRun);
+        run(units);
       }
     }
     try {
