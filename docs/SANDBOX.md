@@ -337,50 +337,75 @@ own, the ChangeSet. The worker never names the host paths to write: the ChangeSe
 overlay's upper layer itself and decides. The worker wrote that layer, so it is untrusted input,
 and it is read only when no process can change it.
 
-- **Baseline.** Before the worker starts, the host records in memory the metadata of every entry
-  under the project: device, inode, type, size, and modification and change times. The files the
-  session will change are not known yet, so the record covers the whole project; hashing every
-  file would serve the same purpose, at a cost proportional to the project's size.
+- **Reference time.** Right before the overlay is mounted, the host creates a probe file and takes
+  its change time. Any change to an entry sets its change time to the present, and no call sets it
+  back, so an entry of the project whose change time is not earlier than the probe's changed on
+  the host during the session. The ChangeSet records the times it leaves on each entry it writes,
+  so its own writes, several additions to one directory included, are not conflicts. Timestamps
+  are signs of change, not a record of content: the host's processes are trusted, the worker is
+  not. The clock has a granularity, so an entry changed within the same tick as the probe counts
+  as changed: a false conflict, never a missed one. Modification times are not compared, since a
+  file can carry a future one without any change.
 - **Stopping the sandbox.** Applying starts by ending the sandbox, with its commands and background
   jobs, which the confirmation lists. The broker holds tool calls until the application ends, and
-  the next call starts a new sandbox over the updated project. With no process left that can write
-  the upper layer, it cannot change between validation and writing. overlayfs requires the stop as
-  well: changing a lower layer while the overlay is mounted has undefined behavior.
+  the next call starts a new sandbox over the updated project, with a new upper layer: the old one
+  is never mounted again, and the entries it holds that were not applied are listed and
+  discarded. With no process left that can write the upper layer, it cannot change between
+  validation and writing. overlayfs requires the stop as well: changing a lower layer while the
+  overlay is mounted has undefined behavior.
 - **Snapshot.** The ChangeSet walks the upper layer once, without following its symbolic links,
   and records each entry: type, mode and, for a regular file, its SHA-256. Regular files are
-  additions or modifications; whiteouts are deletions; an opaque directory replaces the one below.
-  A rename appears as a deletion and an addition, and is applied as such. The diff is built from
-  the snapshot, and each file is checked against its hash again when written, so what is written
-  is what was shown.
-- **Validation, before anything is written.** Every target path is resolved from a descriptor of
-  the project directory, beneath it and without following a symbolic link in any component
-  (`openat2` with `RESOLVE_BENEATH` and `RESOLVE_NO_SYMLINKS`), so a path cannot lead elsewhere
-  between the check and the write. A target that is a symbolic link in the project and a
-  directory in the snapshot is replaced, not followed. Symbolic links in the snapshot whose target
-  leaves the project, hard links, devices, FIFOs and sockets are refused. Modes are kept,
-  set-user-ID and set-group-ID bits dropped. Checked: through `bun:ffi`, `openat2` refused a
-  component that is a symbolic link with `ELOOP` and a path that leaves the directory with
-  `EXDEV`. The file API Bun provides opens by path only, so these calls go through `bun:ffi`.
-- **Conflicts.** A target whose metadata differs from the baseline, or that appeared or
-  disappeared since, changed on the host during the session: a conflict, shown and not applied.
-  Equal metadata does not prove equal content: timestamps have a granularity, and a file changed
-  twice within one tick, keeping its size, keeps its metadata. As Git does for racily clean
-  entries, files whose change time is not earlier than the moment the baseline is taken are also
-  hashed then, and compared by content. The check prevents accidental overwrites; it does not
-  detect every concurrent change.
-- **Application.** The validated set is shown as a diff with the existing diff rendering. On
-  confirmation, files are written one by one with the atomic write `write_file` uses, through the
-  same descriptor-based resolution. Stopping the sandbox ends the worker's processes, not the
-  host's: an editor or a build can still change a file during the application, so the conflict
-  check runs again just before each file is replaced. The application is atomic per file, not
-  across the project; a failure or a new conflict stops it and reports what was applied and what
-  was not. Applied entries leave the upper layer. The others stay with their original
-  baseline, so a conflict is still a conflict in the next sandbox, and can be retried or
-  discarded.
+  additions or modifications; whiteouts, a character device 0/0 or a file with the whiteout
+  marker, are deletions; an opaque directory replaces the one below. Overlay features the reader
+  does not handle (`metacopy`, `redirect`) stop it. A marker the agent sets is not one: the kernel
+  stores it escaped, as `user.overlay.overlay.*`. A rename appears as a deletion and an addition,
+  and is applied as such. The walk stops past 200,000 entries, and a file larger than 1 GiB is not
+  applied. Each file is checked against its hash again when written, so what is written is what
+  was shown.
+- **Classification.** Each entry is compared with what the project holds at its path. An entry
+  whose content and mode are unchanged is no change, whatever its times. Modes are kept, and the
+  set-user-ID and set-group-ID bits never added; a bit the project's entry already has is kept.
+  `.git` is never changed, at any depth, and a directory holding one, or a mount point, is never
+  removed. Devices, FIFOs and sockets are refused. Two names of one inode, a hard link, reach the
+  project as two separate files.
+- **Symbolic links.** A link is applied only when it resolves inside the project, or under `/usr`
+  with no `..` component, as a Python virtual environment's interpreter link does. It is resolved
+  over the tree the project would have, following every link on the way, up to 40, since a link
+  inside the project can lead out of it; a part of the project that cannot be read refuses the
+  link. Links are created last, each checked again over the project as it then is, since an entry
+  a link leads through may not have been applied.
+- **Resolution.** Every target path is resolved from a descriptor of the project directory, one
+  component at a time, beneath it and without following a symbolic link or crossing a mount
+  (`openat2` with `RESOLVE_BENEATH`, `RESOLVE_NO_SYMLINKS`, `RESOLVE_NO_MAGICLINKS` and
+  `RESOLVE_NO_XDEV`), so a path cannot lead elsewhere between the check and the write, and paths
+  longer than the system's limit are reached. What would follow the last component (open, write,
+  chmod) is done on a descriptor; only what never follows it (unlink, rmdir, mkdir, symlink,
+  lstat) goes by name, relative to a directory descriptor. A target that is a symbolic link in the
+  project and a directory in the snapshot is replaced, not followed. Checked: through `bun:ffi`,
+  `openat2` refused a component that is a symbolic link with `ELOOP` and a path that leaves the
+  directory with `EXDEV`. The file API Bun provides opens by path only, so these calls go through
+  `bun:ffi`.
+- **Conflicts, before anything is written.** Every entry is checked against the reference time
+  first. An entry in conflict is shown and not applied, with everything beneath it or replacing
+  it; the rest is applied. The check prevents accidental overwrites; it does not detect every
+  concurrent change.
+- **Application.** Stopping the sandbox ends the worker's processes, not the host's: an editor or a
+  build can still change a file during the application, so each entry is checked again as it is
+  written. A modified file is written to a temporary file in its directory and exchanged with it
+  (`renameat2` with `RENAME_EXCHANGE`); the file moved out must be the one checked, with the same
+  size and modification time, or the exchange is undone. An addition goes in only where nothing
+  is (`RENAME_NOREPLACE`), in a directory that did not change. A removal first moves the entry to
+  a hidden name in its directory, checks what it moved, and deletes it, or moves it back. Before
+  each write, the directory is opened again to confirm it was not moved. The application is
+  atomic per file, not across the project: an entry that changes type is a removal and a
+  creation, and a failure, a new conflict or an interruption of the process stops it, leaving
+  what was applied before. It reports what was applied and what was not.
 - **Discarding** removes the upper layer.
 
-While the sandbox runs, the overlay does not promise a consistent view of files the operator edits
-on the host. Such edits are found as conflicts when the ChangeSet is applied.
+Editing the project on the host during a `workspace` session is not supported. The kernel leaves
+undefined what the overlay shows after its lower layer changes, so the worker's view of a file the
+operator edits is not reliable. The ChangeSet finds such edits as conflicts on the paths it
+changes; it does not make the views coherent.
 
 `security` uses the same overlay with its upper layer kept in memory (`--tmp-overlay`): its writes
 are not meant to be applied anywhere, and they are discarded at exit. What outlasts the session is
@@ -604,8 +629,9 @@ limits or for the virtual machine backend.
    processes, their logs and their state; `bash_jobs` and `bash_kill` are forwarded to it like any
    other call. The host keeps only a projection of what the agent loop and the interface read at
    once, fed by facts with sequence numbers. Two parties never control the same processes.
-3. **`workspace`.** The ChangeSet, with the baseline, the stop before reading and the
+3. **`workspace`.** The ChangeSet, with the reference time, the stop before reading and the
    descriptor-based resolution, specified and tested on its own before the overlay is wired in.
+   3a, the ChangeSet on its own, is done.
 4. **`security`.** Only after the network isolation tests pass: the engagement file, the ruleset,
    revocation, pasta, the hosts file, `/scope refresh` and the window. 4b: the allowlisting HTTP
    proxy.

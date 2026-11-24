@@ -1,0 +1,184 @@
+import { closeSync } from 'node:fs';
+import { isAbsolute, sep } from 'node:path';
+import type { Change } from './classify.ts';
+import { lstatAtOrNull, openDirectoryPath, readlinkAt, SysError } from './dirfd.ts';
+import { childKey, pathKey, type UpperNode } from './snapshot.ts';
+
+// A symbolic link is applied only when it resolves inside the project, or to the system's own
+// files under /usr, as a Python virtual environment's interpreter link does. It is resolved over
+// the tree the project would have with it, following every link on the way, since a link inside
+// the project can lead out of it. Links are checked twice: over the upper layer and the project,
+// for the summary, and over the project itself right before they are created, when what was not
+// applied is known.
+//
+// The links are checked with each other present. One that is refused is absent from the project,
+// which changes no other verdict: a link that passes through it resolves through the same steps
+// from there, and is refused as well.
+
+const MAX_HOPS = 40;
+const SYSTEM_PREFIX = Buffer.from('/usr/');
+const DOT = Buffer.from('.');
+const DOTDOT = Buffer.from('..');
+
+// `unknown`: the project could not be read there, or holds there an entry that is not applied, so
+// where a link through it leads is not known.
+type Final = { kind: 'absent' | 'dir' | 'other' | 'unknown' } | { kind: 'symlink'; target: Buffer };
+type Lookup = (path: Buffer[]) => Final;
+type SymlinkChange = Extract<Change, { op: 'symlink' }>;
+
+export const LINK_LEAVES = 'the link leads out of the project';
+
+const split = (path: Buffer): Buffer[] => {
+  const parts: Buffer[] = [];
+  let start = 0;
+  for (let i = 0; i <= path.length; i++) {
+    if (i === path.length || path[i] === 0x2f) {
+      if (i > start) parts.push(path.subarray(start, i));
+      start = i + 1;
+    }
+  }
+  return parts;
+};
+
+// An absolute target under /usr, with no `..` component that would lead back out of it.
+const underSystem = (target: Buffer): boolean =>
+  target.subarray(0, SYSTEM_PREFIX.length).equals(SYSTEM_PREFIX) &&
+  !split(target).some((part) => part.equals(DOTDOT));
+
+// What the project holds at a path, read through descriptors beneath its root.
+const projectAt = (projectRoot: number, path: Buffer[]): Final => {
+  const name = path.at(-1);
+  if (name === undefined) return { kind: 'dir' };
+  let dir = projectRoot;
+  let opened: number | null = null;
+  try {
+    if (path.length > 1) {
+      opened = openDirectoryPath(projectRoot, path.slice(0, -1));
+      dir = opened;
+    }
+    const stat = lstatAtOrNull(dir, name);
+    if (stat === null) return { kind: 'absent' };
+    if (stat.isSymbolicLink()) return { kind: 'symlink', target: readlinkAt(dir, name) };
+    return { kind: stat.isDirectory() ? 'dir' : 'other' };
+  } catch (error) {
+    // A parent that is missing or not a directory holds nothing. One that cannot be opened
+    // otherwise, such as a mount point, a link or a directory without permission, may hold a link
+    // that leads out, so it is not taken as empty.
+    if (error instanceof SysError) {
+      return error.code === 'ENOENT' || error.code === 'ENOTDIR'
+        ? { kind: 'absent' }
+        : { kind: 'unknown' };
+    }
+    throw error;
+  } finally {
+    if (opened !== null) closeSync(opened);
+  }
+};
+
+// Whether a link in `linkDir` with `target` stays inside the project or under /usr.
+const leadsInside = (
+  lookup: Lookup,
+  projectPath: string,
+  linkDir: Buffer[],
+  target: Buffer,
+): boolean => {
+  const rootPrefix = Buffer.from(projectPath.endsWith(sep) ? projectPath : `${projectPath}${sep}`);
+  const insideRoot = (link: Buffer): boolean =>
+    link.subarray(0, rootPrefix.length).equals(rootPrefix);
+  let resolved: Buffer[] = [...linkDir];
+  let queue: Buffer[];
+  if (isAbsolute(target.toString('latin1'))) {
+    if (!insideRoot(target)) return underSystem(target);
+    resolved = [];
+    queue = split(target.subarray(rootPrefix.length));
+  } else {
+    queue = split(target);
+  }
+  let hops = 0;
+  while (queue.length > 0) {
+    const part = queue.shift() as Buffer;
+    if (part.equals(DOT)) continue;
+    if (part.equals(DOTDOT)) {
+      if (resolved.length === 0) return false;
+      resolved.pop();
+      continue;
+    }
+    const candidate = [...resolved, part];
+    const found = lookup(candidate);
+    if (found.kind === 'unknown') return false;
+    if (found.kind !== 'symlink') {
+      resolved = candidate;
+      continue;
+    }
+    hops += 1;
+    if (hops > MAX_HOPS) return false;
+    const rest = queue;
+    if (isAbsolute(found.target.toString('latin1'))) {
+      if (!insideRoot(found.target)) return underSystem(found.target) && rest.length === 0;
+      resolved = [];
+      queue = [...split(found.target.subarray(rootPrefix.length)), ...rest];
+    } else {
+      queue = [...split(found.target), ...rest];
+    }
+  }
+  return true;
+};
+
+const refuseLeaving = (changes: readonly Change[], lookup: Lookup, projectPath: string): Change[] =>
+  changes.map((change) => {
+    if (change.op !== 'symlink') return change;
+    if (leadsInside(lookup, projectPath, change.path.slice(0, -1), change.target)) return change;
+    return { op: 'refuse', path: change.path, reason: LINK_LEAVES } satisfies Change;
+  });
+
+// The changes, with each link that leads out of the project refused; over the tree the upper
+// layer and the project make together.
+export const symlinkTargetsInside = (
+  changes: readonly Change[],
+  upper: UpperNode,
+  projectRoot: number,
+  projectPath: string,
+): Change[] => {
+  // Paths whose entry is refused keep what the project has there, not what the upper layer shows.
+  const refused = new Set(
+    changes.filter((change) => change.op === 'refuse').map((change) => pathKey(change.path)),
+  );
+  const lookup: Lookup = (path) => {
+    let node: UpperNode | undefined = upper;
+    let hidden = false;
+    let key = '';
+    for (let i = 0; i < path.length; i++) {
+      const part = path[i] as Buffer;
+      key = i === 0 ? childKey(part) : `${key}/${childKey(part)}`;
+      if (refused.has(key)) return { kind: 'unknown' };
+      if (node === undefined || node.kind !== 'dir') {
+        return hidden ? { kind: 'absent' } : projectAt(projectRoot, path);
+      }
+      hidden = hidden || node.opaque;
+      node = node.children.get(childKey(part))?.node;
+      if (node === undefined) return hidden ? { kind: 'absent' } : projectAt(projectRoot, path);
+      if (node.kind === 'whiteout') return { kind: 'absent' };
+      if (i < path.length - 1 && node.kind !== 'dir') return { kind: 'absent' };
+    }
+    if (node === undefined) return { kind: 'absent' };
+    if (node.kind === 'symlink') return { kind: 'symlink', target: node.target };
+    if (node.kind === 'dir') return { kind: 'dir' };
+    return { kind: 'other' };
+  };
+  return refuseLeaving(changes, lookup, projectPath);
+};
+
+// The links of `links`, with each one that leads out refused; over the project as it is, with the
+// links about to be created.
+export const linksInsideProject = (
+  links: readonly SymlinkChange[],
+  projectRoot: number,
+  projectPath: string,
+): Change[] => {
+  const pending = new Map(links.map((link) => [pathKey(link.path), link.target]));
+  const lookup: Lookup = (path) => {
+    const target = pending.get(pathKey(path));
+    return target === undefined ? projectAt(projectRoot, path) : { kind: 'symlink', target };
+  };
+  return refuseLeaving(links, lookup, projectPath);
+};
