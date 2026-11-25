@@ -1,3 +1,5 @@
+import { mkdtempSync, realpathSync } from 'node:fs';
+import { join } from 'node:path';
 import { atLeast, OVERLAY_BWRAP_VERSION, sandboxHost } from '../../src/sandbox/bwrap.ts';
 
 // The sandbox tests need Bubblewrap and unprivileged user namespaces. They are skipped where
@@ -21,3 +23,8 @@ const bwrapHasOverlays = (): boolean =>
 
 export const overlayTestsRun =
   (sandboxTestsRun && bwrapHasOverlays()) || process.env.NULLRIVET_TEST_REQUIRE_OVERLAY === '1';
+
+// A new directory for a runtime directory of the user, which the workspace profile requires on a
+// tmpfs: in /dev/shm, a tmpfs on Linux, since the temporary directory can be on disk, as in CI.
+export const tmpfsDirectory = (prefix: string): string =>
+  realpathSync(mkdtempSync(join('/dev/shm', prefix)));

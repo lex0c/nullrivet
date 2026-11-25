@@ -270,7 +270,8 @@ workflows, marked. Without `--apply` they are then discarded; with it, they are 
 task finished, each file whole or not at all, and a file you changed during the task is left as
 you made it and reported (exit code 4). `.git` is never changed. `Ctrl+C` after the task finished
 and before the changes are applied discards them; once applying has started, it runs to its end.
-The overlay lives in your runtime directory (`$XDG_RUNTIME_DIR`), which the profile requires.
+The overlay lives in your runtime directory (`$XDG_RUNTIME_DIR`), which the profile requires on a
+tmpfs.
 
 ```sh
 nullrivet --sandbox workspace "fix the failing test"            # shows the changes, discards them

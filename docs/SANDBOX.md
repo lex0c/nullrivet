@@ -306,10 +306,10 @@ EPERM, while IPv4, IPv6 and netlink routing sockets are created.
 From phase 3, writable layers live in `$XDG_RUNTIME_DIR`, a per-user tmpfs on systems with systemd,
 so an abnormal exit leaves nothing on disk, and what remains is removed when the user's last session
 ends or at reboot. The variable's value is not taken on trust: the host checks with `statfs` that
-the directory is a tmpfs, and that it belongs to the user with mode 0700. Checked: `statfs` in Bun
-reported tmpfs (`0x1021994`) for the runtime directory and another type for `/home`. Without a
-directory that passes, the profiles that need one stop, unless the operator passes
-`--sandbox-storage <dir>` to accept a directory on disk.
+the directory is a tmpfs, and that it belongs to the user and no one else can write to it.
+Checked: `statfs` in Bun reported tmpfs (`0x1021994`) for the runtime directory and another type
+for `/home`. Without a directory that passes, the profiles that need one refuse to start; there is
+no option to accept a directory on disk.
 
 ### Files the worker writes
 
@@ -438,8 +438,9 @@ environment variable, so the decision is made for each run, and it is a usage er
 
 - **Where the changes live.** The upper and work directories are in
   `$XDG_RUNTIME_DIR/nullrivet-<pid>-<start>/`, the user's runtime tmpfs, created with mode 0700.
-  The runtime directory must be the user's own and writable by no one else; without one, as under
-  cron, the profile refuses to start rather than use `/tmp`, which can be shared or on disk. The
+  The runtime directory must be the user's own, writable by no one else, and on a tmpfs, so that
+  what a process killed with SIGKILL leaves is never on disk; without one, as under cron, the
+  profile refuses to start rather than use `/tmp`, which can be shared or on disk. The
   overlay keeps its markers in `user.*` extended attributes, which tmpfs holds from Linux 6.6 on:
   the start checks for them and says so. What the agent writes counts against that tmpfs, which
   other programs of the session use as well.
@@ -460,7 +461,10 @@ environment variable, so the decision is made for each run, and it is a usage er
 - **End of the task.** The worker and its background jobs stop, then the ChangeSet reads the upper
   layer, classifies and validates it, and the summary goes to stderr: every path with what
   changes, the lines added and removed for text files, mode changes, link targets and what a
-  removed directory held. What a new directory holds is counted under it. Files that run or
+  removed directory held. What a new directory holds is counted under it. The comparison runs on
+  the host, over as many files as the sandbox wrote, so it is bounded: past 32 MiB read or 20
+  million comparison steps in all, the files left show their size only, marked as not compared,
+  and the summary says how many. Files that run or
   steer an agent without being invoked (`AGENTS.md`, `.envrc`, CI workflows, git hook
   directories) are marked, and names are shown with control and bidirectional characters escaped.
   With `--json`, `changes:preview`, then `changes:discarded`, `changes:applied` or
@@ -471,7 +475,9 @@ environment variable, so the decision is made for each run, and it is a usage er
   change made on the host during the application. The refusal of the project's own `.git` does
   not count: git commands in the sandbox change it in nearly every session, and it is never
   applied. A `.git` deeper in the project does: it belongs to a repository the task made or
-  changed, whose files would reach the project without it. Otherwise the code is the task's own.
+  changed, whose files would reach the project without it. Without `--apply`, a finished task
+  whose changes cannot be read exits with 1: the run did not show what it changed. Otherwise the
+  code is the task's own.
 - **Interrupts.** `Ctrl+C` after the task finished and before the application starts, while the
   worker stops, discards the changes and exits with 130. Once started, the application is
   synchronous and runs to its end: an interrupt sent during it only aborts what is already done,

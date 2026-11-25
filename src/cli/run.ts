@@ -2,7 +2,6 @@ import { realpath, stat } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import packageJson from '../../package.json' with { type: 'json' };
 import { createAgent } from '../agent/agent.ts';
-import type { AgentEndReason } from '../agent/events.ts';
 import { IN_PROCESS_BACKEND } from '../agent/tool-broker.ts';
 import { headTailSummary } from '../context/output-reduction.ts';
 import { errorMessage } from '../errors.ts';
@@ -18,20 +17,13 @@ import type { JobSession } from '../tools/jobs.ts';
 import { outputFiles } from '../tools/output-files.ts';
 import { isWithinDirectory } from '../tools/paths.ts';
 import { parseCli, USAGE, UsageError } from './args.ts';
+import { EXIT_CODES } from './exit-codes.ts';
 import { formatModelList } from './list-models.ts';
 import { createJsonSink, createPlainSink } from './output.ts';
 import { PromptHistory } from './prompt-history.ts';
 import { runRepl } from './repl.ts';
 import { type SessionData, SessionFile, SessionLink } from './session-file.ts';
 import { finishWorkspace } from './workspace-changes.ts';
-
-export const EXIT_CODES: Record<AgentEndReason | 'usage', number> = {
-  done: 0,
-  error: 1,
-  usage: 2,
-  budget: 3,
-  aborted: 130,
-};
 
 // Piped input can be arbitrarily large; it is reduced like tool output before entering the prompt.
 const STDIN_MAX_BYTES = 128 * 1024;

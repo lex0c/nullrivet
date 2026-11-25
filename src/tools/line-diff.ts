@@ -38,6 +38,12 @@ const MAX_COMPARED_LINES = 200_000;
 // Steps the comparison takes before it gives up, which bounds its time. Past this, the region
 // counts as replaced whole.
 const MAX_COMPARISON_STEPS = 3_000_000;
+
+// Comparison steps a series of diffs may take together, for a caller that compares many files:
+// each diff takes the steps it uses, and gets no more than are left.
+export interface DiffBudget {
+  steps: number;
+}
 // The edits the snippet shows are looked for among the first lines of each side of the region
 // only: recovering them takes memory in the square of their number, while counting them does
 // not.
@@ -122,14 +128,19 @@ const firstLines = (text: string, from: number, to: number, limit: number): stri
 // The fewest removed plus added lines that turn `a` into `b` (Myers' algorithm), found in time
 // that grows with that number rather than with the length of the file. Lines are compared by
 // number, one per distinct text. With `trace`, the state after each step is kept there for
-// editPath; it grows with the square of the number of edits. Null past MAX_COMPARISON_STEPS.
-const editDistance = (a: Int32Array, b: Int32Array, trace?: Int32Array[]): number | null => {
+// editPath; it grows with the square of the number of edits. Takes its steps from `budget`, and
+// returns null once it has none left.
+const editDistance = (
+  a: Int32Array,
+  b: Int32Array,
+  budget: DiffBudget,
+  trace?: Int32Array[],
+): number | null => {
   const n = a.length;
   const m = b.length;
   const offset = n + m + 1;
   // furthest[offset + k]: the furthest position in `a` reached on diagonal k (x - y).
   const furthest = new Int32Array(2 * offset + 1);
-  let steps = 0;
   for (let d = 0; d <= n + m; d++) {
     for (let k = -d; k <= d; k += 2) {
       const above = furthest[offset + k + 1] ?? 0;
@@ -141,7 +152,7 @@ const editDistance = (a: Int32Array, b: Int32Array, trace?: Int32Array[]): numbe
         x += 1;
         y += 1;
       }
-      steps += x - from;
+      budget.steps -= x - from;
       furthest[offset + k] = x;
       if (x >= n && y >= m) {
         trace?.push(furthest.slice(offset - d, offset + d + 1));
@@ -149,8 +160,8 @@ const editDistance = (a: Int32Array, b: Int32Array, trace?: Int32Array[]): numbe
       }
     }
     trace?.push(furthest.slice(offset - d, offset + d + 1));
-    steps += d + 1;
-    if (steps > MAX_COMPARISON_STEPS) return null;
+    budget.steps -= d + 1;
+    if (budget.steps < 0) return null;
   }
   return n + m;
 };
@@ -276,7 +287,7 @@ const wholeSide = (type: 'add' | 'del', text: string): FileDiff => {
     : summarize(countRuns(runs), runs, lines, [], 0, 0);
 };
 
-export const lineDiff = (before: string, after: string): FileDiff => {
+export const lineDiff = (before: string, after: string, budget?: DiffBudget): FileDiff => {
   const a = linesBody(before);
   const b = linesBody(after);
   if (a === b) return noChange();
@@ -353,14 +364,18 @@ export const lineDiff = (before: string, after: string): FileDiff => {
   const replaced: Run[] = [leading, ['del', n], ['add', m], trailing];
   if (n === 0 || m === 0) return show(replaced, countRuns(replaced));
   const [idsA, idsB] = lineIds(linesA.slice(head, tailA), linesB.slice(head, tailB));
-  const distance = editDistance(idsA, idsB);
+  const allowed = Math.min(MAX_COMPARISON_STEPS, budget?.steps ?? MAX_COMPARISON_STEPS);
+  const left = { steps: allowed };
+  const distance = editDistance(idsA, idsB, left);
+  if (budget !== undefined) budget.steps -= allowed - left.steps;
   if (distance === null) return show(replaced, countRuns(replaced));
   // Each edit removes or adds one line, and the sides differ by m - n lines.
   const counts = { added: (distance + m - n) / 2, removed: (distance - m + n) / 2 };
   const windowA = idsA.subarray(0, SNIPPET_WINDOW);
   const windowB = idsB.subarray(0, SNIPPET_WINDOW);
   const trace: Int32Array[] = [];
-  editDistance(windowA, windowB, trace);
+  // The window is short enough for its steps to go uncounted.
+  editDistance(windowA, windowB, { steps: MAX_COMPARISON_STEPS }, trace);
   const edits = editPath(trace, windowA.length, windowB.length);
   // The lines after the region follow the edits only when the window covers the whole region.
   const whole = windowA.length === n && windowB.length === m;

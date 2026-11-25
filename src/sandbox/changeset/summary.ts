@@ -1,6 +1,6 @@
 import { closeSync, constants, fstatSync, readFileSync } from 'node:fs';
 import { formatBytes } from '../../context/output-reduction.ts';
-import { type DiffLine, lineDiff } from '../../tools/line-diff.ts';
+import { type DiffBudget, type DiffLine, lineDiff } from '../../tools/line-diff.ts';
 import type { ApplyOutcome } from './apply.ts';
 import type { Before, Change } from './classify.ts';
 import {
@@ -30,6 +30,8 @@ export interface ChangeEntry {
   // Lines added and removed, for a text file small enough to compare.
   lines?: { added: number; removed: number };
   binary?: true;
+  // A file not compared: the summary had reached its limit on comparisons.
+  uncompared?: true;
   // A file's size, or what a directory removed or created holds.
   bytes?: number;
   entries?: number;
@@ -140,6 +142,15 @@ const droppedText = (bits: number): string | undefined => {
 // Files larger than this are not compared line by line.
 const MAX_DIFF_BYTES = 1024 * 1024;
 
+// What the summary compares in all: it runs on the host, after the sandbox, over files the
+// sandbox wrote, as many as its storage holds. Past either limit, the files left are listed with
+// their size only.
+export interface CompareBudget extends DiffBudget {
+  bytes: number;
+}
+
+const COMPARE_BUDGET: CompareBudget = { bytes: 32 * 1024 * 1024, steps: 20_000_000 };
+
 // The content of the regular file at `path` beneath `root`, when it is small enough to compare;
 // null when it is not, or cannot be read.
 const readSmall = (root: number, path: readonly Buffer[]): Buffer | null => {
@@ -185,21 +196,28 @@ export const describeChanges = (
   changes: readonly Change[],
   projectRoot: number,
   upperPath: string,
+  limits: CompareBudget = COMPARE_BUDGET,
 ): ChangeEntry[] => {
+  const budget = { ...limits };
   const upper = openDirectory(upperPath);
   try {
     const content = (change: WriteChange, entry: ChangeEntry): void => {
+      if (budget.bytes <= 0 || budget.steps <= 0) {
+        entry.uncompared = true;
+        return;
+      }
       const after = readSmall(upper, change.path);
       const before =
         change.before === 'file' ? readSmall(projectRoot, change.path) : Buffer.alloc(0);
       if (after === null || before === null) return;
+      budget.bytes -= after.length + before.length;
       const afterText = textOf(after);
       const beforeText = textOf(before);
       if (afterText === null || beforeText === null) {
         entry.binary = true;
         return;
       }
-      const diff = lineDiff(beforeText, afterText);
+      const diff = lineDiff(beforeText, afterText, budget);
       entry.lines = { added: diff.added, removed: diff.removed };
       if (diff.snippet.length > 0) entry.snippet = diff.snippet;
     };
@@ -322,7 +340,9 @@ export const formatChanges = (entries: readonly ChangeEntry[], paint: Paint): st
   const lines = ['Changes in the sandbox:'];
   let snippets = 0;
   let hiddenSnippets = 0;
+  let uncompared = 0;
   for (const entry of entries) {
+    if (entry.uncompared === true) uncompared += 1;
     const details: string[] = [];
     if (entry.replaces !== undefined) details.push(`replaces a ${entry.replaces}`);
     if (entry.lines !== undefined) {
@@ -377,6 +397,13 @@ export const formatChanges = (entries: readonly ChangeEntry[], paint: Paint): st
     lines.push(
       paint.dim(
         `  The diffs of ${plural(hiddenSnippets, 'more file', 'more files')} are not shown.`,
+      ),
+    );
+  }
+  if (uncompared > 0) {
+    lines.push(
+      paint.dim(
+        `  The lines of ${plural(uncompared, 'file', 'files')} were not counted: the summary limits how much it compares.`,
       ),
     );
   }

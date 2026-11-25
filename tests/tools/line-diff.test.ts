@@ -179,6 +179,24 @@ describe('lineDiff', () => {
     expect(lineDiff(...sides(501))).toMatchObject({ added: 500, removed: 500 });
   });
 
+  test('comparisons that share a budget take their steps from it, and stop once it is spent', () => {
+    const a = numbered('a', 501);
+    const b = numbered('b', 501);
+    a[250] = 'same';
+    b[250] = 'same';
+    const sides: [string, string] = [a.join('\n'), b.join('\n')];
+    const budget = { steps: 700_000 };
+    expect(lineDiff(...sides, budget)).toMatchObject({ added: 500, removed: 500 });
+    const left = budget.steps;
+    expect(left).toBeGreaterThan(0);
+    expect(left).toBeLessThan(700_000);
+    // What is left does not cover a second comparison of the same size.
+    expect(lineDiff(...sides, budget)).toMatchObject({ added: 501, removed: 501 });
+    expect(budget.steps).toBeLessThan(0);
+    // Without a budget, the same comparison gets its own steps.
+    expect(lineDiff(...sides)).toMatchObject({ added: 500, removed: 500 });
+  });
+
   test('a region with too many lines to compare is counted as replaced whole', () => {
     const before = numbered('old', 150_000);
     const after = numbered('new', 150_000);

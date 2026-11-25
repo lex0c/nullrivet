@@ -10,7 +10,6 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   appliedExitCode,
@@ -18,9 +17,11 @@ import {
   finishWorkspace,
 } from '../../src/cli/workspace-changes.ts';
 import type { ApplyOutcome } from '../../src/sandbox/changeset/apply.ts';
-import { type Change, GIT_NEVER_CHANGED } from '../../src/sandbox/changeset/classify.ts';
+import { type Change, classify, GIT_NEVER_CHANGED } from '../../src/sandbox/changeset/classify.ts';
 import { close, openBeneath, openDirectory, tryLock } from '../../src/sandbox/changeset/dirfd.ts';
+import { readUpper } from '../../src/sandbox/changeset/snapshot.ts';
 import {
+  describeChanges,
   displayPath,
   formatApplyReport,
   formatChanges,
@@ -32,6 +33,7 @@ import {
   removeLiveWorkspaceDirectories,
   removeWorkspaceDirectory,
 } from '../../src/sandbox/workspace.ts';
+import { tmpfsDirectory } from '../helpers/sandbox.ts';
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -44,7 +46,7 @@ afterEach(() => {
 });
 
 const runtimeDir = (): string => {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'nullrivet-runtime-')));
+  const dir = tmpfsDirectory('nullrivet-runtime-');
   dirs.push(dir);
   chmodSync(dir, 0o700);
   return dir;
@@ -160,6 +162,92 @@ describe.if(process.platform === 'linux')('the workspace directory', () => {
       expect('error' in created ? created.error : 'created').toContain('XDG_RUNTIME_DIR');
     }
     expect(readdirSync(open)).toEqual([]);
+  });
+
+  test('refuses a runtime directory on disk, where the changes would outlive a killed process', () => {
+    // /var/tmp is kept between reboots, on disk.
+    const disk = realpathSync(mkdtempSync(join('/var/tmp', 'nullrivet-runtime-')));
+    dirs.push(disk);
+    const created = createWorkspaceDirectory({ XDG_RUNTIME_DIR: disk });
+    expect('error' in created ? created.error : 'created').toBe(
+      `XDG_RUNTIME_DIR ${disk} must be on a tmpfs: the workspace sandbox keeps its changes in memory, never on disk`,
+    );
+    expect(readdirSync(disk)).toEqual([]);
+  });
+
+  test('fails a run whose changes cannot be read, with or without --apply', () => {
+    const runtime = runtimeDir();
+    const created = createWorkspaceDirectory({ XDG_RUNTIME_DIR: runtime });
+    if ('error' in created) throw new Error(created.error);
+    // A project that is gone: nothing can be compared with it.
+    const workspace = { directory: created.directory, root: join(runtime, 'gone'), since: 0n };
+    const finish = (apply: boolean, done: boolean, code: number) => {
+      const events: ChangesEvent[] = [];
+      const exit = finishWorkspace(workspace, {
+        apply,
+        done,
+        interrupted: false,
+        code,
+        report: (e) => events.push(e),
+      });
+      expect(events.map((e) => e.type)).toEqual(['changes:failed']);
+      return exit;
+    };
+    expect(finish(false, true, 0)).toBe(1);
+    expect(finish(true, true, 0)).toBe(4);
+    // A task that did not finish keeps its own code.
+    expect(finish(false, false, 3)).toBe(3);
+    expect(finish(true, false, 3)).toBe(3);
+  });
+
+  test('stops comparing files past its limit, and lists the rest with their size', () => {
+    const runtime = runtimeDir();
+    const project = join(runtime, 'project');
+    const upper = join(runtime, 'upper');
+    mkdirSync(project);
+    mkdirSync(upper);
+    for (const name of ['a.txt', 'b.txt']) {
+      writeFileSync(join(project, name), 'one\ntwo\nthree\n');
+      writeFileSync(join(upper, name), 'one\n2\nthree\n');
+    }
+    const root = openDirectory(project);
+    try {
+      const changes = classify(readUpper(upper), root);
+      const counted = (limits: { bytes: number; steps: number }) =>
+        describeChanges(changes, root, upper, limits).map((entry) => [
+          entry.path,
+          entry.lines ?? entry.uncompared,
+        ]);
+      const unlimited = { added: 1, removed: 1 };
+      expect(counted({ bytes: 1_000_000, steps: 1_000_000 })).toEqual([
+        ['a.txt', unlimited],
+        ['b.txt', unlimited],
+      ]);
+      // The first file read spends the bytes, and its comparison spends the steps.
+      for (const limits of [
+        { bytes: 1, steps: 1_000_000 },
+        { bytes: 1_000_000, steps: 1 },
+      ]) {
+        expect(counted(limits)).toEqual([
+          ['a.txt', unlimited],
+          ['b.txt', true],
+        ]);
+      }
+      const plain = {
+        added: (text: string) => text,
+        removed: (text: string) => text,
+        attention: (text: string) => text,
+        dim: (text: string) => text,
+      };
+      const text = formatChanges(
+        describeChanges(changes, root, upper, { bytes: 1, steps: 1 }),
+        plain,
+      );
+      expect(text).toContain('  modified b.txt  12B\n');
+      expect(text).toContain('The lines of 1 file were not counted');
+    } finally {
+      close(root);
+    }
   });
 });
 

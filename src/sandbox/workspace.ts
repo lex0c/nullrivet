@@ -85,8 +85,12 @@ export const processStart = (pid: number): string | null => {
   return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19] ?? null;
 };
 
+const TMPFS = 0x01021994;
+
 // The user's runtime directory, checked: a directory the user owns that no one else can write to,
-// where nothing of another user can replace the session's directory.
+// where nothing of another user can replace the session's directory, on a tmpfs, so that what the
+// sandbox writes, which a process killed with SIGKILL leaves behind, is never kept on disk. The
+// variable is set by the login session, but nothing stops it from naming another directory.
 const runtimeDirectory = (env: Env): string | { error: string } => {
   const value = env.XDG_RUNTIME_DIR;
   if (value === undefined || value === '' || !isAbsolute(value)) {
@@ -107,6 +111,11 @@ const runtimeDirectory = (env: Env): string | { error: string } => {
   if (!info.isDirectory() || info.uid !== uid || (info.mode & 0o022) !== 0) {
     return {
       error: `XDG_RUNTIME_DIR ${path} must be a directory owned by the user and writable by no one else`,
+    };
+  }
+  if (statfsSync(path).type !== TMPFS) {
+    return {
+      error: `XDG_RUNTIME_DIR ${path} must be on a tmpfs: the workspace sandbox keeps its changes in memory, never on disk`,
     };
   }
   return path;

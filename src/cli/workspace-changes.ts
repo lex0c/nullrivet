@@ -11,6 +11,7 @@ import {
 } from '../sandbox/changeset/summary.ts';
 import { symlinkTargetsInside } from '../sandbox/changeset/validate.ts';
 import type { StartedWorkspace } from '../sandbox/start.ts';
+import { EXIT_CODES } from './exit-codes.ts';
 
 export type ChangesEvent =
   | { type: 'changes:preview'; changes: ChangeEntry[] }
@@ -65,12 +66,15 @@ export interface FinishOptions {
 // sandbox. Returns the exit code.
 export const finishWorkspace = (workspace: StartedWorkspace, options: FinishOptions): number => {
   const applying = options.apply && options.done && !options.interrupted;
+  // Discarding is still what happens, but the run did not show what the task changed: a task that
+  // finished does not end with success.
   const unread = (error: unknown): number => {
     options.report({
       type: 'changes:failed',
       message: `the changes of the sandbox could not be read, and none is applied: ${errorMessage(error)}`,
     });
-    return applying ? WORKSPACE_EXIT_CODES.notApplied : options.code;
+    if (applying) return WORKSPACE_EXIT_CODES.notApplied;
+    return options.code === EXIT_CODES.done ? EXIT_CODES.error : options.code;
   };
   let root: number;
   try {

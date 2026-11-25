@@ -11,7 +11,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { overlayTestsRun } from '../helpers/sandbox.ts';
+import { overlayTestsRun, tmpfsDirectory } from '../helpers/sandbox.ts';
 import {
   type ChatRequest,
   type CliEvent,
@@ -37,16 +37,15 @@ afterEach(() => {
   }
 });
 
-// A repository, a home and the runtime directory a login session provides, side by side.
+// A repository and a home, and the runtime directory a login session provides, on a tmpfs.
 const setup = () => {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'nullrivet-e2e-workspace-')));
-  dirs.push(base);
+  const runtime = tmpfsDirectory('nullrivet-e2e-runtime-');
+  dirs.push(base, runtime);
   const home = join(base, 'home');
   const project = join(base, 'project');
-  const runtime = join(base, 'runtime');
   mkdirSync(home);
   mkdirSync(join(project, '.git'), { recursive: true });
-  mkdirSync(runtime, { mode: 0o700 });
   writeFileSync(join(project, 'app.txt'), 'one\n');
   writeFileSync(join(project, 'notes.txt'), 'notes\n');
   return {
