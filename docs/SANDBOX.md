@@ -344,8 +344,13 @@ and it is read only when no process can change it.
   so its own writes, several additions to one directory included, are not conflicts. Timestamps
   are signs of change, not a record of content: the host's processes are trusted, the worker is
   not. The clock has a granularity, so an entry changed within the same tick as the probe counts
-  as changed: a false conflict, never a missed one. Modification times are not compared, since a
-  file can carry a future one without any change.
+  as changed: a false conflict, never a missed one. The probe is in the session's directory, on
+  another filesystem than the project, with the same clock. A project on a filesystem with
+  coarser times, as exFAT keeps steps of 10 ms and FAT of 2 s, would stamp a change made later
+  within one step with an earlier time: the step is taken from the project root's change time, the
+  largest power of ten that divides it, two seconds for whole seconds, and the reference moves
+  back to the start of a step. Modification times are not compared, since a file can carry a
+  future one without any change.
 - **Stopping the sandbox.** Applying starts by ending the sandbox, with its commands and background
   jobs, which the confirmation lists. The broker holds tool calls until the application ends, and
   the next call starts a new sandbox over the updated project, with a new upper layer: the old one
@@ -421,6 +426,58 @@ Editing the project on the host during a `workspace` session is not supported. T
 undefined what the overlay shows after its lower layer changes, so the worker's view of a file the
 operator edits is not reliable. The ChangeSet finds such edits as conflicts on the paths it
 changes; it does not make the views coherent.
+
+### A one-shot task
+
+`--sandbox workspace` runs a one-shot task with the project behind the overlay; the interactive
+session, with its commands to review and apply, comes next. The operator decides before the task
+starts: without `--apply`, the changes are shown and discarded; with it, they are applied if the
+task finishes (`done`), and discarded if it does not, whatever the agent says. `--apply` has no
+environment variable, so the decision is made for each run, and it is a usage error without the
+`workspace` profile.
+
+- **Where the changes live.** The upper and work directories are in
+  `$XDG_RUNTIME_DIR/nullrivet-<pid>-<start>/`, the user's runtime tmpfs, created with mode 0700.
+  The runtime directory must be the user's own and writable by no one else; without one, as under
+  cron, the profile refuses to start rather than use `/tmp`, which can be shared or on disk. The
+  overlay keeps its markers in `user.*` extended attributes, which tmpfs holds from Linux 6.6 on:
+  the start checks for them and says so. What the agent writes counts against that tmpfs, which
+  other programs of the session use as well.
+- **Removal.** The session removes its directory when it ends, after its worker has stopped, and
+  the exit handler removes it when the process ends on a signal; a removal that fails is reported.
+  A process killed with SIGKILL leaves it: the next session removes every such directory of the
+  user that is not in use. A session holds an `flock` lock on a file in its directory while it
+  lives, and the directory gets its name only once the lock is held: the lock shows a session of
+  another PID namespace sharing the runtime directory, as a container can, whose process id means
+  nothing here. A directory without a lock is judged by its process id and start time, since an
+  id alone can be reused. The removal goes by descriptor and without recursion, moving each
+  directory it finds up to the top before emptying it, through directories without permissions,
+  as the overlay's work directory is, at any depth.
+- **Refused projects.** A project on NFS, SMB/CIFS, FUSE, 9P or Ceph: another machine or a
+  process outside this kernel can change a file without the change time the conflicts rely on. A
+  session file inside the project: saving it would change the lower layer while the overlay is
+  mounted. Bubblewrap older than 0.10.0, which has no overlay options.
+- **End of the task.** The worker and its background jobs stop, then the ChangeSet reads the upper
+  layer, classifies and validates it, and the summary goes to stderr: every path with what
+  changes, the lines added and removed for text files, mode changes, link targets and what a
+  removed directory held. What a new directory holds is counted under it. Files that run or
+  steer an agent without being invoked (`AGENTS.md`, `.envrc`, CI workflows, git hook
+  directories) are marked, and names are shown with control and bidirectional characters escaped.
+  With `--json`, `changes:preview`, then `changes:discarded`, `changes:applied` or
+  `changes:failed`, carry the same lists with line counts and no file content.
+- **Exit codes.** With `--apply` and a finished task: 0 when everything was applied, 4 when some
+  or all of it was not (conflicts found before writing, refusals, or changes that could not be
+  read, when none is applied), and 5 when the application stopped part-way, on a failure or a
+  change made on the host during the application. The refusal of the project's own `.git` does
+  not count: git commands in the sandbox change it in nearly every session, and it is never
+  applied. A `.git` deeper in the project does: it belongs to a repository the task made or
+  changed, whose files would reach the project without it. Otherwise the code is the task's own.
+- **Interrupts.** `Ctrl+C` after the task finished and before the application starts, while the
+  worker stops, discards the changes and exits with 130. Once started, the application is
+  synchronous and runs to its end: an interrupt sent during it only aborts what is already done,
+  and the exit code and the report are the application's. SIGTERM ends the process when it is
+  handled, after the application if it arrives during it, and the report can then be cut short;
+  SIGKILL ends it at once, with the result described above.
 
 `security` uses the same overlay with its upper layer kept in memory (`--tmp-overlay`): its writes
 are not meant to be applied anywhere, and they are discarded at exit. What outlasts the session is
@@ -604,8 +661,8 @@ limits or for the virtual machine backend.
 
 ## Platforms
 
-- **Linux:** Bubblewrap 0.8.0 or later, for `--disable-userns`, with overlay support for the
-  later profiles (`--overlay-src`, `--tmp-overlay`; checked on 0.13), unprivileged user
+- **Linux:** Bubblewrap 0.8.0 or later, for `--disable-userns`, and 0.10.0 or later for the
+  overlay the `workspace` profile mounts (`--overlay-src`; `security` will use `--tmp-overlay`), unprivileged user
   namespaces enabled, nftables, and passt for `security`. Some distributions restrict
   unprivileged user namespaces through AppArmor; the check at start says which requirement is
   missing.
@@ -646,7 +703,8 @@ limits or for the virtual machine backend.
    once, fed by facts with sequence numbers. Two parties never control the same processes.
 3. **`workspace`.** The ChangeSet, with the reference time, the stop before reading and the
    descriptor-based resolution, specified and tested on its own before the overlay is wired in.
-   3a, the ChangeSet on its own, is done.
+   3a, the ChangeSet on its own, is done; 3b, the one-shot task with `--apply`, is done; 3c, the
+   interactive session, with its commands to review and apply, is next.
 4. **`security`.** Only after the network isolation tests pass: the engagement file, the ruleset,
    revocation, pasta, the hosts file, `/scope refresh` and the window. 4b: the allowlisting HTTP
    proxy.

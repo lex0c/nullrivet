@@ -1,5 +1,5 @@
-import { stat } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { realpath, stat } from 'node:fs/promises';
+import { basename, dirname, join, resolve } from 'node:path';
 import packageJson from '../../package.json' with { type: 'json' };
 import { createAgent } from '../agent/agent.ts';
 import type { AgentEndReason } from '../agent/events.ts';
@@ -10,16 +10,20 @@ import { InstructionsLoader } from '../instructions/agents-loader.ts';
 import { MODEL_CATALOG } from '../providers/catalog.ts';
 import type { FetchLike } from '../providers/discovery.ts';
 import { type ModelOverrides, resolveModel } from '../providers/resolve.ts';
-import { type StartedSandbox, startSandbox } from '../sandbox/start.ts';
+import { sandboxProject } from '../sandbox/bwrap.ts';
+import { type StartedSandbox, type StartedWorkspace, startSandbox } from '../sandbox/start.ts';
+import { isLiveWorkspaceDirectory, removeWorkspaceDirectory } from '../sandbox/workspace.ts';
 import { BUILTIN_TOOLS } from '../tools/index.ts';
 import type { JobSession } from '../tools/jobs.ts';
 import { outputFiles } from '../tools/output-files.ts';
+import { isWithinDirectory } from '../tools/paths.ts';
 import { parseCli, USAGE, UsageError } from './args.ts';
 import { formatModelList } from './list-models.ts';
 import { createJsonSink, createPlainSink } from './output.ts';
 import { PromptHistory } from './prompt-history.ts';
 import { runRepl } from './repl.ts';
 import { type SessionData, SessionFile, SessionLink } from './session-file.ts';
+import { finishWorkspace } from './workspace-changes.ts';
 
 export const EXIT_CODES: Record<AgentEndReason | 'usage', number> = {
   done: 0,
@@ -104,6 +108,11 @@ export const runCli = async (io: CliIO): Promise<number> => {
   if (prompt.length === 0 && !interactive) {
     return fail('no prompt given; pass the task as an argument or on stdin');
   }
+  if (interactive && config.sandbox === 'workspace') {
+    return fail(
+      'the interactive session does not run in the workspace sandbox; pass a task to run it once',
+    );
+  }
 
   const cwd = resolve(io.cwd, config.cwd);
   try {
@@ -132,6 +141,18 @@ export const runCli = async (io: CliIO): Promise<number> => {
   // before any request leaves the machine. Subagent reports are written by this process and read
   // by the tools, so their directory is exposed read-only.
   let sandbox: StartedSandbox | null = null;
+  if (config.sandbox === 'workspace' && session !== null) {
+    // A session file saved into the project would change the overlay's lower layer while it is
+    // mounted, and conflict with the sandbox's changes beside it. Checked before anything starts.
+    const project = await sandboxProject(cwd, io.env);
+    const path = session.file.path;
+    const real = join(await realpath(dirname(path)), basename(path));
+    if (!('error' in project) && isWithinDirectory(project.root, real)) {
+      return fail(
+        `the session file ${real} is in the project, which the workspace sandbox does not change while it runs; save it outside the project`,
+      );
+    }
+  }
   if (config.sandbox !== undefined) {
     let reports: string;
     try {
@@ -186,7 +207,7 @@ export const runCli = async (io: CliIO): Promise<number> => {
       ...(config.maxSteps === undefined ? {} : { maxSteps: config.maxSteps }),
       ...(config.timeLimitMs === undefined ? {} : { timeLimitMs: config.timeLimitMs }),
     });
-    const warnings = [...resolved.warnings, ...agent.bootWarnings];
+    const warnings = [...resolved.warnings, ...agent.bootWarnings, ...(sandbox?.warnings ?? [])];
     if (resumed !== null) {
       agent.conversation.restore(resumed.conversation);
       if (resumed.mode === 'readonly' && config.mode === 'auto') {
@@ -195,8 +216,10 @@ export const runCli = async (io: CliIO): Promise<number> => {
         );
       }
       if (resumed.sandbox !== undefined && config.sandbox === undefined) {
+        // The interactive session does not run in the workspace sandbox: inspect is the one left.
+        const keep = interactive && resumed.sandbox === 'workspace' ? 'inspect' : resumed.sandbox;
         warnings.push(
-          `this session last ran its tools in the ${resumed.sandbox} sandbox and continues without one; pass --sandbox ${resumed.sandbox} to keep them in it`,
+          `this session last ran its tools in the ${resumed.sandbox} sandbox and continues without one; pass --sandbox ${keep} to keep them in a sandbox`,
         );
       }
       if (resumed.cwd !== workCwd) {
@@ -238,9 +261,46 @@ export const runCli = async (io: CliIO): Promise<number> => {
       onEvent: (e) => sink.event(e),
       ...(input === undefined ? {} : { input }),
     });
+    let code = EXIT_CODES[result.reason];
+    if (sandbox?.workspace !== undefined) {
+      // The worker and its jobs stop first: the changes are read once nothing writes them.
+      await sandbox.backend.close();
+      // An interrupt that came after the task finished, while the worker stopped, still keeps the
+      // changes out of the project.
+      const interrupted = config.apply && result.reason === 'done' && io.signal.aborted;
+      code = finishWorkspace(sandbox.workspace, {
+        apply: config.apply,
+        done: result.reason === 'done',
+        interrupted,
+        code: interrupted ? EXIT_CODES.aborted : code,
+        report: (event) => sink.changes(event),
+      });
+      // The application runs to its end, and an interrupt sent during it is handled only after
+      // it. Handled here, before the run ends, it only aborts what is already done: the exit code
+      // and the report are the application's, and nothing cuts the output short.
+      await new Promise((resolveTurn) => setImmediate(resolveTurn));
+    }
     sink.finish();
-    return EXIT_CODES[result.reason];
+    return code;
   } finally {
     await sandbox?.backend.close();
+    if (sandbox?.workspace !== undefined) {
+      removeDirectory(sandbox.workspace.directory, (message) => sink.notice('warning', message));
+    }
+  }
+};
+
+// Removes the directory of a workspace session once its worker has stopped. The agent's writes
+// are in it, so a failure is reported; the exit handler tries again, and the next workspace
+// session after it.
+const removeDirectory = (
+  directory: StartedWorkspace['directory'],
+  warn: (message: string) => void,
+): void => {
+  if (!isLiveWorkspaceDirectory(directory)) return;
+  try {
+    removeWorkspaceDirectory(directory);
+  } catch (error) {
+    warn(`the sandbox's changes in ${directory.path} could not be removed: ${errorMessage(error)}`);
   }
 };

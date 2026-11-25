@@ -53,6 +53,11 @@ const load = () =>
       args: [FFIType.cstring, FFIType.cstring, FFIType.ptr, FFIType.u64],
       returns: FFIType.i64,
     },
+    lsetxattr: {
+      args: [FFIType.cstring, FFIType.cstring, FFIType.ptr, FFIType.u64, FFIType.i32],
+      returns: FFIType.i32,
+    },
+    flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
     __errno_location: { args: [], returns: FFIType.ptr },
   });
 const lib = () => {
@@ -221,6 +226,39 @@ export const xattrsAt = (dir: number, name: Buffer): Map<string, Buffer> => {
     result.set(key, value);
   }
   return result;
+};
+
+// Sets an extended attribute of `path`, without following it.
+export const setXattr = (path: string, key: string, value: Buffer): void => {
+  const data = value.length === 0 ? Buffer.alloc(1) : value;
+  if (
+    lib().lsetxattr(
+      cString(Buffer.from(path)),
+      cString(Buffer.from(key, 'latin1')),
+      ptr(data),
+      BigInt(value.length),
+      0,
+    ) < 0
+  ) {
+    fail('lsetxattr');
+  }
+};
+
+const LOCK_EX = 2;
+const LOCK_NB = 4;
+
+// Takes the exclusive lock of an open file without waiting. False when another open file holds it,
+// in this process or any other; the lock ends when the file is closed, or its process ends.
+export const tryLock = (fd: number): boolean => {
+  if (lib().flock(fd, LOCK_EX | LOCK_NB) === 0) return true;
+  try {
+    return fail('flock');
+  } catch (error) {
+    if (error instanceof SysError && (error.code === 'EWOULDBLOCK' || error.code === 'EAGAIN')) {
+      return false;
+    }
+    throw error;
+  }
 };
 
 export const close = (fd: number): void => closeSync(fd);

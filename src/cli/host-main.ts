@@ -1,4 +1,5 @@
 import { BoundedCapture } from '../context/bounded-capture.ts';
+import { removeLiveWorkspaceDirectories } from '../sandbox/workspace.ts';
 import { removeOutputFiles } from '../tools/output-files.ts';
 import { killAllProcessGroups } from '../tools/process.ts';
 import { runCli } from './run.ts';
@@ -30,6 +31,8 @@ process.on('SIGHUP', terminate(129));
 process.on('exit', () => {
   killAllProcessGroups();
   removeOutputFiles();
+  // After the groups are killed: the sandbox no longer writes to it.
+  removeLiveWorkspaceDirectories();
 });
 
 // Piped input is read in bounded memory, and an interrupt stops waiting for an input that never

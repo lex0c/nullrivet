@@ -84,4 +84,22 @@ describe('buildSystemPrompt', () => {
     expect(prompt('auto')).toContain('There is no sandbox');
     expect(prompt('auto')).not.toContain('# Sandbox');
   });
+
+  test('in the workspace sandbox, says the project is writable, applied by the user, .git never', () => {
+    const text = buildSystemPrompt({
+      cwd: '/work',
+      mode: 'auto',
+      platform: 'linux',
+      date: '2026-01-02',
+      isGitRepo: true,
+      sandbox: { profile: 'workspace', root: '/work' },
+    });
+    expect(text).toContain('# Sandbox: workspace');
+    expect(text).toContain(
+      'The project directory "/work" is writable, but your changes stay in the sandbox',
+    );
+    expect(text).toContain('Changes under .git are never applied: do not commit');
+    expect(text).toContain('The system directories are read-only');
+    expect(text).not.toContain('and the system directories are read-only');
+  });
 });

@@ -101,7 +101,8 @@ it until end of file, so programs that start nullrivet without piping anything s
 | `-m, --model <id>` | Model as `<family>/<model>`, e.g. `openrouter/deepseek/deepseek-v4-flash`. Required unless `NULLRIVET_MODEL` is set. |
 | `-e, --effort <level>` | Reasoning effort: `low`, `medium`, `high`, `xhigh`, `max`. Ignored by models without reasoning. |
 | `-p, --permission <mode>` | `auto` (default) or `readonly`. |
-| `--sandbox <profile>` | Run the tools in a sandbox. Linux with Bubblewrap 0.8 or later, installed in a system directory; the profile is `inspect`. See [Sandbox](#sandbox). |
+| `--sandbox <profile>` | Run the tools in a sandbox. Linux with Bubblewrap installed in a system directory; the profile is `inspect` (Bubblewrap 0.8 or later) or `workspace` (0.10 or later, one-shot tasks). See [Sandbox](#sandbox). |
+| `--apply` | With `--sandbox workspace`: apply the task's changes to the project if the task finishes. Without it, they are shown and discarded. |
 | `-C, --cwd <dir>` | Starting directory for relative paths, commands and `AGENTS.md` lookup. It does not restrict file access. |
 | `--json` | Emit agent events as NDJSON on stdout. |
 | `--no-agents` | Do not load `AGENTS.md` files. |
@@ -165,6 +166,8 @@ the Bun runtime reads when nullrivet starts:
 | `1` | The task failed (provider error, unrecoverable stream error). |
 | `2` | Invalid usage or configuration (bad flag, unknown model, missing credentials). |
 | `3` | A limit was reached: step limit, time limit, output limit, or the conversation no longer fits the context window. |
+| `4` | With `--sandbox workspace --apply`: the task finished, and some or all of its changes were not applied (a conflict with a change made on the host during the task, a refusal, or changes that could not be read); the project holds those reported as applied. |
+| `5` | With `--sandbox workspace --apply`: applying the changes stopped part-way, on a failure or on a change made on the host during the application itself; the project holds those reported as applied. |
 | `130` | Interrupted. |
 
 In one-shot mode, `Ctrl+C` aborts the task, terminates every process it started and exits with
@@ -257,7 +260,24 @@ The execution mode still applies inside: `readonly` with `inspect` only reads. B
 inside the sandbox too, with their logs in its `/tmp`. The sandbox does not limit CPU, memory or the
 number of processes, so it is not a defence against code meant to exhaust them. A sandbox that
 cannot start stops the session with the reason; nullrivet never falls back to running the tools
-without it. Details and the profiles planned next: [docs/SANDBOX.md](docs/SANDBOX.md).
+without it.
+
+`--sandbox workspace` is the same sandbox with the project writable through an overlay, for a
+one-shot task: the agent edits, builds and tests as usual, and nothing reaches the project while
+it works. When the task ends, the changes are listed on stderr (files added, modified and removed,
+lines changed, modes, links), with files that run without being invoked, such as `.envrc` or CI
+workflows, marked. Without `--apply` they are then discarded; with it, they are applied if the
+task finished, each file whole or not at all, and a file you changed during the task is left as
+you made it and reported (exit code 4). `.git` is never changed. `Ctrl+C` after the task finished
+and before the changes are applied discards them; once applying has started, it runs to its end.
+The overlay lives in your runtime directory (`$XDG_RUNTIME_DIR`), which the profile requires.
+
+```sh
+nullrivet --sandbox workspace "fix the failing test"            # shows the changes, discards them
+nullrivet --sandbox workspace --apply "fix the failing test"    # applies them if the task finishes
+```
+
+Details and the profiles planned next: [docs/SANDBOX.md](docs/SANDBOX.md).
 
 ## Tools
 
@@ -371,8 +391,8 @@ as CI does. Evaluations against real models: [docs/EVALS.md](docs/EVALS.md).
 - [docs/MODELS.md](docs/MODELS.md): model resolution, the catalog, discovery and provider settings.
 - [docs/TUI.md](docs/TUI.md): the interactive interface: rendering, streaming Markdown, keys.
 - [docs/EVALS.md](docs/EVALS.md): evaluations against real models.
-- [docs/SANDBOX.md](docs/SANDBOX.md): the `inspect` sandbox, and the design of the profiles and
-  the network scope planned for authorized security work.
+- [docs/SANDBOX.md](docs/SANDBOX.md): the `inspect` and `workspace` sandboxes, the ChangeSet,
+  and the design of the profiles and the network scope planned for authorized security work.
 
 ## License
 

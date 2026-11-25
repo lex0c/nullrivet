@@ -22,6 +22,8 @@ export type Change =
       node: Extract<UpperNode, { kind: 'file' }>;
       mode: number;
       droppedBits: number;
+      // The content is the project's; only the mode changes.
+      modeOnly?: true;
     }
   | { op: 'mkdir'; path: Buffer[]; mode: number; droppedBits: number }
   | { op: 'symlink'; path: Buffer[]; target: Buffer }
@@ -37,6 +39,8 @@ export type Change =
   | { op: 'refuse'; path: Buffer[]; reason: string };
 
 const GIT = Buffer.from('.git');
+// The reason of every refused change under .git, which git commands in the sandbox make.
+export const GIT_NEVER_CHANGED = '.git is never changed';
 // Set-user-ID and set-group-ID never reach the project.
 const DROPPED_BITS = 0o6000;
 
@@ -160,7 +164,7 @@ export const classify = (upper: UpperNode, projectRoot: number): Change[] => {
         if (node.children.has(childKey(name))) continue;
         const path = [...parent, name];
         if (name.equals(GIT)) {
-          changes.push({ op: 'refuse', path, reason: '.git is never changed' });
+          changes.push({ op: 'refuse', path, reason: GIT_NEVER_CHANGED });
           continue;
         }
         const before = kindOf(lstatAtOrNull(lower, name));
@@ -170,7 +174,7 @@ export const classify = (upper: UpperNode, projectRoot: number): Change[] => {
     for (const { name, node: child } of entries) {
       const path = [...parent, name];
       if (name.equals(GIT)) {
-        changes.push({ op: 'refuse', path, reason: '.git is never changed' });
+        changes.push({ op: 'refuse', path, reason: GIT_NEVER_CHANGED });
         continue;
       }
       const before = lower === null ? 'absent' : kindOf(lstatAtOrNull(lower, name));
@@ -202,7 +206,14 @@ export const classify = (upper: UpperNode, projectRoot: number): Change[] => {
                 // A mode belongs to the inode, which every hard link shares, and a link outside
                 // the project can be made up to the moment the mode is set: the file gets a new
                 // inode with the new mode instead.
-                changes.push({ op: 'write', path, before: 'file', node: child, ...kept });
+                changes.push({
+                  op: 'write',
+                  path,
+                  before: 'file',
+                  node: child,
+                  ...kept,
+                  modeOnly: true,
+                });
               }
               break;
             }

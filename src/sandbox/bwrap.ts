@@ -33,6 +33,8 @@ export const BWRAP_LOCATIONS = [
   '/run/current-system/sw/bin/bwrap',
 ];
 const MIN_BWRAP_VERSION = [0, 8, 0];
+// The overlay options the workspace profile mounts the project with came in Bubblewrap 0.10.0.
+export const OVERLAY_BWRAP_VERSION = [0, 10, 0];
 
 // The real path of `path` when it is an executable that only root can replace: the file and every
 // directory above it owned by root and writable by no one else, unless the directory is sticky,
@@ -81,7 +83,7 @@ export const parseBwrapVersion = (output: string): number[] | null => {
   return match === null ? null : [Number(match[1]), Number(match[2]), Number(match[3])];
 };
 
-const atLeast = (version: readonly number[], minimum: readonly number[]): boolean => {
+export const atLeast = (version: readonly number[], minimum: readonly number[]): boolean => {
   for (let i = 0; i < minimum.length; i++) {
     const have = version[i] ?? 0;
     const need = minimum[i] ?? 0;
@@ -93,6 +95,7 @@ const atLeast = (version: readonly number[], minimum: readonly number[]): boolea
 export interface SandboxHost {
   bwrap: string;
   arch: SyscallArch;
+  version: readonly number[];
 }
 
 // What the host needs for a sandbox profile, or why it cannot have one. --disable-userns came in
@@ -113,7 +116,7 @@ export const sandboxHost = (
     const found = version === null ? 'an unknown version' : `version ${version.join('.')}`;
     return `sandbox profiles need Bubblewrap ${MIN_BWRAP_VERSION.join('.')} or later; ${bwrap} is ${found}`;
   }
-  return { bwrap, arch };
+  return { bwrap, arch, version };
 };
 
 const realpathOrNull = async (path: string | undefined): Promise<string | null> => {
@@ -248,7 +251,7 @@ const hostEntryArgs = (path: string): string[] => {
   return [];
 };
 
-export interface InspectOptions {
+export interface LaunchOptions {
   host: SandboxHost;
   root: string;
   cwd: string;
@@ -263,7 +266,29 @@ export interface InspectOptions {
 
 // The `inspect` profile: the project and the system read-only, a temporary home and /tmp, no
 // network, no host processes, and only the worker's own files besides.
-export const inspectLaunch = (options: InspectOptions): WorkerLaunch => {
+export const inspectLaunch = (options: LaunchOptions): WorkerLaunch =>
+  launch(options, ['--ro-bind', options.root, options.root]);
+
+// Where the workspace profile keeps what the sandbox writes to the project: two directories of
+// one filesystem the user alone can write to.
+export interface Overlay {
+  upper: string;
+  work: string;
+}
+
+// The `workspace` profile: the `inspect` profile with the project writable through an overlay.
+// Writes go to the upper directory, and the project itself is never written from the sandbox.
+export const workspaceLaunch = (options: LaunchOptions, overlay: Overlay): WorkerLaunch =>
+  launch(options, [
+    '--overlay-src',
+    options.root,
+    '--overlay',
+    overlay.upper,
+    overlay.work,
+    options.root,
+  ]);
+
+const launch = (options: LaunchOptions, project: readonly string[]): WorkerLaunch => {
   const worker = sandboxedWorker(options.tools, options.jobs);
   const env = sandboxEnv(options.hostEnv, options.home);
   const identity = identityFiles(options.home);
@@ -312,9 +337,7 @@ export const inspectLaunch = (options: InspectOptions): WorkerLaunch => {
     String(HOME_BYTES),
     '--tmpfs',
     options.home,
-    '--ro-bind',
-    options.root,
-    options.root,
+    ...project,
     ...worker.mounts.flatMap(({ source, target }) => ['--ro-bind', source, target]),
     ...options.readOnlyDirs.flatMap((path) => ['--ro-bind', path, path]),
     '--seccomp',

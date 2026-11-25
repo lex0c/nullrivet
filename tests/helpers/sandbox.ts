@@ -1,4 +1,4 @@
-import { parseBwrapVersion, sandboxHost } from '../../src/sandbox/bwrap.ts';
+import { atLeast, OVERLAY_BWRAP_VERSION, sandboxHost } from '../../src/sandbox/bwrap.ts';
 
 // The sandbox tests need Bubblewrap and unprivileged user namespaces. They are skipped where
 // those are missing, unless NULLRIVET_TEST_REQUIRE_SANDBOX is set, as in CI, where a sandbox that
@@ -16,19 +16,8 @@ export const sandboxTestsRun = usable || process.env.NULLRIVET_TEST_REQUIRE_SAND
 // them, an overlay that fails is a failure. NULLRIVET_TEST_REQUIRE_OVERLAY, set in CI where the
 // Bubblewrap installed has them, runs them whatever the version found, so a runner that loses
 // them fails instead of skipping them.
-const OVERLAY_VERSION = [0, 10, 0];
-const bwrapHasOverlays = (): boolean => {
-  if (typeof host === 'string') return false;
-  const version = parseBwrapVersion(
-    Bun.spawnSync([host.bwrap, '--version'], { env: {} }).stdout.toString(),
-  );
-  if (version === null) return false;
-  for (const [index, wanted] of OVERLAY_VERSION.entries()) {
-    const found = version[index] ?? 0;
-    if (found !== wanted) return found > wanted;
-  }
-  return true;
-};
+const bwrapHasOverlays = (): boolean =>
+  typeof host !== 'string' && atLeast(host.version, OVERLAY_BWRAP_VERSION);
 
 export const overlayTestsRun =
   (sandboxTestsRun && bwrapHasOverlays()) || process.env.NULLRIVET_TEST_REQUIRE_OVERLAY === '1';

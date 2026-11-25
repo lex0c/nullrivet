@@ -17,6 +17,7 @@ export interface CliConfig {
   effort: ProviderEffort | undefined;
   mode: ExecutionMode;
   sandbox: SandboxProfile | undefined;
+  apply: boolean;
   cwd: string;
   json: boolean;
   agentsMd: boolean;
@@ -46,7 +47,10 @@ Options:
   -m, --model <id>            Model as <family>/<model>, e.g. anthropic/claude-sonnet-5-5
   -e, --effort <level>        Reasoning effort: ${EFFORT_LEVELS.join(', ')}
   -p, --permission <mode>     auto (default) or readonly
-      --sandbox <profile>     Run the tools in a sandbox (Linux, Bubblewrap): inspect
+      --sandbox <profile>     Run the tools in a sandbox (Linux, Bubblewrap): inspect, or
+                              workspace, where changes to the project stay in the sandbox
+      --apply                 With --sandbox workspace: apply the task's changes to the
+                              project if it finishes; without it they are shown and discarded
   -C, --cwd <dir>             Starting directory (does not restrict file access)
       --json                  Emit agent events as NDJSON on stdout
       --no-agents             Do not load AGENTS.md project instructions
@@ -133,6 +137,7 @@ export const parseCli = (
         effort: { type: 'string', short: 'e' },
         permission: { type: 'string', short: 'p' },
         sandbox: { type: 'string' },
+        apply: { type: 'boolean' },
         cwd: { type: 'string', short: 'C' },
         json: { type: 'boolean' },
         'no-agents': { type: 'boolean' },
@@ -155,6 +160,15 @@ export const parseCli = (
     return typeof value === 'string' ? value : undefined;
   };
 
+  const sandbox =
+    parseSandbox(str('sandbox'), '--sandbox') ??
+    parseSandbox(env.NULLRIVET_SANDBOX, 'NULLRIVET_SANDBOX');
+  // Applying is the operator's decision for each run, so it has no environment variable.
+  const apply = values.apply === true;
+  if (apply && sandbox !== 'workspace') {
+    throw new UsageError('--apply needs --sandbox workspace, whose changes it applies');
+  }
+
   return {
     model: str('model') ?? (env.NULLRIVET_MODEL || undefined),
     effort:
@@ -164,9 +178,8 @@ export const parseCli = (
       parseMode(str('permission'), '--permission') ??
       parseMode(env.NULLRIVET_PERMISSION, 'NULLRIVET_PERMISSION') ??
       'auto',
-    sandbox:
-      parseSandbox(str('sandbox'), '--sandbox') ??
-      parseSandbox(env.NULLRIVET_SANDBOX, 'NULLRIVET_SANDBOX'),
+    sandbox,
+    apply,
     cwd: str('cwd') ?? defaultCwd,
     json: values.json === true,
     agentsMd: values['no-agents'] !== true,

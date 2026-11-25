@@ -44,10 +44,29 @@ describe('--sandbox', () => {
 
   test('refuses any other profile, naming the source', () => {
     expect(() => parseCli(['--sandbox', 'security', 'go'], {}, '/tmp')).toThrow(
-      "--sandbox must be inspect, got 'security'",
+      "--sandbox must be inspect or workspace, got 'security'",
     );
     expect(() => parseCli(['go'], { NULLRIVET_SANDBOX: 'none' }, '/tmp')).toThrow(
-      "NULLRIVET_SANDBOX must be inspect, got 'none'",
+      "NULLRIVET_SANDBOX must be inspect or workspace, got 'none'",
     );
+  });
+});
+
+describe('--apply', () => {
+  test('is off unless given, and works with the workspace profile from the flag or the environment', () => {
+    expect(parseCli(['--sandbox', 'workspace', 'go'], {}, '/tmp').apply).toBe(false);
+    expect(parseCli(['--sandbox', 'workspace', '--apply', 'go'], {}, '/tmp').apply).toBe(true);
+    expect(parseCli(['--apply', 'go'], { NULLRIVET_SANDBOX: 'workspace' }, '/tmp').apply).toBe(
+      true,
+    );
+  });
+
+  test('is refused without the workspace profile', () => {
+    for (const argv of [
+      ['--apply', 'go'],
+      ['--sandbox', 'inspect', '--apply', 'go'],
+    ]) {
+      expect(() => parseCli(argv, {}, '/tmp')).toThrow('--apply needs --sandbox workspace');
+    }
   });
 });

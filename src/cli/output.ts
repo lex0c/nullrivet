@@ -1,12 +1,21 @@
 import type { AgentEvent } from '../agent/events.ts';
+import {
+  displayText,
+  formatApplyReport,
+  formatChanges,
+  type Paint,
+} from '../sandbox/changeset/summary.ts';
 import { terminalText } from '../sanitize/display.ts';
 import { readFileDiff } from '../tools/line-diff.ts';
 import { errorSummary, toolSubject } from '../tui/tool-labels.ts';
+import type { ChangesEvent } from './workspace-changes.ts';
 
 export interface OutputSink {
   event(event: AgentEvent): void;
   // Diagnostics produced outside a turn, such as model resolution warnings.
   notice(level: 'warning' | 'error', message: string): void;
+  // What a workspace sandbox changed, and what became of it.
+  changes(event: ChangesEvent): void;
   finish(): void;
 }
 
@@ -32,6 +41,14 @@ export const createJsonSink = (write: (line: string) => void): OutputSink => ({
   },
   notice(level, message) {
     write(`${JSON.stringify({ v: NDJSON_VERSION, type: level, message })}\n`);
+  },
+  changes(event) {
+    // Counts only, as for tool diffs.
+    const shown =
+      event.type === 'changes:preview'
+        ? { ...event, changes: event.changes.map(({ snippet: _, ...entry }) => entry) }
+        : event;
+    write(`${JSON.stringify({ v: NDJSON_VERSION, ...shown })}\n`);
   },
   finish() {},
 });
@@ -63,6 +80,7 @@ export const createPlainSink = (options: PlainSinkOptions): OutputSink => {
     closeLine();
     options.stderr(`${text}\n`);
   };
+  const paint: Paint = { added: green, removed: red, attention: yellow, dim: grey };
 
   return {
     event(event) {
@@ -118,6 +136,33 @@ export const createPlainSink = (options: PlainSinkOptions): OutputSink => {
     notice(level, message) {
       const text = terminalText(message);
       diagnostic(level === 'error' ? red(`error: ${text}`) : yellow(`warning: ${text}`));
+    },
+    changes(event) {
+      switch (event.type) {
+        case 'changes:preview':
+          closeLine();
+          options.stderr(formatChanges(event.changes, paint));
+          return;
+        case 'changes:discarded':
+          if (event.count === 0) return;
+          diagnostic(
+            yellow(
+              event.reason === 'task-not-done'
+                ? 'The task did not finish: its changes are discarded.'
+                : event.reason === 'interrupted'
+                  ? 'Interrupted before the changes were applied: they are discarded.'
+                  : 'The changes are discarded: run the task with --apply to apply them.',
+            ),
+          );
+          return;
+        case 'changes:applied':
+          closeLine();
+          options.stderr(formatApplyReport(event, paint));
+          return;
+        case 'changes:failed':
+          diagnostic(red(`error: ${displayText(event.message)}`));
+          return;
+      }
     },
     finish() {
       closeLine();
