@@ -399,16 +399,22 @@ and it is read only when no process can change it.
   written. An entry that is replaced, by a new version of a file or by an entry of another type,
   is made first under a temporary name in its directory and exchanged with the project's
   (`renameat2` with `RENAME_EXCHANGE`): the path holds one or the other at every moment, and a
-  failure while the new entry is made leaves the project's in place. The entry moved out must be
-  the one checked, with the same modification time, and the same size for a file or the same
-  content for a directory, or the exchange is undone. An addition goes in only where nothing is
-  (`RENAME_NOREPLACE`), in a directory that did not change. A removal first moves the entry to a
-  hidden name in its directory, checks what it moved, and deletes it, or moves it back. Before
-  each write, the directory is opened again to confirm it was not moved. The application is
-  atomic per entry, not across the project: a failure, a new conflict or an interruption of the
-  process stops it, leaving what was applied before. It reports what was applied and what was
+  failure while the new entry is made leaves the project's in place. Making it can take long, so
+  the project's entry is checked against the reference time again right before the exchange. The
+  entry moved out must be the one checked, with the same modification time, mode, owner and group,
+  and the same size for a file or the same content for a directory, or the exchange is undone;
+  moving an entry sets its change time, so a change to its extended attributes alone in the
+  moment between that last check and the exchange is not seen. An addition goes in only where
+  nothing is (`RENAME_NOREPLACE`), in a directory that did not change. A removal first moves the
+  entry to a hidden name in its directory, checks what it moved, and deletes it, or moves it back.
+  Before each write, the directory is opened again to confirm it was not moved. The application
+  is atomic per entry, not across the project: a failure, a new conflict or an interruption of
+  the process stops it, leaving what was applied before. It reports what was applied and what was
   not; when an entry was taken from its path but could not be deleted, the report gives the
-  hidden name it is left under.
+  hidden name it is left under. Killed at any point, by a signal or a power loss, the application
+  leaves each path as it was or as the change makes it, and can leave an entry under a hidden name
+  starting with `.nullrivet-` in its directory: a new entry not yet moved in, or the project's
+  entry not yet deleted, whole or in part. There is no journal to finish or undo the rest.
 - **Discarding** removes the upper layer.
 
 Editing the project on the host during a `workspace` session is not supported. The kernel leaves

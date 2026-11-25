@@ -20,7 +20,11 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sandboxHost } from '../../src/sandbox/bwrap.ts';
-import { type ApplyOutcome, applyChanges } from '../../src/sandbox/changeset/apply.ts';
+import {
+  type ApplyOutcome,
+  type ApplyStep,
+  applyChanges,
+} from '../../src/sandbox/changeset/apply.ts';
 import { type Change, classify } from '../../src/sandbox/changeset/classify.ts';
 import { close, openDirectory, openPath } from '../../src/sandbox/changeset/dirfd.ts';
 import { readUpper, type UpperNode } from '../../src/sandbox/changeset/snapshot.ts';
@@ -99,7 +103,7 @@ const workspace = (files: Record<string, string> = {}) => {
   };
   const apply = (
     list: Change[] = changes(),
-    afterCheck?: (change: Change) => void,
+    step?: (step: ApplyStep, change: Change) => void,
   ): ApplyOutcome => {
     const root = openDirectory(project);
     try {
@@ -108,7 +112,7 @@ const workspace = (files: Record<string, string> = {}) => {
         projectPath: project,
         upperPath: upper,
         since,
-        ...(afterCheck === undefined ? {} : { afterCheck }),
+        ...(step === undefined ? {} : { step }),
       });
     } finally {
       close(root);
@@ -119,6 +123,7 @@ const workspace = (files: Record<string, string> = {}) => {
     project,
     upper,
     start,
+    since: () => since,
     agent,
     changes,
     apply,
@@ -521,8 +526,10 @@ describe.if(overlayTestsRun)('the workspace ChangeSet', () => {
     const w = workspace({ 'race.txt': 'base\n', 'after.txt': 'base\n' });
     w.start();
     w.agent('echo agent >> race.txt; echo agent >> after.txt');
-    const outcome = w.apply(undefined, (change) => {
-      if (change.path.join('/') === 'race.txt') writeFileSync(w.file('race.txt'), 'operator\n');
+    const outcome = w.apply(undefined, (step, change) => {
+      if (step === 'checked' && change.path.join('/') === 'race.txt') {
+        writeFileSync(w.file('race.txt'), 'operator\n');
+      }
     });
     expect(readFileSync(w.file('race.txt'), 'utf8')).toBe('operator\n');
     expect(outcome.stopped?.reason).toBe('the file changed on the host');
@@ -535,7 +542,9 @@ describe.if(overlayTestsRun)('the workspace ChangeSet', () => {
     const w = workspace({ 'race.txt': 'base\n' });
     w.start();
     w.agent('echo agent >> race.txt');
-    const outcome = w.apply(undefined, () => rmSync(w.file('race.txt')));
+    const outcome = w.apply(undefined, (step) => {
+      if (step === 'checked') rmSync(w.file('race.txt'));
+    });
     expect(outcome.stopped?.reason).toBe('the file changed on the host');
     expect(readdirSync(w.project)).toEqual([]);
   });
@@ -544,8 +553,8 @@ describe.if(overlayTestsRun)('the workspace ChangeSet', () => {
     const w = workspace({ 'conf/app.cfg': 'c\n', 'conf/other.cfg': 'o\n' });
     w.start();
     w.agent('ln -sfn other.cfg conf/app.cfg');
-    const outcome = w.apply(undefined, (change) => {
-      if (change.op === 'symlink') chmodSync(w.file('conf'), 0o555);
+    const outcome = w.apply(undefined, (step, change) => {
+      if (step === 'checked' && change.op === 'symlink') chmodSync(w.file('conf'), 0o555);
     });
     expect(outcome.stopped?.reason).toContain('EACCES');
     expect(outcome.applied).toEqual([]);
@@ -575,7 +584,9 @@ describe.if(overlayTestsRun)('the workspace ChangeSet', () => {
     const w = workspace({ 'out/a.txt': 'a\n' });
     w.start();
     w.agent('rm -r out && ln -s a.txt out');
-    const outcome = w.apply(undefined, () => writeFileSync(w.file('out/host.txt'), 'h\n'));
+    const outcome = w.apply(undefined, (step) => {
+      if (step === 'checked') writeFileSync(w.file('out/host.txt'), 'h\n');
+    });
     expect(outcome.stopped?.reason).toBe('the directory changed on the host');
     expect(readdirSync(w.file('out')).sort()).toEqual(['a.txt', 'host.txt']);
     expect(readdirSync(w.project)).toEqual(['out']);
@@ -588,7 +599,11 @@ describe.if(overlayTestsRun)('the workspace ChangeSet', () => {
     chmodSync(w.file('tool.sh'), 0o644);
     w.start();
     w.agent('chmod 755 tool.sh');
-    const outcome = w.apply(undefined, () => linkSync(w.file('tool.sh'), join(outside, 'alias')));
+    // Right before the exchange, after the last check of the file: a hard link changes nothing
+    // the exchange compares, and the name outside keeps the inode the project's name leaves.
+    const outcome = w.apply(undefined, (step) => {
+      if (step === 'moving') linkSync(w.file('tool.sh'), join(outside, 'alias'));
+    });
     const result = summary(outcome);
     expect(result.stopped).toBeNull();
     expect(result.applied).toEqual(['write tool.sh']);
@@ -597,6 +612,176 @@ describe.if(overlayTestsRun)('the workspace ChangeSet', () => {
     expect(statSync(join(outside, 'alias')).mode & 0o777).toBe(0o644);
     expect(readFileSync(join(outside, 'alias'), 'utf8')).toBe('echo\n');
   });
+
+  test('a change to a file on the host before its exchange is a conflict', () => {
+    const edits: Record<string, (file: string) => void> = {
+      content: (file) => writeFileSync(file, 'operator\n'),
+      mode: (file) => chmodSync(file, 0o600),
+      // Only the change time shows it.
+      attribute: (file) =>
+        Bun.spawnSync([
+          'python3',
+          '-I',
+          '-c',
+          'import os, sys; os.setxattr(sys.argv[1], "user.note", b"x")',
+          file,
+        ]),
+    };
+    // While the new file is written, then right before the exchange, after the last check of
+    // the change time; a change to the attributes alone does not show past that check.
+    const cases: [ApplyStep, string[]][] = [
+      ['checked', ['content', 'mode', 'attribute']],
+      ['moving', ['content', 'mode']],
+    ];
+    for (const [at, kinds] of cases) {
+      for (const what of kinds) {
+        const edit = edits[what] as (file: string) => void;
+        const w = workspace({ 'race.txt': 'base\n' });
+        w.start();
+        w.agent('echo agent >> race.txt');
+        const outcome = w.apply(undefined, (step) => {
+          if (step === at) edit(w.file('race.txt'));
+        });
+        const label = `${what} changed at ${at}`;
+        expect(outcome.stopped?.reason, label).toBe('the file changed on the host');
+        expect(readFileSync(w.file('race.txt'), 'utf8'), label).not.toContain('agent');
+        expect(readdirSync(w.project), label).toEqual(['race.txt']);
+      }
+    }
+  });
+
+  // An entry of each kind of change, and the paths a run over them leaves.
+  const eachKind = () => {
+    const w = workspace({
+      'edit.txt': 'old\n',
+      'gone.txt': 'g\n',
+      'out/a.txt': 'a\n',
+      cfg: 'c\n',
+      'other.cfg': 'o\n',
+    });
+    w.start();
+    w.agent(
+      'echo new >> edit.txt; rm gone.txt; rm -r out && echo report > out; ' +
+        'ln -sfn other.cfg cfg; echo n > new.txt',
+    );
+    const read = (path: string): string | null => {
+      const file = w.file(path);
+      const stat = lstatSync(file, { throwIfNoEntry: false });
+      if (stat === undefined) return null;
+      if (stat.isSymbolicLink()) return `-> ${readlinkSync(file)}`;
+      if (stat.isDirectory()) {
+        return `dir ${readdirSync(file)
+          .sort()
+          .map((name) => `${name}=${readFileSync(join(file, name), 'utf8')}`)
+          .join(',')}`;
+      }
+      return readFileSync(file, 'utf8');
+    };
+    const state = () => ({
+      'edit.txt': read('edit.txt'),
+      'gone.txt': read('gone.txt'),
+      out: read('out'),
+      cfg: read('cfg'),
+      'new.txt': read('new.txt'),
+      'other.cfg': read('other.cfg'),
+    });
+    return { w, state };
+  };
+  const before = {
+    'edit.txt': 'old\n',
+    'gone.txt': 'g\n',
+    out: 'dir a.txt=a\n',
+    cfg: 'c\n',
+    'new.txt': null,
+    'other.cfg': 'o\n',
+  };
+  const after = {
+    'edit.txt': 'old\nnew\n',
+    'gone.txt': null,
+    out: 'report\n',
+    cfg: '-> other.cfg',
+    'new.txt': 'n\n',
+    'other.cfg': 'o\n',
+  };
+  const replaced = ['edit.txt', 'gone.txt', 'out', 'cfg'] as const;
+  const injected = new Error('an injected failure');
+
+  test('a failure after an entry is moved out of its path puts it back', () => {
+    for (const target of replaced) {
+      const { w, state } = eachKind();
+      const outcome = w.apply(undefined, (step, change) => {
+        if (step === 'moved' && change.path.join('/') === target) throw injected;
+      });
+      expect(outcome.stopped?.reason, target).toBe('an injected failure');
+      expect(state()[target], target).toEqual(before[target]);
+      expect(
+        readdirSync(w.project).filter((name) => name.startsWith('.nullrivet-')),
+        target,
+      ).toEqual([]);
+    }
+  });
+
+  test('a failure to delete the replaced entry reports the change applied and where the entry is left', () => {
+    for (const target of replaced) {
+      const { w, state } = eachKind();
+      const outcome = w.apply(undefined, (step, change) => {
+        if (step === 'deleting' && change.path.join('/') === target) throw injected;
+      });
+      const reason = outcome.stopped?.reason ?? '';
+      const leftovers = readdirSync(w.project).filter((name) => name.startsWith('.nullrivet-'));
+      expect(leftovers, target).toHaveLength(1);
+      const left = leftovers[0] as string;
+      expect(reason, target).toBe(
+        `deleting the project's entry failed, and it is left as ${left} in the same directory: ` +
+          'an injected failure',
+      );
+      expect(state()[target], target).toEqual(after[target]);
+      expect(
+        outcome.applied.map((c) => c.path.join('/')),
+        target,
+      ).toContain(target);
+      // What is left is the project's entry.
+      const leftover = target === 'out' ? join(left, 'a.txt') : left;
+      expect(readFileSync(w.file(leftover), 'utf8'), target).toBe(
+        target === 'out' ? 'a\n' : (before[target] as string),
+      );
+    }
+  });
+
+  test('a process killed at any step of the application leaves each path as it was or as the change makes it', () => {
+    const script = join(import.meta.dir, 'apply-until-killed.ts');
+    const runs: [string, ApplyStep][] = [
+      ...replaced.flatMap((target) =>
+        (['checked', 'moving', 'moved', 'deleting'] as const).map(
+          (step) => [target, step] as [string, ApplyStep],
+        ),
+      ),
+      ['new.txt', 'moving'],
+    ];
+    for (const [target, at] of runs) {
+      const { w, state } = eachKind();
+      const run = Bun.spawnSync(
+        [process.execPath, script, w.project, w.upper, String(w.since()), at, target],
+        { stderr: 'pipe' },
+      );
+      const label = `${target} at ${at}`;
+      expect(run.signalCode, `${label}: ${run.stderr.toString()}`).toBe('SIGKILL');
+      const now = state();
+      for (const [path, value] of Object.entries(now)) {
+        expect(
+          [before[path as keyof typeof before], after[path as keyof typeof after]],
+          `${label}: ${path}`,
+        ).toContainEqual(value);
+      }
+      const names = new Set([...Object.keys(before), ...Object.keys(after)]);
+      expect(
+        readdirSync(w.project).filter(
+          (name) => !names.has(name) && !name.startsWith('.nullrivet-'),
+        ),
+        label,
+      ).toEqual([]);
+    }
+  }, 60_000);
 
   test('a file over the size limit is not hashed nor applied, a sparse one included', () => {
     const w = workspace();

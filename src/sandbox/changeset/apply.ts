@@ -56,10 +56,17 @@ export interface ApplyOptions {
   // Changes since this time, in nanoseconds, are the host's: entries changed at or after it are
   // conflicts.
   since: bigint;
-  // Called between the check of an entry and its replacement, where a change on the host races
-  // with this process. Only tests use it, to make that change at that moment.
-  afterCheck?: (change: Change) => void;
+  // Called at each step of moving an entry into or out of its path, where a change on the host
+  // races with this process and where a failure or an interruption leaves the work half done.
+  // Only tests use it, to make that change, fail or end the process at that moment.
+  step?: (step: ApplyStep, change: Change) => void;
 }
+
+// `checked`: the project's entry was checked, and the new one is about to be made. `moving`: the
+// new one is made, and the rename or exchange is next. `moved`: the project's entry was moved
+// out, and is about to be checked again. `deleting`: it was confirmed, and is about to be deleted.
+// An added file goes through `moving` only.
+export type ApplyStep = 'checked' | 'moving' | 'moved' | 'deleting';
 
 export interface NotApplied {
   change: Change;
@@ -208,7 +215,7 @@ export const applyChanges = (changes: readonly Change[], options: ApplyOptions):
 
   // Copies a file of the upper layer to a new temporary file in `dir`, checking its hash.
   const writeTemp = (dir: number, path: readonly Buffer[], hash: string, mode: number): Buffer => {
-    const temp = tempName('new');
+    const temp = tempName('apply');
     const source = openPath(openUpper(), path, constants.O_RDONLY | constants.O_NONBLOCK);
     let target: number | null = null;
     try {
@@ -275,15 +282,27 @@ export const applyChanges = (changes: readonly Change[], options: ApplyOptions):
     return { stat, dir: fd };
   };
 
+  // Whether the entry at `name` is still the one held, with no change since the check. Checked
+  // again right before it is moved: making the new entry can take long.
+  const unchangedSinceHeld = (dir: number, name: Buffer, held: Held): boolean => {
+    const now =
+      held.dir === null ? lstatAtOrNull(dir, name) : fstatSync(held.dir, { bigint: true });
+    return now !== null && now.dev === held.stat.dev && now.ino === held.stat.ino && unchanged(now);
+  };
+
   // Whether the entry now under `name` is the one held, unchanged since it was checked: another
-  // one can have taken its name since, or it can have been written. Moving an entry changes its
-  // change time, so its modification time and size are compared instead.
+  // one can have taken its name since, or it can have been written, or had its mode or owner
+  // changed. Moving an entry changes its change time, so what each of those changes sets is
+  // compared instead; a change to its extended attributes alone does not show here.
   const stillHeld = (dir: number, name: Buffer, held: Held): boolean => {
     const moved = lstatAt(dir, name);
     if (
       moved.dev !== held.stat.dev ||
       moved.ino !== held.stat.ino ||
-      moved.mtimeNs !== held.stat.mtimeNs
+      moved.mtimeNs !== held.stat.mtimeNs ||
+      moved.mode !== held.stat.mode ||
+      moved.uid !== held.stat.uid ||
+      moved.gid !== held.stat.gid
     ) {
       return false;
     }
@@ -292,8 +311,9 @@ export const applyChanges = (changes: readonly Change[], options: ApplyOptions):
 
   // Deletes the project's entry, detached under `trash`: a change made under its old name cannot
   // reach it.
-  const deleteHeld = (dir: number, trash: Buffer, held: Held): void => {
+  const deleteHeld = (dir: number, trash: Buffer, held: Held, change: Change): void => {
     try {
+      options.step?.('deleting', change);
       if (held.dir === null) {
         unlinkAt(dir, trash);
       } else {
@@ -313,8 +333,11 @@ export const applyChanges = (changes: readonly Change[], options: ApplyOptions):
   const removeEntry = (dir: number, name: Buffer, change: RemoveChange): void => {
     const held = holdEntry(dir, name, change.before);
     try {
+      options.step?.('checked', change);
+      if (!unchangedSinceHeld(dir, name, held)) throw new Conflict(changedOnHost(change.before));
       ensureInside(dir, change.path);
       const trash = tempName('trash');
+      options.step?.('moving', change);
       try {
         renameBeneath(dir, name, dir, trash, RENAME_NOREPLACE);
       } catch (error) {
@@ -323,11 +346,17 @@ export const applyChanges = (changes: readonly Change[], options: ApplyOptions):
         }
         throw error;
       }
-      if (!stillHeld(dir, trash, held)) {
-        renameBeneath(dir, trash, dir, name, RENAME_NOREPLACE);
-        throw new Conflict(changedOnHost(change.before));
+      // Out of its path from here: the entry goes back unless it is confirmed, a failure of the
+      // check included.
+      let same = false;
+      try {
+        options.step?.('moved', change);
+        same = stillHeld(dir, trash, held);
+      } finally {
+        if (!same) renameBeneath(dir, trash, dir, name, RENAME_NOREPLACE);
       }
-      deleteHeld(dir, trash, held);
+      if (!same) throw new Conflict(changedOnHost(change.before));
+      deleteHeld(dir, trash, held, change);
     } finally {
       if (held.dir !== null) closeSync(held.dir);
     }
@@ -337,7 +366,7 @@ export const applyChanges = (changes: readonly Change[], options: ApplyOptions):
   // open to its owner; it gets its mode once it is in place.
   const createAt = (dir: number, change: Creation): Buffer => {
     if (change.op === 'write') return writeTemp(dir, change.path, change.node.hash, change.mode);
-    const temp = tempName('new');
+    const temp = tempName('apply');
     if (change.op === 'mkdir') mkdirAt(dir, temp, 0o700);
     else symlinkAt(change.target, dir, temp);
     return temp;
@@ -349,7 +378,7 @@ export const applyChanges = (changes: readonly Change[], options: ApplyOptions):
   const replaceEntry = (dir: number, name: Buffer, before: Existing, change: Creation): void => {
     const held = holdEntry(dir, name, before);
     try {
-      options.afterCheck?.(change);
+      options.step?.('checked', change);
       const temp = createAt(dir, change);
       // What the temporary name holds: the new entry until the exchange, the project's after it.
       // When that is not known, nothing under it is deleted.
@@ -358,7 +387,9 @@ export const applyChanges = (changes: readonly Change[], options: ApplyOptions):
       let made: number | null = null;
       try {
         if (change.op !== 'symlink') made = openPathBeneath(dir, temp);
+        if (!unchangedSinceHeld(dir, name, held)) throw new Conflict(changedOnHost(before));
         ensureInside(dir, change.path);
+        options.step?.('moving', change);
         try {
           renameBeneath(dir, temp, dir, name, RENAME_EXCHANGE);
         } catch (error) {
@@ -370,6 +401,7 @@ export const applyChanges = (changes: readonly Change[], options: ApplyOptions):
         holds = 'unknown';
         let same = false;
         try {
+          options.step?.('moved', change);
           same = stillHeld(dir, temp, held);
         } finally {
           if (!same) {
@@ -390,7 +422,7 @@ export const applyChanges = (changes: readonly Change[], options: ApplyOptions):
           else unlinkAt(dir, temp);
         }
       }
-      deleteHeld(dir, temp, held);
+      deleteHeld(dir, temp, held, change);
     } finally {
       if (held.dir !== null) closeSync(held.dir);
     }
@@ -437,6 +469,7 @@ export const applyChanges = (changes: readonly Change[], options: ApplyOptions):
           } else {
             const temp = writeTemp(dir, change.path, change.node.hash, change.mode);
             try {
+              options.step?.('moving', change);
               renameBeneath(dir, temp, dir, name, RENAME_NOREPLACE);
             } catch (error) {
               unlinkAt(dir, temp);
