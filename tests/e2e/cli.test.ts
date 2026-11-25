@@ -637,9 +637,12 @@ describe('terminal', () => {
       expect(await session.until(() => session.screen().includes('Subagent find the parser'))).toBe(
         true,
       );
-      // The footer counts the subagent and says how to cancel it.
+      // The footer counts the subagent and, once the turn that started it has ended, says how to
+      // cancel it; the count can show while that turn still runs.
       expect(await session.until(() => session.screen().includes('1 subagent'))).toBe(true);
-      expect(session.screen()).toContain('esc to cancel subagents');
+      expect(await session.until(() => session.screen().includes('esc to cancel subagents'))).toBe(
+        true,
+      );
       session.release();
       expect(await session.turnsEnded(2)).toBe(true);
       const requests = session.parentRequests();
@@ -660,7 +663,9 @@ describe('terminal', () => {
     'Esc on an idle session cancels its subagents without starting a turn',
     async () => {
       const session = await sessionWithSubagent();
-      expect(await session.until(() => session.screen().includes('Subagent find the parser'))).toBe(
+      // The session is idle once the turn that started the subagent has ended; before, Esc
+      // interrupts that turn instead.
+      expect(await session.until(() => session.screen().includes('esc to cancel subagents'))).toBe(
         true,
       );
       session.type('\x1b');
