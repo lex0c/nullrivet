@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { closeSync, constants, fstatSync, readSync } from 'node:fs';
+import { closeSync, constants, fstatSync, readSync, statfsSync } from 'node:fs';
+import { totalmem } from 'node:os';
 import {
   chmodFd,
   lstatAt,
@@ -19,7 +20,8 @@ import {
 // does not expect to change under it, and passes over entries removed while it reads.
 
 export type UpperNode =
-  | { kind: 'file'; mode: number; size: number; hash: string }
+  // `content`: the bytes hashed, kept for a small file; see KEPT_FILE_BYTES.
+  | { kind: 'file'; mode: number; size: number; hash: string; content?: Buffer }
   | { kind: 'dir'; mode: number; opaque: boolean; children: Map<string, UpperChild> }
   | { kind: 'symlink'; target: Buffer }
   | { kind: 'whiteout' }
@@ -71,6 +73,52 @@ const markers = (dir: number, name: Buffer): Map<string, Buffer> => {
 
 const CHUNK = 1024 * 1024;
 
+// Files up to this size keep the bytes that were hashed, within KEPT_TOTAL_BYTES for a reading:
+// the summary shows the lines of exactly the bytes the application checks, never those of a
+// second reading, which a sandbox still running could change in between.
+export const KEPT_FILE_BYTES = 1024 * 1024;
+const KEPT_TOTAL_BYTES = 32 * 1024 * 1024;
+
+interface Read {
+  hash: string;
+  content?: Buffer;
+}
+
+// The hash of the file's `size` bytes, with the bytes themselves when `keep`. Null when the file
+// holds fewer or more: it changed while it was read. Reading stops at `size`, so a file that grows
+// while it is read, as a sparse one can, costs no more than the size first seen.
+const readExactly = (fd: number, size: number, keep: boolean): Read | null => {
+  const hash = createHash('sha256');
+  const content = keep ? Buffer.alloc(size) : null;
+  const chunk = content === null ? Buffer.alloc(Math.min(CHUNK, Math.max(size, 1))) : null;
+  let done = 0;
+  while (done < size) {
+    const target = content ?? (chunk as Buffer);
+    const offset = content === null ? 0 : done;
+    const read = readSync(
+      fd,
+      target,
+      offset,
+      Math.min(CHUNK, size - done, target.length - offset),
+      null,
+    );
+    if (read === 0) return null;
+    hash.update(target.subarray(offset, offset + read));
+    done += read;
+  }
+  if (readSync(fd, Buffer.alloc(1), 0, 1, null) > 0) return null;
+  return content === null ? { hash: hash.digest('hex') } : { hash: hash.digest('hex'), content };
+};
+
+// What the files of a reading may hold in all, each name of a file counted: what the sandbox's
+// storage holds. Past it, the sandbox made one file many names, which the application would write
+// as many copies into the project, or it rewrote files while they were read; the reading stops.
+const storageBytes = (path: string): number => {
+  const info = statfsSync(path);
+  const size = info.blocks * info.bsize;
+  return size > 0 ? size : totalmem();
+};
+
 export const hashFile = (fd: number): string => {
   const hash = createHash('sha256');
   const buffer = Buffer.alloc(CHUNK);
@@ -81,6 +129,11 @@ export const hashFile = (fd: number): string => {
   }
   return hash.digest('hex');
 };
+
+// Directories deeper than this are refused unread: every change's path is opened and checked from
+// the project's root, so the work of classifying, checking links and applying grows with depth
+// for each entry. Source trees, dependencies included, stay far below it.
+export const MAX_DEPTH = 64;
 
 const UNREADABLE: UpperNode = {
   kind: 'other',
@@ -113,7 +166,15 @@ export const readUpper = (
     return true;
   };
   let entries = 0;
-  const readDir = (fd: number, mode: number, opaque: boolean): UpperNode => {
+  // The work of a reading, and what an application writes, are bounded by what the sandbox's
+  // storage holds: a sparse file, whose size the storage does not hold, is refused unread, the
+  // names of one inode, hard links, are read once, and the files' sizes, counted for each name,
+  // stay within the size of the storage.
+  const reads = new Map<string, Read | null>();
+  const sizeLimit = storageBytes(upperPath);
+  let named = 0;
+  let kept = 0;
+  const readDir = (fd: number, mode: number, opaque: boolean, depth: number): UpperNode => {
     const children = new Map<string, UpperChild>();
     for (const name of readdirAt(fd)) {
       entries += 1;
@@ -122,7 +183,7 @@ export const readUpper = (
       }
       let node: UpperNode;
       try {
-        node = readEntry(fd, name);
+        node = readEntry(fd, name, depth + 1);
       } catch (error) {
         const code = (error as { code?: unknown }).code;
         if (live && typeof code === 'string' && GONE.has(code)) continue;
@@ -132,7 +193,7 @@ export const readUpper = (
     }
     return { kind: 'dir', mode, opaque, children };
   };
-  const readEntry = (dir: number, name: Buffer): UpperNode => {
+  const readEntry = (dir: number, name: Buffer, depth: number): UpperNode => {
     const stat = lstatAt(dir, name);
     const mode = Number(stat.mode) & 0o7777;
     if (stat.isCharacterDevice() && stat.rdev === 0n) return { kind: 'whiteout' };
@@ -148,10 +209,13 @@ export const readUpper = (
           throw new SnapshotError(`a directory of the upper layer has the marker ${marker}`);
         }
       }
+      if (depth > MAX_DEPTH) {
+        return { kind: 'other', what: `a directory more than ${MAX_DEPTH} levels deep` };
+      }
       if (!readable(dir, name, mode, 0o500)) return UNREADABLE;
       const fd = openDirectoryBeneath(dir, name);
       try {
-        return readDir(fd, mode, opaque !== undefined);
+        return readDir(fd, mode, opaque !== undefined, depth);
       } finally {
         closeSync(fd);
       }
@@ -168,12 +232,35 @@ export const readUpper = (
       if (!readable(dir, name, mode, 0o400)) return UNREADABLE;
       const fd = openBeneath(dir, name, constants.O_RDONLY | constants.O_NONBLOCK);
       try {
-        if (!fstatSync(fd).isFile()) return { kind: 'other', what: 'an entry that changed type' };
+        // Checked again on what was opened, which a running sandbox could have replaced.
+        const opened = fstatSync(fd, { bigint: true });
+        if (!opened.isFile()) return { kind: 'other', what: 'an entry that changed type' };
+        if (opened.size > BigInt(limits.maxFileBytes)) {
+          return { kind: 'other', what: `a file larger than ${limits.maxFileBytes} bytes` };
+        }
+        if (opened.blocks * 512n < opened.size) return { kind: 'other', what: 'a sparse file' };
+        const size = Number(opened.size);
+        named += size;
+        if (named > sizeLimit) {
+          throw new SnapshotError(
+            `the sandbox's files hold more than its storage, ${sizeLimit} bytes, counting each name of a file: it gave files many names, or rewrote them while they were read`,
+          );
+        }
+        const inode = `${opened.dev}:${opened.ino}`;
+        let read = reads.get(inode);
+        if (read === undefined) {
+          const keep = size <= KEPT_FILE_BYTES && kept + size <= KEPT_TOTAL_BYTES;
+          read = readExactly(fd, size, keep);
+          if (read?.content !== undefined) kept += size;
+          reads.set(inode, read);
+        }
+        if (read === null) return { kind: 'other', what: 'a file that changed while it was read' };
         return {
           kind: 'file',
           mode,
-          size: Number(stat.size),
-          hash: hashFile(fd),
+          size,
+          hash: read.hash,
+          ...(read.content === undefined ? {} : { content: read.content }),
         };
       } finally {
         closeSync(fd);
@@ -185,7 +272,7 @@ export const readUpper = (
   };
   const root = openDirectory(upperPath);
   try {
-    return readDir(root, 0o755, false);
+    return readDir(root, 0o755, false, 0);
   } finally {
     closeSync(root);
   }

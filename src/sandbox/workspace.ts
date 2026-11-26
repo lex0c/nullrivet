@@ -49,6 +49,8 @@ export interface WorkspaceDirectory {
 }
 
 const PREFIX = 'nullrivet-';
+// How long a session directory without a lock is left alone: making one takes far less.
+const LOCKLESS_AGE_MS = 60_000;
 // The count is optional: a directory left by a version that named it without one is removed too.
 const SESSION_NAME = /^nullrivet-(\d+)-(\d+)(-\d+)?(\.new)?$/;
 const LOCK = Buffer.from('lock');
@@ -115,6 +117,19 @@ const runtimeDirectory = (env: Env): string | { error: string } => {
     return {
       error: `XDG_RUNTIME_DIR ${path} must be a directory owned by the user and writable by no one else`,
     };
+  }
+  // A directory above it that another user can change could have it replaced, with content of
+  // theirs, between the check and its use: each one belongs to root or the user, and one others
+  // can write to is sticky, as /dev/shm is.
+  for (let above = dirname(path); ; above = dirname(above)) {
+    const parent = lstatSync(above);
+    const writable = (parent.mode & 0o022) !== 0 && (parent.mode & 0o1000) === 0;
+    if ((parent.uid !== 0 && parent.uid !== uid) || writable) {
+      return {
+        error: `XDG_RUNTIME_DIR ${path} is under ${above}, which another user can change`,
+      };
+    }
+    if (dirname(above) === above) break;
   }
   if (statfsSync(path).type !== TMPFS) {
     return {
@@ -222,8 +237,11 @@ const sweep = (runtime: string): string[] => {
         lock = lockDirectory(path, false);
         if (lock === null) continue;
       } catch (error) {
-        // A directory without a lock is one whose session ended before taking it.
+        // A directory without a lock is one whose session ended before taking it, or one a
+        // session of another PID namespace, whose process id means nothing here, is making right
+        // now: only one left alone for a while is removed.
         if (!(error instanceof SysError && error.code === 'ENOENT')) throw error;
+        if (Date.now() - info.mtimeMs < LOCKLESS_AGE_MS) continue;
       }
       removeDirectory(path);
     } catch (error) {

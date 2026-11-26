@@ -104,6 +104,11 @@ export class SandboxSession implements ToolBackend {
     this.attachJobs(first);
   }
 
+  // Whether the sandbox is being replaced.
+  get busy(): boolean {
+    return this.paused !== null;
+  }
+
   // The workspace of the running sandbox, or of the one that failed; null once none is left.
   get workspace(): StartedWorkspace | null {
     return this.current?.workspace ?? null;
@@ -168,6 +173,9 @@ export class SandboxSession implements ToolBackend {
       this.stopping.add(current.backend);
       await current.backend.close();
       try {
+        // A session that ended during the stop does nothing to the changes: they are discarded
+        // with it, as its end says.
+        if (this.closed) throw new Error('the session ended before the changes were applied');
         done = { result: work(current.workspace) };
       } catch (error) {
         done = { error };
@@ -212,10 +220,12 @@ export class SandboxSession implements ToolBackend {
     }
   }
 
-  // Stops the sandbox for good, at the end of the session. Its workspace is left to the caller; a
-  // sandbox that a cycle under way starts is stopped by the cycle, with its workspace.
+  // Stops the sandbox for good, at the end of the session, once a cycle under way is done: a cycle
+  // that had not reached its work skips it, and starts no new sandbox. The workspace is left to
+  // the caller.
   async close(): Promise<void> {
     this.closed = true;
+    while (this.paused !== null) await this.paused;
     const current = this.current;
     if (current === null) return;
     this.stopping.add(current.backend);

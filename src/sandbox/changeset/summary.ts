@@ -3,15 +3,8 @@ import { formatBytes } from '../../context/output-reduction.ts';
 import { type DiffBudget, type DiffLine, lineDiff } from '../../tools/line-diff.ts';
 import type { ApplyOutcome } from './apply.ts';
 import type { Before, Change } from './classify.ts';
-import {
-  close,
-  lstatAtOrNull,
-  openDirectory,
-  openDirectoryPath,
-  openPath,
-  SysError,
-} from './dirfd.ts';
-import { childKey, pathKey } from './snapshot.ts';
+import { close, lstatAtOrNull, openDirectoryPath, openPath, SysError } from './dirfd.ts';
+import { childKey, KEPT_FILE_BYTES, pathKey } from './snapshot.ts';
 
 // What the sandbox changed in the project, entry by entry, for the operator to review before or
 // after it is applied: every path is listed, except the content of a directory the sandbox
@@ -25,9 +18,11 @@ export interface ChangeEntry {
   change: 'added' | 'modified' | 'removed' | 'replaced' | 'mode' | 'refused';
   // What the change leaves at the path; for a removal, what it removes.
   kind: EntryKind;
-  // For a replacement, the kind of entry it replaces.
+  // For a replacement, the kind of entry it replaces, and what a directory it replaces holds.
   replaces?: EntryKind;
-  // Lines added and removed, for a text file small enough to compare.
+  held?: { entries: number; bytes: number };
+  // Lines added and removed, for a text file small enough to compare, from the bytes the reading of
+  // the upper layer hashed: those the application checks.
   lines?: { added: number; removed: number };
   binary?: true;
   // A file whose lines were not counted: comparing it took more than the summary allows for one
@@ -36,7 +31,8 @@ export interface ChangeEntry {
   // A file's size, or what a directory removed or created holds.
   bytes?: number;
   entries?: number;
-  // The mode, in octal, when it changes, or when an added file is executable.
+  // The mode, in octal, when it changes, or when an added entry is executable, writable by others
+  // than its owner, or sticky.
   mode?: string;
   // Set-user-ID and set-group-ID bits the sandbox set, which are not applied.
   dropped?: string;
@@ -49,18 +45,20 @@ export interface ChangeEntry {
 }
 
 const BACKSLASH = 0x5c;
-// Characters that change how a row reads without showing: bidirectional controls, marks and
-// isolates, zero-width characters, the byte order mark and the soft hyphen. Wider than the set the
-// terminal output strips, since here two names must never look the same. Built from joined
-// strings: the linter's fixes turn a single string into a literal, and the escapes of a literal
-// into the characters themselves.
+// Characters that change how a row reads without showing: every default-ignorable code point
+// (bidirectional controls, marks and isolates, zero-width characters, variation selectors, tag
+// characters, fillers, the byte order mark, the soft hyphen), and the line and paragraph
+// separators. Wider than the set the terminal output strips, since here two names must never look
+// the same. Built from joined strings: the linter's fixes turn a single string into a literal, and
+// the escapes of a literal into the characters themselves.
 const INVISIBLE = new RegExp(
   [
     '[',
-    '\\u00ad\\u061c\\u180e\\u200b-\\u200f\\u202a-\\u202e\\u2060-\\u2064\\u2066-\\u2069\\ufeff',
+    '\\p{Default_Ignorable_Code_Point}',
+    '\\u00ad\\u061c\\u180e\\u200b-\\u200f\\u202a-\\u202e\\u2028\\u2029\\u2060-\\u2064\\u2066-\\u2069\\ufeff',
     ']',
   ].join(''),
-  'g',
+  'gu',
 );
 const CONTROLS = new RegExp(['[', '\\x00-\\x1f\\x7f-\\x9f', ']'].join(''), 'g');
 
@@ -73,7 +71,7 @@ const escapeControls = (text: string, exact = true): string =>
       if (c === '\t') return '\\t';
       return `\\x${c.charCodeAt(0).toString(16).padStart(2, '0')}`;
     })
-    .replace(INVISIBLE, (c) => `\\u{${c.charCodeAt(0).toString(16)}}`);
+    .replace(INVISIBLE, (c) => `\\u{${(c.codePointAt(0) ?? 0).toString(16)}}`);
 
 // A leading byte order mark is kept, not dropped: it tells two names, or two contents, apart.
 const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
@@ -116,7 +114,16 @@ export const displayText = (text: string): string => escapeControls(text, false)
 const attentionFor = (path: readonly Buffer[]): string | undefined => {
   const parts = path.map((part) => part.toString('latin1'));
   const name = parts.at(-1);
-  if (name === 'AGENTS.md') return 'instructions for coding agents';
+  if (name === 'AGENTS.md' || name === 'CLAUDE.md' || name === '.cursorrules') {
+    return 'instructions for coding agents';
+  }
+  if (parts.length > 1 && (parts[0] === '.claude' || parts[0] === '.cursor')) {
+    return "a coding agent's settings, which can run commands";
+  }
+  if (parts[0] === '.vscode' && name === 'tasks.json') {
+    return 'editor tasks, which can run when the folder opens';
+  }
+  if (parts[0] === '.devcontainer') return 'runs when a development container is built';
   if (name === '.envrc') return 'runs when a shell enters its directory';
   if (parts[0] === '.github' && parts[1] === 'workflows') return 'a CI workflow';
   if (parts.length === 1 && name === '.gitlab-ci.yml') return 'a CI workflow';
@@ -130,6 +137,10 @@ const kindOf = (before: Exclude<Before, 'absent'>): EntryKind => {
   return before;
 };
 
+// Write permission for the group or others, or the sticky bit, which the project's own entries
+// rarely have.
+const notableMode = (mode: number): boolean => (mode & 0o1022) !== 0;
+
 const octal = (mode: number): string => (mode & 0o7777).toString(8).padStart(3, '0');
 
 const droppedText = (bits: number): string | undefined => {
@@ -141,7 +152,7 @@ const droppedText = (bits: number): string | undefined => {
 };
 
 // Files larger than this are not compared line by line.
-const MAX_DIFF_BYTES = 1024 * 1024;
+const MAX_DIFF_BYTES = KEPT_FILE_BYTES;
 
 // What the summary compares in all: it runs on the host, after the sandbox, over files the
 // sandbox wrote, as many as its storage holds. Past either limit, the files left are listed with
@@ -196,135 +207,138 @@ type WriteChange = Extract<Change, { op: 'write' }>;
 export const describeChanges = (
   changes: readonly Change[],
   projectRoot: number,
-  upperPath: string,
   limits: CompareBudget = COMPARE_BUDGET,
 ): ChangeEntry[] => {
   const budget = { ...limits };
-  const upper = openDirectory(upperPath);
-  try {
-    const content = (change: WriteChange, entry: ChangeEntry): void => {
-      if (budget.bytes <= 0 || budget.steps <= 0) {
-        entry.uncompared = true;
-        return;
-      }
-      const after = readSmall(upper, change.path);
-      const before =
-        change.before === 'file' ? readSmall(projectRoot, change.path) : Buffer.alloc(0);
-      if (after === null || before === null) return;
-      budget.bytes -= after.length + before.length;
-      const afterText = textOf(after);
-      const beforeText = textOf(before);
-      if (afterText === null || beforeText === null) {
-        entry.binary = true;
-        return;
-      }
-      const diff = lineDiff(beforeText, afterText, budget);
-      if (diff.approximate === true) {
-        entry.uncompared = true;
-        return;
-      }
-      entry.lines = { added: diff.added, removed: diff.removed };
-      if (diff.snippet.length > 0) entry.snippet = diff.snippet;
-    };
-
-    const entries: ChangeEntry[] = [];
-    // New directories, by path key: what is created inside one is counted under it.
-    const created = new Map<string, ChangeEntry>();
-    const createdAbove = (path: readonly Buffer[]): ChangeEntry | undefined => {
-      let key = '';
-      for (const [index, part] of path.slice(0, -1).entries()) {
-        key = index === 0 ? childKey(part) : `${key}/${childKey(part)}`;
-        const entry = created.get(key);
-        if (entry !== undefined) return entry;
-      }
-      return undefined;
-    };
-
-    for (let index = 0; index < changes.length; index++) {
-      const first = changes[index] as Change;
-      const next = changes[index + 1];
-      // A removal followed by an entry at the same path is one replacement.
-      const replacing =
-        first.op === 'remove' &&
-        next !== undefined &&
-        next.op !== 'remove' &&
-        next.op !== 'refuse' &&
-        pathKey(next.path) === pathKey(first.path)
-          ? first
-          : null;
-      const change = replacing === null ? first : (next as Change);
-      if (replacing !== null) index += 1;
-      const attention = attentionFor(change.path);
-      const above = createdAbove(change.path);
-      if (above !== undefined && change.op !== 'refuse') {
-        above.entries = (above.entries ?? 0) + 1;
-        if (change.op === 'write') above.bytes = (above.bytes ?? 0) + change.node.size;
-        // Counted under it, and listed as well when it deserves a look.
-        if (attention === undefined) continue;
-      }
-      const entry: ChangeEntry = (() => {
-        const path = displayPath(change.path);
-        switch (change.op) {
-          case 'refuse':
-            return { path, change: 'refused', kind: 'other', reason: change.reason };
-          case 'remove':
-            return {
-              path,
-              change: 'removed',
-              kind: kindOf(change.before),
-              ...(change.before === 'dir'
-                ? { entries: change.entries - 1, bytes: change.bytes }
-                : {}),
-            };
-          case 'chmod': {
-            const before = modeAt(projectRoot, change.path);
-            return {
-              path,
-              change: 'mode',
-              kind: 'directory',
-              mode:
-                before === null ? octal(change.mode) : `${octal(before)} → ${octal(change.mode)}`,
-            };
-          }
-          case 'mkdir':
-            return { path, change: 'added', kind: 'directory' };
-          case 'symlink':
-            return { path, change: 'added', kind: 'link', target: nameText(change.target) };
-          case 'write': {
-            const entry: ChangeEntry = {
-              path,
-              change: change.before === 'file' ? 'modified' : 'added',
-              kind: 'file',
-              bytes: change.node.size,
-            };
-            if (change.before === 'file') {
-              const before = modeAt(projectRoot, change.path);
-              if (before !== null && before !== change.mode) {
-                entry.mode = `${octal(before)} → ${octal(change.mode)}`;
-              }
-              if (change.modeOnly === true) entry.change = 'mode';
-            } else if ((change.mode & 0o111) !== 0) {
-              entry.mode = octal(change.mode);
-            }
-            if (change.modeOnly !== true) content(change, entry);
-            return entry;
-          }
-        }
-      })();
-      if (replacing !== null) {
-        entry.change = 'replaced';
-        entry.replaces = kindOf(replacing.before);
-      }
-      if (change.op === 'mkdir') created.set(pathKey(change.path), entry);
-      const dropped = 'droppedBits' in change ? droppedText(change.droppedBits) : undefined;
-      if (dropped !== undefined) entry.dropped = dropped;
-      if (attention !== undefined) entry.attention = attention;
-      entries.push(entry);
+  const content = (change: WriteChange, entry: ChangeEntry): void => {
+    if (change.node.size > MAX_DIFF_BYTES) return;
+    // The new side is the content the reading kept, never a second reading of the upper layer;
+    // a reading that kept no more is past its own limit.
+    const after = change.node.content;
+    if (budget.bytes <= 0 || budget.steps <= 0 || after === undefined) {
+      entry.uncompared = true;
+      return;
     }
-    return entries;
-  } finally {
-    close(upper);
+    const before = change.before === 'file' ? readSmall(projectRoot, change.path) : Buffer.alloc(0);
+    if (before === null) return;
+    budget.bytes -= after.length + before.length;
+    const afterText = textOf(after);
+    const beforeText = textOf(before);
+    if (afterText === null || beforeText === null) {
+      entry.binary = true;
+      return;
+    }
+    const diff = lineDiff(beforeText, afterText, budget);
+    if (diff.approximate === true) {
+      entry.uncompared = true;
+      return;
+    }
+    entry.lines = { added: diff.added, removed: diff.removed };
+    if (diff.snippet.length > 0) entry.snippet = diff.snippet;
+  };
+
+  const entries: ChangeEntry[] = [];
+  // New directories, by path key: what is created inside one is counted under it.
+  const created = new Map<string, ChangeEntry>();
+  const createdAbove = (path: readonly Buffer[]): ChangeEntry | undefined => {
+    let key = '';
+    for (const [index, part] of path.slice(0, -1).entries()) {
+      key = index === 0 ? childKey(part) : `${key}/${childKey(part)}`;
+      const entry = created.get(key);
+      if (entry !== undefined) return entry;
+    }
+    return undefined;
+  };
+
+  for (let index = 0; index < changes.length; index++) {
+    const first = changes[index] as Change;
+    const next = changes[index + 1];
+    // A removal followed by an entry at the same path is one replacement.
+    const replacing =
+      first.op === 'remove' &&
+      next !== undefined &&
+      next.op !== 'remove' &&
+      next.op !== 'refuse' &&
+      pathKey(next.path) === pathKey(first.path)
+        ? first
+        : null;
+    const change = replacing === null ? first : (next as Change);
+    if (replacing !== null) index += 1;
+    const attention = attentionFor(change.path);
+    const above = createdAbove(change.path);
+    if (above !== undefined && change.op !== 'refuse') {
+      above.entries = (above.entries ?? 0) + 1;
+      if (change.op === 'write') above.bytes = (above.bytes ?? 0) + change.node.size;
+      // Counted under it, and listed as well when it deserves a look.
+      if (attention === undefined) continue;
+    }
+    const entry: ChangeEntry = (() => {
+      const path = displayPath(change.path);
+      switch (change.op) {
+        case 'refuse':
+          return { path, change: 'refused', kind: 'other', reason: change.reason };
+        case 'remove':
+          return {
+            path,
+            change: 'removed',
+            kind: kindOf(change.before),
+            ...(change.before === 'dir'
+              ? { entries: change.entries - 1, bytes: change.bytes }
+              : {}),
+          };
+        case 'chmod': {
+          const before = modeAt(projectRoot, change.path);
+          return {
+            path,
+            change: 'mode',
+            kind: 'directory',
+            mode: before === null ? octal(change.mode) : `${octal(before)} → ${octal(change.mode)}`,
+          };
+        }
+        case 'mkdir':
+          return {
+            path,
+            change: 'added',
+            kind: 'directory',
+            ...(notableMode(change.mode) ? { mode: octal(change.mode) } : {}),
+          };
+        case 'symlink':
+          return { path, change: 'added', kind: 'link', target: nameText(change.target) };
+        case 'write': {
+          const entry: ChangeEntry = {
+            path,
+            change: change.before === 'file' ? 'modified' : 'added',
+            kind: 'file',
+            bytes: change.node.size,
+          };
+          if (change.before === 'file') {
+            const before = modeAt(projectRoot, change.path);
+            if (before !== null && before !== change.mode) {
+              entry.mode = `${octal(before)} → ${octal(change.mode)}`;
+            }
+            if (change.modeOnly === true) entry.change = 'mode';
+          } else if ((change.mode & 0o111) !== 0 || notableMode(change.mode)) {
+            entry.mode = octal(change.mode);
+          }
+          if (change.modeOnly !== true) content(change, entry);
+          return entry;
+        }
+      }
+    })();
+    if (replacing !== null) {
+      entry.change = 'replaced';
+      entry.replaces = kindOf(replacing.before);
+      if (replacing.before === 'dir') {
+        entry.held = { entries: replacing.entries - 1, bytes: replacing.bytes };
+      }
+    }
+    if (change.op === 'mkdir') created.set(pathKey(change.path), entry);
+    const dropped = 'droppedBits' in change ? droppedText(change.droppedBits) : undefined;
+    if (dropped !== undefined) entry.dropped = dropped;
+    if (attention !== undefined) entry.attention = attention;
+    entries.push(entry);
   }
+  return entries;
 };
 
 export interface Paint {
@@ -349,7 +363,13 @@ export const formatChanges = (entries: readonly ChangeEntry[], paint: Paint): st
   for (const entry of entries) {
     if (entry.uncompared === true) uncompared += 1;
     const details: string[] = [];
-    if (entry.replaces !== undefined) details.push(`replaces a ${entry.replaces}`);
+    if (entry.replaces !== undefined) {
+      details.push(
+        entry.held === undefined || entry.held.entries === 0
+          ? `replaces a ${entry.replaces}`
+          : `replaces a ${entry.replaces} of ${plural(entry.held.entries, 'entry', 'entries')}, ${formatBytes(entry.held.bytes)}`,
+      );
+    }
     if (entry.lines !== undefined) {
       details.push(
         [

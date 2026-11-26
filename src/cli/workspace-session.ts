@@ -4,6 +4,7 @@ import { basename, dirname, join } from 'node:path';
 import type { RuntimeNotice } from '../agent/loop.ts';
 import { errorMessage } from '../errors.ts';
 import { applyChanges, changeKey } from '../sandbox/changeset/apply.ts';
+import type { Change } from '../sandbox/changeset/classify.ts';
 import { close, openDirectory } from '../sandbox/changeset/dirfd.ts';
 import { type ApplyReport, applyReport, type ChangeEntry } from '../sandbox/changeset/summary.ts';
 import type { SandboxSession } from '../sandbox/session.ts';
@@ -27,6 +28,9 @@ export interface Preview {
 export interface Applied {
   // Null when the changes could not be read once the sandbox stopped, and none was applied.
   report: ApplyReport | null;
+  // An AGENTS.md file of the project may have changed: one was written or removed, or a directory
+  // that could hold one was removed or replaced.
+  instructionsChanged: boolean;
   failure: string | null;
   // Why no sandbox runs after the application, or null when a new one started.
   stopped: string | null;
@@ -78,6 +82,11 @@ export class WorkspaceSession {
     private readonly notify: (notice: RuntimeNotice) => void,
   ) {}
 
+  // Whether the sandbox is being stopped and replaced, for an application or a discard.
+  get busy(): boolean {
+    return this.sandbox.busy;
+  }
+
   // Whether a sandbox's changes are left: none once a new sandbox did not start.
   get active(): boolean {
     return this.sandbox.workspace !== null;
@@ -126,7 +135,7 @@ export class WorkspaceSession {
       (workspace) => applyShown(workspace, preview.shown),
       !last,
     );
-    const { report, failure } = cycle.result;
+    const { report, failure, instructionsChanged } = cycle.result;
     if (report !== null) {
       const lines = [
         ...report.applied.map((path) => `applied: ${path}`),
@@ -146,7 +155,13 @@ export class WorkspaceSession {
         data: failure ?? '',
       });
     }
-    return { report, failure, stopped: cycle.stopped, warnings: cycle.warnings };
+    return {
+      report,
+      failure,
+      instructionsChanged,
+      stopped: cycle.stopped,
+      warnings: cycle.warnings,
+    };
   }
 
   // Stops the sandbox and starts a new one without its changes. `preview` is null when they could
@@ -166,17 +181,30 @@ export class WorkspaceSession {
   }
 }
 
+const AGENTS_MD = Buffer.from('AGENTS.md');
+
+const touchesInstructions = (changes: readonly Change[]): boolean =>
+  changes.some(
+    (change) =>
+      change.path.at(-1)?.equals(AGENTS_MD) === true ||
+      (change.op === 'remove' && change.before === 'dir'),
+  );
+
 // Applies the changes in the upper layer, read once the worker has stopped, that `shown` holds.
 // Never throws: the sandbox is replaced whatever happens here.
 const applyShown = (
   workspace: StartedWorkspace,
   shown: ReadonlySet<string>,
-): { report: ApplyReport | null; failure: string | null } => {
+): Pick<Applied, 'report' | 'failure' | 'instructionsChanged'> => {
   let root: number;
   try {
     root = openDirectory(workspace.root);
   } catch (error) {
-    return { report: null, failure: `the project cannot be opened: ${errorMessage(error)}` };
+    return {
+      report: null,
+      failure: `the project cannot be opened: ${errorMessage(error)}`,
+      instructionsChanged: false,
+    };
   }
   try {
     const { changes } = readChanges(workspace, root);
@@ -188,17 +216,24 @@ const applyShown = (
         since: workspace.since,
         shown,
       });
-      return { report: applyReport(outcome), failure: null };
+      return {
+        report: applyReport(outcome),
+        failure: null,
+        instructionsChanged: touchesInstructions(outcome.applied),
+      };
     } catch (error) {
       return {
         report: null,
         failure: `applying the changes failed, and the project may hold some of them: ${errorMessage(error)}`,
+        // Which were applied is not known.
+        instructionsChanged: touchesInstructions(changes),
       };
     }
   } catch (error) {
     return {
       report: null,
       failure: `the changes of the sandbox could not be read, and none is applied: ${errorMessage(error)}`,
+      instructionsChanged: false,
     };
   } finally {
     close(root);

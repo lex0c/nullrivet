@@ -1,4 +1,4 @@
-import { closeSync } from 'node:fs';
+import { closeSync, realpathSync } from 'node:fs';
 import { isAbsolute, sep } from 'node:path';
 import type { Change } from './classify.ts';
 import { lstatAtOrNull, openDirectoryPath, readlinkAt, SysError } from './dirfd.ts';
@@ -16,6 +16,10 @@ import { childKey, pathKey, type UpperNode } from './snapshot.ts';
 // from there, and is refused as well.
 
 const MAX_HOPS = 40;
+// Lookups the links of one check may take in all. Each looks a path up from the project's root,
+// and a link's target can name thousands of parts and lead through other links: the rest of the
+// links are refused once it is spent.
+const MAX_LOOKUPS = 1_000_000;
 const SYSTEM_PREFIX = Buffer.from('/usr/');
 const DOT = Buffer.from('.');
 const DOTDOT = Buffer.from('..');
@@ -27,6 +31,7 @@ type Lookup = (path: Buffer[]) => Final;
 type SymlinkChange = Extract<Change, { op: 'symlink' }>;
 
 export const LINK_LEAVES = 'the link leads out of the project';
+export const LINK_TOO_COSTLY = 'the links take too many steps to resolve';
 // The reason a removal is not applied when the entry the sandbox put in its place is not.
 export const REPLACEMENT_LEFT_OUT = 'the entry that replaces it is not applied';
 
@@ -42,10 +47,30 @@ const split = (path: Buffer): Buffer[] => {
   return parts;
 };
 
-// An absolute target under /usr, with no `..` component that would lead back out of it.
-const underSystem = (target: Buffer): boolean =>
-  target.subarray(0, SYSTEM_PREFIX.length).equals(SYSTEM_PREFIX) &&
-  !split(target).some((part) => part.equals(DOTDOT));
+const SYSTEM = Buffer.from('/usr');
+const SLASH = Buffer.from('/');
+
+// An absolute target under /usr, with no `..` component that would lead back out of it, that stays
+// under /usr on the host: links there can lead elsewhere, as to /etc. What counts is where the
+// longest existing part of the target resolves; the rest does not exist, and holds no link.
+const underSystem = (target: Buffer): boolean => {
+  if (!target.subarray(0, SYSTEM_PREFIX.length).equals(SYSTEM_PREFIX)) return false;
+  const parts = split(target);
+  if (parts.some((part) => part.equals(DOTDOT))) return false;
+  for (let length = parts.length; length > 0; length--) {
+    const path = Buffer.concat(parts.slice(0, length).flatMap((part) => [SLASH, part]));
+    let real: Buffer;
+    try {
+      real = realpathSync(path, { encoding: 'buffer' });
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') continue;
+      return false;
+    }
+    return real.equals(SYSTEM) || real.subarray(0, SYSTEM_PREFIX.length).equals(SYSTEM_PREFIX);
+  }
+  return false;
+};
 
 // What the project holds at a path, read through descriptors beneath its root.
 const projectAt = (projectRoot: number, path: Buffer[]): Final => {
@@ -77,13 +102,29 @@ const projectAt = (projectRoot: number, path: Buffer[]): Final => {
   }
 };
 
-// Whether a link in `linkDir` with `target` stays inside the project or under /usr.
+// Why a link in `linkDir` with `target` is refused, or null when it stays inside the project or
+// under /usr. `budget` holds the lookups left to the check.
+const refusal = (
+  lookup: Lookup,
+  projectPath: string,
+  linkDir: Buffer[],
+  target: Buffer,
+  budget: { lookups: number },
+): string | null => {
+  const inside = leadsInside(lookup, projectPath, linkDir, target, budget);
+  if (inside === null) return LINK_TOO_COSTLY;
+  return inside ? null : LINK_LEAVES;
+};
+
+// Whether a link in `linkDir` with `target` stays inside the project or under /usr; null when the
+// budget ran out first.
 const leadsInside = (
   lookup: Lookup,
   projectPath: string,
   linkDir: Buffer[],
   target: Buffer,
-): boolean => {
+  budget: { lookups: number },
+): boolean | null => {
   const rootPrefix = Buffer.from(projectPath.endsWith(sep) ? projectPath : `${projectPath}${sep}`);
   const insideRoot = (link: Buffer): boolean =>
     link.subarray(0, rootPrefix.length).equals(rootPrefix);
@@ -106,9 +147,15 @@ const leadsInside = (
       continue;
     }
     const candidate = [...resolved, part];
+    budget.lookups -= 1;
+    if (budget.lookups < 0) return null;
     const found = lookup(candidate);
     if (found.kind === 'unknown') return false;
     if (found.kind !== 'symlink') {
+      // Only the last part may be absent or other than a directory: an entry made there later, by
+      // another application or on the host, would decide where the rest leads, as a link that
+      // turns `missing/../..` into a way out.
+      if (found.kind !== 'dir' && queue.length > 0) return false;
       resolved = candidate;
       continue;
     }
@@ -126,12 +173,19 @@ const leadsInside = (
   return true;
 };
 
-const refuseLeaving = (changes: readonly Change[], lookup: Lookup, projectPath: string): Change[] =>
-  changes.map((change) => {
+const refuseLeaving = (
+  changes: readonly Change[],
+  lookup: Lookup,
+  projectPath: string,
+): Change[] => {
+  const budget = { lookups: MAX_LOOKUPS };
+  return changes.map((change) => {
     if (change.op !== 'symlink') return change;
-    if (leadsInside(lookup, projectPath, change.path.slice(0, -1), change.target)) return change;
-    return { op: 'refuse', path: change.path, reason: LINK_LEAVES } satisfies Change;
+    const reason = refusal(lookup, projectPath, change.path.slice(0, -1), change.target, budget);
+    if (reason === null) return change;
+    return { op: 'refuse', path: change.path, reason } satisfies Change;
   });
+};
 
 // The changes, with each link that leads out of the project refused; over the tree the upper
 // layer and the project make together.

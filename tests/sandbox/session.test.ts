@@ -161,6 +161,24 @@ describe.if(process.platform === 'linux')('a restartable sandbox session', () =>
     expect(session.jobs.startedCount).toBe(2);
   }, 30_000);
 
+  test('does nothing to the changes when the session ends while the sandbox stops', async () => {
+    const w = setup();
+    const session = await start(w);
+    const directory = session.workspace?.directory.path ?? '';
+    let worked = false;
+    const cycle = session.cycle(() => {
+      worked = true;
+    });
+    const closing = session.close();
+    expect(session.busy).toBe(true);
+    await expect(cycle).rejects.toThrow('the session ended before the changes were applied');
+    await closing;
+    expect(worked).toBe(false);
+    expect(session.busy).toBe(false);
+    expect(existsSync(directory)).toBe(false);
+    expect(w.launches()).toBe(1);
+  }, 30_000);
+
   test('ends its tools for good when the new sandbox does not start', async () => {
     const w = setup({ failAfter: 1 });
     const session = await start(w);
@@ -237,6 +255,21 @@ describe.if(process.platform === 'linux')('the changes of a workspace session', 
       const applied = await changes.apply(preview);
       expect(applied.report).toEqual({ applied: ['app.txt'], notApplied: [], stopped: null });
       expect(readFileSync(join(w.project, 'app.txt'), 'utf8')).toBe(content);
+    }
+  }, 30_000);
+
+  test('says when an application may have changed the AGENTS.md files', async () => {
+    const w = setup();
+    const session = await start(w);
+    const changes = new WorkspaceSession(w.project, session, () => undefined);
+    for (const [name, changed] of [
+      ['notes.txt', false],
+      ['AGENTS.md', true],
+    ] as const) {
+      writeFileSync(join(session.workspace?.directory.upper ?? '', name), 'x\n');
+      const preview = changes.preview();
+      if ('error' in preview) throw new Error(preview.error);
+      expect((await changes.apply(preview)).instructionsChanged).toBe(changed);
     }
   }, 30_000);
 

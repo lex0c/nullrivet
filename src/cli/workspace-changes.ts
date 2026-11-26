@@ -66,7 +66,7 @@ export const readChanges = (
   const upper = workspace.directory.upper;
   const snapshot = readUpper(upper, DEFAULT_SNAPSHOT_LIMITS, live);
   const changes = symlinkTargetsInside(classify(snapshot, root), snapshot, root, workspace.root);
-  return { changes, entries: describeChanges(changes, root, upper) };
+  return { changes, entries: describeChanges(changes, root) };
 };
 
 export interface FinishOptions {

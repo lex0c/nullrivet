@@ -107,6 +107,22 @@ const applyPreview = async (ctx: SlashContext, preview: Preview, last: boolean):
   if (applied.failure !== null) ctx.notice('error', applied.failure);
   for (const warning of applied.warnings) ctx.notice('warning', warning);
   if (last) return;
+  // The instructions are read from the project, which now holds what was applied.
+  if (applied.instructionsChanged) {
+    if (ctx.agent.running) {
+      ctx.notice(
+        'warning',
+        'AGENTS.md files of the project may have changed while a task runs; /instructions reload reads them again once it ends.',
+      );
+    } else {
+      const reloaded = await ctx.agent.reloadInstructions();
+      for (const warning of reloaded.warnings) ctx.notice('warning', warning);
+      ctx.notice(
+        'info',
+        'AGENTS.md files of the project may have changed: the instructions were read again.',
+      );
+    }
+  }
   if (applied.stopped === null) {
     ctx.notice('info', 'A new sandbox runs on the project as it is now.');
   } else {

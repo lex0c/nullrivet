@@ -123,6 +123,18 @@ class NotDeleted extends Error {
   override name = 'NotDeleted';
 }
 
+// Undoes a move of the project's entry out of its path; when that fails, the error says where the
+// entry stays, under its temporary name in the same directory.
+const putBack = (undo: () => void, hidden: Buffer): void => {
+  try {
+    undo();
+  } catch (error) {
+    throw new Error(
+      `putting the project's entry back failed, and it is left as ${hidden.toString()} in the same directory: ${errorMessage(error)}`,
+    );
+  }
+};
+
 // The project's entry, identified by its inode as it was checked. A directory is held open, to
 // check what it holds once it is detached.
 interface Held {
@@ -377,7 +389,7 @@ export const applyChanges = (changes: readonly Change[], options: ApplyOptions):
         options.step?.('moved', change);
         same = stillHeld(dir, trash, held);
       } finally {
-        if (!same) renameBeneath(dir, trash, dir, name, RENAME_NOREPLACE);
+        if (!same) putBack(() => renameBeneath(dir, trash, dir, name, RENAME_NOREPLACE), trash);
       }
       if (!same) throw new Conflict(changedOnHost(change.before));
       deleteHeld(dir, trash, held, change);
@@ -429,15 +441,22 @@ export const applyChanges = (changes: readonly Change[], options: ApplyOptions):
           same = stillHeld(dir, temp, held);
         } finally {
           if (!same) {
-            renameBeneath(dir, temp, dir, name, RENAME_EXCHANGE);
+            putBack(() => renameBeneath(dir, temp, dir, name, RENAME_EXCHANGE), temp);
             holds = 'new';
           }
         }
         if (!same) throw new Conflict(changedOnHost(before));
         holds = 'old';
         if (made !== null) {
-          if (change.op === 'mkdir') chmodFd(made, writableDirectory(change.path, change.mode));
-          record(made);
+          try {
+            if (change.op === 'mkdir') chmodFd(made, writableDirectory(change.path, change.mode));
+            record(made);
+          } catch (error) {
+            // The new entry is in place: the change is applied, and the project's stays aside.
+            throw new NotDeleted(
+              `the new entry is in place, but setting it up failed, and the project's entry is left as ${temp.toString()} in the same directory: ${errorMessage(error)}`,
+            );
+          }
         }
       } finally {
         if (made !== null) closeSync(made);

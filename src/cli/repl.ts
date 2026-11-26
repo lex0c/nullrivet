@@ -4,6 +4,8 @@ import type { AgentEvent } from '../agent/events.ts';
 import { errorMessage } from '../errors.ts';
 import { formatTokens } from '../format.ts';
 import type { ResolveResult } from '../providers/resolve.ts';
+import { formatApplyReport, formatChanges, type Paint } from '../sandbox/changeset/summary.ts';
+import { terminalText } from '../sanitize/display.ts';
 import type { SandboxProfile } from '../tools/policy.ts';
 import { applyKey, type InputState, inputWithText } from '../tui/input-editor.ts';
 import { createKeyParser, type KeyEvent } from '../tui/keys.ts';
@@ -83,6 +85,13 @@ export const formatStats = (status: StatusState): string => {
   ].join('\n');
 };
 
+const PLAIN: Paint = {
+  added: (text) => text,
+  removed: (text) => text,
+  attention: (text) => text,
+  dim: (text) => text,
+};
+
 const isCtrlC = (key: KeyEvent): boolean => key.kind === 'char' && key.ctrl && key.char === 'c';
 
 const isNamedKey = (key: KeyEvent, name: string): boolean =>
@@ -140,8 +149,13 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       scheduler.request();
     };
 
-    const notice = (level: 'info' | 'warning' | 'error', text: string): void =>
-      dispatch({ type: 'notice', level, text });
+    // A command still running when the session closed, as an application of the sandbox's changes
+    // can be, reports its warnings, errors and results on stderr once the terminal is restored.
+    const notice = (level: 'info' | 'warning' | 'error', text: string): void => {
+      if (!closed) dispatch({ type: 'notice', level, text });
+      else if (level !== 'info')
+        process.stderr.write(`nullrivet: ${level}: ${terminalText(text)}\n`);
+    };
 
     // Warnings about the session file go to the interface while it is open, and to stderr once
     // the terminal has been restored (the last save happens on the way out).
@@ -257,7 +271,17 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
           notice('warning', question);
           answering = resolveAnswer;
         }),
-      show: (item) => screen.print(formatPermanent(item, caps)),
+      show: (item) => {
+        if (!closed) {
+          screen.print(formatPermanent(item, caps));
+          return;
+        }
+        process.stderr.write(
+          item.kind === 'changes'
+            ? formatChanges(item.entries, PLAIN)
+            : formatApplyReport(item.report, PLAIN),
+        );
+      },
       compact: async (instructions) => {
         // Registered as the running turn so Esc and Ctrl+C interrupt it and prompts wait for it.
         const controller = new AbortController();
@@ -530,6 +554,9 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
         } else if (state.input.value.length > 0) {
           history.stopBrowsing();
           setInput({ value: '', cursor: 0 });
+        } else if (workspace?.busy === true) {
+          // Leaving now would cut the application or the discard short.
+          notice('info', 'The sandbox is being replaced; exit once it is done.');
         } else if (state.exitArmedAt !== null) {
           // Nothing is interrupted: leaving an idle session this way is as deliberate as /exit.
           finish(0);

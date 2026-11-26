@@ -18,8 +18,8 @@ file.
 - **Policy enforced in code.** The execution mode is checked by the tool broker before every tool
   call, not only by choosing which tools the model sees.
 - **Not a sandbox by default.** The working directory is a starting point, not a boundary.
-  Isolation, when needed, comes from the operating system: `--sandbox inspect` runs the tools in
-  Bubblewrap ([SANDBOX.md](SANDBOX.md)).
+  Isolation, when needed, comes from the operating system: `--sandbox inspect` and
+  `--sandbox workspace` run the tools in Bubblewrap ([SANDBOX.md](SANDBOX.md)).
 
 ## Module map
 
@@ -36,6 +36,9 @@ src/
     session-file.ts        session files: loading, validation, atomic saves, attaching
     prompt-history.ts      prompts recalled with the arrow keys
     output.ts              plain and NDJSON event sinks for one-shot runs
+    exit-codes.ts          the process exit codes
+    workspace-changes.ts   a workspace task's changes at its end: read, shown, applied or discarded
+    workspace-session.ts   the interactive session's changes: preview, apply, discard, notes
     list-models.ts         the model catalog as a table, for --list-models
   agent/
     agent.ts               createAgent(): the public API of the core
@@ -74,7 +77,11 @@ src/
     args.ts, paths.ts, env.ts
   sandbox/
     start.ts               starts the session's sandbox, or says why it cannot
-    bwrap.ts               the inspect profile: project root, mounts, environment, Bubblewrap
+    bwrap.ts               the profiles' launch: project root, mounts, overlay, environment
+    workspace.ts           the directories of workspace sandboxes: runtime directory, lock, sweep
+    session.ts             the backend of an interactive workspace session, restarted on apply
+    changeset/             the workspace's changes: reading the upper layer, classifying,
+                           checking, describing and applying them by descriptor
     seccomp.ts             the seccomp program installed in the sandbox
     worker.ts              the worker process: runs tools for the host over the protocol
     worker-backend.ts      the host side: a tool backend that validates every worker message
@@ -262,9 +269,9 @@ results. The system prompt already states the current mode, but answers given un
 one stay in the history, and models tend to follow what they said before.
 
 Every tool call, a subagent's included, is authorized by the tool broker and only then handed to
-a tool backend, which runs it and decides nothing about what is allowed. The one backend today
-runs the tool in the nullrivet process; the sandbox planned in [SANDBOX.md](SANDBOX.md) adds one
-that runs it in an isolated worker.
+a tool backend, which runs it and decides nothing about what is allowed. Without a sandbox
+profile, the backend runs the tool in the nullrivet process; with one, the backends in
+[SANDBOX.md](SANDBOX.md) run it in an isolated worker.
 
 The broker never lets a tool or backend failure escape: unknown tools, invalid arguments and
 exceptions all become error results the model can read. Terminal escape sequences are removed from

@@ -371,14 +371,26 @@ and it is read only when no process can change it.
   marker, are deletions; an opaque directory replaces the one below. Overlay features the reader
   does not handle (`metacopy`, `redirect`) stop it. A marker the agent sets is not one: the kernel
   stores it escaped, as `user.overlay.overlay.*`. A rename appears as a deletion and an addition,
-  and is applied as such. The walk stops past 200,000 entries, and a file larger than 1 GiB is not
-  applied. Each file is checked against its hash again when written, so what is written is what
-  was shown.
+  and is applied as such. Each file is checked against its hash again when written, so what is
+  written is what was shown.
+- **Bounds of the reading.** The reading runs on the host, synchronously, over what the sandbox
+  wrote, so its work is bounded by what the sandbox's storage holds. The walk stops past 200,000
+  entries; a directory more than 64 levels deep is refused unread, since every change's path is
+  opened and checked from the project's root; a file larger than 1 GiB, and a sparse file, whose
+  size the storage does not hold, are refused unread. A file is read up to the size its descriptor
+  showed, never to its end: one that grows or shrinks while it is read is refused. The names of one
+  inode are read once, and the files' sizes, counted for each name, stay within the storage's size,
+  since the application writes each name as a file of its own: past it, the reading stops. The
+  summary's lines come from the bytes this reading hashed, kept for files up to 1 MiB and 32 MiB in
+  all, never from a second reading: a sandbox still running cannot show one content and have another
+  applied.
 - **Classification.** Each entry is compared with what the project holds at its path. An entry
   whose content and mode are unchanged is no change, whatever its times. Modes are kept, and the
   set-user-ID and set-group-ID bits never added; a bit the project's entry already has is kept.
   `.git` is never changed, at any depth, and a directory holding one, or a mount point, is never
-  removed. Creating a device, FIFO or socket is refused; removing one the project has is applied,
+  removed. `.git` is recognized by its name only: a gitfile naming a git directory inside the
+  project under another name, as `git init --separate-git-dir=meta` makes, leaves that directory,
+  its hooks included, as open to changes as any other. Creating a device, FIFO or socket is refused; removing one the project has is applied,
   since a removal only takes away a name. Two names of one inode, a hard link, reach the project
   as two separate files. A mode belongs to the inode, shared by every name, and a name outside the
   project can be made up to the moment the mode is set, so a file whose mode changes gets a new
@@ -386,11 +398,16 @@ and it is read only when no process can change it.
   another is a removal and a creation, applied together; a refused or conflicting entry leaves the
   project's one in place.
 - **Symbolic links.** A link is applied only when it resolves inside the project, or under `/usr`
-  with no `..` component, as a Python virtual environment's interpreter link does. It is resolved
-  over the tree the project would have, following every link on the way, up to 40, since a link
-  inside the project can lead out of it; a part of the project that cannot be read refuses the
-  link. Links are created last, each checked again over the project as it then is, since an entry
-  a link leads through may not have been applied.
+  with no `..` component, as a Python virtual environment's interpreter link does; a target under
+  `/usr` must stay under it once resolved on the host, since links there can lead elsewhere, as
+  Debian's `/usr/lib/ssl/certs` does to `/etc`. It is resolved over the tree the project would have,
+  following every link on the way, up to 40, since a link inside the project can lead out of it; a
+  part of the project that cannot be read refuses the link. Only the last part of the path may be
+  absent or other than a directory: past an absent part, the rest would be decided by whatever is
+  made there later, as a link `missing/../etc/passwd` becomes a way out once another application
+  makes `missing` a link to `/usr/`. The links of one check take at most a million lookups in all;
+  the rest are refused. Links are created last, each checked again over the project as it then is,
+  since an entry a link leads through may not have been applied.
 - **Resolution.** Every target path is resolved from a descriptor of the project directory, one
   component at a time, beneath it and without following a symbolic link or crossing a mount
   (`openat2` with `RESOLVE_BENEATH`, `RESOLVE_NO_SYMLINKS`, `RESOLVE_NO_MAGICLINKS` and
@@ -444,10 +461,12 @@ environment variable, so the decision is made for each run, and it is a usage er
 
 - **Where the changes live.** The upper and work directories are in
   `$XDG_RUNTIME_DIR/nullrivet-<pid>-<start>/`, the user's runtime tmpfs, created with mode 0700.
-  The runtime directory must be the user's own, writable by no one else, and on a tmpfs, so that
-  what a process killed with SIGKILL leaves is not kept in files on disk (swap aside, as described
-  under memory-backed storage); without one, as under cron, the
-  profile refuses to start rather than use `/tmp`, which can be shared or on disk. The
+  The runtime directory must be the user's own, writable by no one else, under directories that
+  belong to root or the user and that others cannot change (sticky when others can write to
+  them, as `/dev/shm` is), and on a tmpfs, so that what a process killed with SIGKILL leaves is
+  not kept in files on disk (swap aside, as described under memory-backed storage); without one,
+  as under cron, the profile refuses to start rather than use `/tmp`, which can be shared or on
+  disk. The
   overlay keeps its markers in `user.*` extended attributes, which tmpfs holds from Linux 6.6 on:
   the start checks for them and says so. What the agent writes counts against that tmpfs, which
   other programs of the session use as well.
@@ -458,7 +477,8 @@ environment variable, so the decision is made for each run, and it is a usage er
   lives, and the directory gets its name only once the lock is held: the lock shows a session of
   another PID namespace sharing the runtime directory, as a container can, whose process id means
   nothing here. A directory without a lock is judged by its process id and start time, since an
-  id alone can be reused. The removal goes by descriptor and without recursion, moving each
+  id alone can be reused, and only once it was left alone for a minute: it can be one a session
+  of another PID namespace is making. The removal goes by descriptor and without recursion, moving each
   directory it finds up to the top before emptying it, through directories without permissions,
   as the overlay's work directory is, at any depth.
 - **Refused projects.** A project on NFS, SMB/CIFS, FUSE, 9P or Ceph: another machine or a
@@ -474,9 +494,13 @@ environment variable, so the decision is made for each run, and it is a usage er
   or 20 million comparison steps taken, no other file is compared, and the comparison under way
   gets only the steps left. A file whose comparison does not finish within its limits, its own or
   those left, shows its size only, marked as not compared, never counts that are only an upper
-  bound; the summary says how many. Files that run or
-  steer an agent without being invoked (`AGENTS.md`, `.envrc`, CI workflows, git hook
-  directories) are marked, and names are shown with control and bidirectional characters escaped.
+  bound; the summary says how many. Files that run or steer an agent without being invoked
+  (`AGENTS.md`, `CLAUDE.md`, `.cursorrules`, `.claude/` and `.cursor/` settings, `.envrc`, CI
+  workflows, editor tasks, development containers, git hook directories) are marked, listed even
+  inside a new directory. The modes of additions that others than the owner can write, or that are
+  sticky, are shown, and so is what a directory replaced by a file or a link held. Names are shown
+  with control characters, every default-ignorable code point and the line and paragraph
+  separators escaped, so two names never look the same.
   With `--json`, `changes:preview`, then `changes:discarded`, `changes:applied` or
   `changes:failed`, carry the same lists with line counts and no file content.
 - **Exit codes.** With `--apply` and a finished task: 0 when everything was applied, 4 when some
@@ -513,8 +537,10 @@ reviews and applies while it goes on. `--apply` is a usage error there.
   one, `Esc` or `Ctrl+C` cancels. Nothing typed before the question appeared can hold the code, so
   a line typed ahead never confirms. Answers are not kept in the prompt history.
 - **What is applied.** The summary is read while the sandbox runs, without changing anything in
-  the upper layer: an entry without read permission is listed as refused, and one removed while it
-  is read is passed over. Once confirmed, the sandbox stops and the changes are read again; each is
+  the upper layer: an entry without read permission is listed as refused, and one removed or
+  replaced by a link while it is read is passed over; a sandbox that rewrites its files faster than
+  they are read stops the reading past its storage's size. Its lines come from the bytes that were
+  hashed. Once confirmed, the sandbox stops and the changes are read again; each is
   named by everything it applies, a file by the hash of its content. Only those the operator was
   shown are applied: one made or changed after the summary is a conflict (`it changed after the
   changes were shown`), and so is what depends on it, such as the content of a new directory whose
@@ -531,13 +557,18 @@ reviews and applies while it goes on. `--apply` is a usage error there.
 - **The model.** After an application or a discard, the model gets a note with the next request:
   how many changes were applied and not applied, or discarded, and that the sandbox started again,
   with the paths and reasons fenced as data, since the sandbox chose the names. The system prompt
-  says that the sandbox starts again when the user applies or discards its changes.
+  says that the sandbox starts again when the user applies or discards its changes. An application
+  that may have changed an `AGENTS.md` file, writing or removing one or removing a directory, reads
+  the instructions again from the project when no task runs; while one does, the session says to
+  run `/instructions reload` once it ends.
 - **Leaving.** `/exit` and `Ctrl+D` with changes to apply show the summary and ask: `apply <code>`
   applies them and exits, `discard` discards them and exits, and any other answer keeps the
   session. When the changes cannot be read, `discard` exits and any other answer stays. `Ctrl+C`
   twice on an empty prompt discards them: the first press counts them, and the footer says how many
-  the second discards. An interrupt from outside the terminal, SIGINT or SIGTERM, discards them
-  without asking.
+  the second discards. While the sandbox is being replaced, `Ctrl+C` does not arm the exit. An
+  interrupt from outside the terminal, SIGINT or SIGTERM, discards them without asking: if it
+  comes while the sandbox stops for an application, the application does not start, and if it
+  comes once it ran, the session waits for it and reports it on stderr.
 
 `security` uses the same overlay with its upper layer kept in memory (`--tmp-overlay`): its writes
 are not meant to be applied anywhere, and they are discarded at exit. What outlasts the session is
@@ -765,7 +796,7 @@ limits or for the virtual machine backend.
    descriptor-based resolution, specified and tested on its own before the overlay is wired in.
    3a, the ChangeSet on its own, is done; 3b, the one-shot task with `--apply`, is done; 3c, the
    interactive session, with its commands to review and apply, is done; 3d, the documentation and
-   an adversarial review, is next.
+   an adversarial review, is done.
 4. **`security`.** Only after the network isolation tests pass: the engagement file, the ruleset,
    revocation, pasta, the hosts file, `/scope refresh` and the window. 4b: the allowlisting HTTP
    proxy.

@@ -21,9 +21,17 @@ Common behavior:
 
 - **Paths** are absolute or relative to the starting directory; `~` is expanded. Paths outside
   the starting directory, `..` and symlinks are allowed on purpose. Access is limited only by
-  operating system permissions, or, with `--sandbox inspect`, by what the sandbox exposes: the
-  project read-only, a temporary home and `/tmp`, no network ([SANDBOX.md](SANDBOX.md)).
-  Background jobs then run in the sandbox, with their logs in its `/tmp`.
+  operating system permissions, or, with a sandbox, by what it exposes: with `--sandbox inspect`,
+  the project read-only, a temporary home and `/tmp`, no network; with `--sandbox workspace`, the
+  same with the project writable through an overlay, whose changes reach the project only when
+  the user applies them ([SANDBOX.md](SANDBOX.md)). Background jobs then run in the sandbox, with
+  their logs in its `/tmp`.
+- **Sandbox restarts.** In an interactive session with `--sandbox workspace`, applying or
+  discarding the changes stops the sandbox and starts a new one on the project as it is then. A
+  call running at that moment ends with `sandbox.restarted`; calls made meanwhile wait for the new
+  sandbox, and one interrupted while it waits ends with `tool.cancelled` without running.
+  Background jobs end with the old sandbox and are reported as lost. A sandbox that stops on its
+  own, or a new one that does not start, ends every later call with `sandbox.lost`.
 - **Arguments** come from the model and are validated by each tool. Invalid arguments come back as
   an `input.invalid` error result.
 - **Errors** come back to the model as text of the form `error [<code>]: <message>`, followed by a

