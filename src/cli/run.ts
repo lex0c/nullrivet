@@ -1,5 +1,5 @@
-import { realpath, stat } from 'node:fs/promises';
-import { basename, dirname, join, resolve } from 'node:path';
+import { stat } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import packageJson from '../../package.json' with { type: 'json' };
 import { createAgent } from '../agent/agent.ts';
 import { IN_PROCESS_BACKEND } from '../agent/tool-broker.ts';
@@ -10,12 +10,12 @@ import { MODEL_CATALOG } from '../providers/catalog.ts';
 import type { FetchLike } from '../providers/discovery.ts';
 import { type ModelOverrides, resolveModel } from '../providers/resolve.ts';
 import { sandboxProject } from '../sandbox/bwrap.ts';
+import { SandboxSession } from '../sandbox/session.ts';
 import { type StartedSandbox, type StartedWorkspace, startSandbox } from '../sandbox/start.ts';
 import { isLiveWorkspaceDirectory, removeWorkspaceDirectory } from '../sandbox/workspace.ts';
 import { BUILTIN_TOOLS } from '../tools/index.ts';
 import type { JobSession } from '../tools/jobs.ts';
 import { outputFiles } from '../tools/output-files.ts';
-import { isWithinDirectory } from '../tools/paths.ts';
 import { parseCli, USAGE, UsageError } from './args.ts';
 import { EXIT_CODES } from './exit-codes.ts';
 import { formatModelList } from './list-models.ts';
@@ -24,6 +24,7 @@ import { PromptHistory } from './prompt-history.ts';
 import { runRepl } from './repl.ts';
 import { type SessionData, SessionFile, SessionLink } from './session-file.ts';
 import { finishWorkspace } from './workspace-changes.ts';
+import { sessionFileError, WorkspaceSession } from './workspace-session.ts';
 
 // Piped input can be arbitrarily large; it is reduced like tool output before entering the prompt.
 const STDIN_MAX_BYTES = 128 * 1024;
@@ -100,9 +101,9 @@ export const runCli = async (io: CliIO): Promise<number> => {
   if (prompt.length === 0 && !interactive) {
     return fail('no prompt given; pass the task as an argument or on stdin');
   }
-  if (interactive && config.sandbox === 'workspace') {
+  if (interactive && config.apply) {
     return fail(
-      'the interactive session does not run in the workspace sandbox; pass a task to run it once',
+      '--apply applies the changes of a task given on the command line; in the interactive session, /apply applies them',
     );
   }
 
@@ -134,16 +135,11 @@ export const runCli = async (io: CliIO): Promise<number> => {
   // by the tools, so their directory is exposed read-only.
   let sandbox: StartedSandbox | null = null;
   if (config.sandbox === 'workspace' && session !== null) {
-    // A session file saved into the project would change the overlay's lower layer while it is
-    // mounted, and conflict with the sandbox's changes beside it. Checked before anything starts.
+    // Checked before anything starts.
     const project = await sandboxProject(cwd, io.env);
-    const path = session.file.path;
-    const real = join(await realpath(dirname(path)), basename(path));
-    if (!('error' in project) && isWithinDirectory(project.root, real)) {
-      return fail(
-        `the session file ${real} is in the project, which the workspace sandbox does not change while it runs; save it outside the project`,
-      );
-    }
+    const refused =
+      'error' in project ? null : await sessionFileError(session.file.path, project.root);
+    if (refused !== null) return fail(refused);
   }
   if (config.sandbox !== undefined) {
     let reports: string;
@@ -159,6 +155,15 @@ export const runCli = async (io: CliIO): Promise<number> => {
     if ('error' in started) return fail(started.error, EXIT_CODES.error);
     sandbox = started;
   }
+  // An interactive session applies or discards the workspace's changes as it goes, and starts a
+  // new sandbox each time.
+  const restartable =
+    interactive && sandbox?.workspace !== undefined && sandbox.relaunch !== undefined
+      ? new SandboxSession(
+          { backend: sandbox.backend, workspace: sandbox.workspace },
+          sandbox.relaunch,
+        )
+      : null;
   const workCwd = sandbox?.cwd ?? cwd;
   try {
     // Overrides from the command line describe the model chosen there, not models switched to
@@ -183,7 +188,7 @@ export const runCli = async (io: CliIO): Promise<number> => {
     const agent = await createAgent({
       provider: resolved.provider,
       tools: BUILTIN_TOOLS,
-      toolBackend: sandbox?.backend ?? IN_PROCESS_BACKEND,
+      toolBackend: restartable ?? sandbox?.backend ?? IN_PROCESS_BACKEND,
       // In a sandboxed session, the jobs run in the sandbox, which reports them to the agent.
       backgroundJobs: jobSession,
       ...(sandbox === null ? {} : { sandbox: sandbox.scope }),
@@ -208,10 +213,8 @@ export const runCli = async (io: CliIO): Promise<number> => {
         );
       }
       if (resumed.sandbox !== undefined && config.sandbox === undefined) {
-        // The interactive session does not run in the workspace sandbox: inspect is the one left.
-        const keep = interactive && resumed.sandbox === 'workspace' ? 'inspect' : resumed.sandbox;
         warnings.push(
-          `this session last ran its tools in the ${resumed.sandbox} sandbox and continues without one; pass --sandbox ${keep} to keep them in a sandbox`,
+          `this session last ran its tools in the ${resumed.sandbox} sandbox and continues without one; pass --sandbox ${resumed.sandbox} to keep them in a sandbox`,
         );
       }
       if (resumed.cwd !== workCwd) {
@@ -227,6 +230,13 @@ export const runCli = async (io: CliIO): Promise<number> => {
         version: packageJson.version,
         cwd: workCwd,
         ...(config.sandbox === undefined ? {} : { sandbox: config.sandbox }),
+        ...(restartable === null || sandbox === null
+          ? {}
+          : {
+              workspace: new WorkspaceSession(sandbox.scope.root, restartable, (notice) =>
+                agent.notify(notice),
+              ),
+            }),
         resolveModel: (id) => resolveWith(id, {}),
         warnings,
         sessionFile: session?.file ?? null,
@@ -275,9 +285,12 @@ export const runCli = async (io: CliIO): Promise<number> => {
     sink.finish();
     return code;
   } finally {
+    // The changes of an interactive session not applied by now are discarded with its sandbox.
+    await restartable?.close();
     await sandbox?.backend.close();
-    if (sandbox?.workspace !== undefined) {
-      removeDirectory(sandbox.workspace.directory, (message) => sink.notice('warning', message));
+    const warn = (message: string) => sink.notice('warning', message);
+    for (const workspace of [restartable?.workspace, sandbox?.workspace]) {
+      if (workspace !== undefined && workspace !== null) removeDirectory(workspace.directory, warn);
     }
   }
 };

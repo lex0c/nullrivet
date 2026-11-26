@@ -30,14 +30,15 @@ import {
   unlinkAt,
 } from './changeset/dirfd.ts';
 
-// The directory a workspace session keeps the sandbox's writes in: `nullrivet-<pid>-<start>` in
-// the user's runtime directory, a tmpfs only the user can write to, with the overlay's upper and
-// work directories inside. It is removed when the session ends; one left by a process that was
-// killed is removed by the next session that starts. A session holds the lock of the `lock` file
-// in its directory while it lives: a process of another PID namespace that shares the runtime
-// directory, as a container can, has an id that means nothing here, and its lock still shows. The
-// directory is made under a name of its own, `<name>.new`, and renamed once its lock is held, so
-// a session's directory is never seen without it.
+// The directory a sandbox of a workspace session keeps its writes in: `nullrivet-<pid>-<start>-<n>`
+// in the user's runtime directory, a tmpfs only the user can write to, `n` counting the sandboxes
+// the process started, with the overlay's upper and work directories inside. It is removed when
+// the sandbox ends; one left by a process that was killed is removed by the next session that
+// starts. A session holds the lock of the `lock` file in its directory while it lives: a process
+// of another PID namespace that shares the runtime directory, as a container can, has an id that
+// means nothing here, and its lock still shows. The directory is made under a name of its own,
+// `<name>.new`, and renamed once its lock is held, so a session's directory is never seen without
+// it.
 
 type Env = Record<string, string | undefined>;
 
@@ -48,7 +49,8 @@ export interface WorkspaceDirectory {
 }
 
 const PREFIX = 'nullrivet-';
-const SESSION_NAME = /^nullrivet-(\d+)-(\d+)(\.new)?$/;
+// The count is optional: a directory left by a version that named it without one is removed too.
+const SESSION_NAME = /^nullrivet-(\d+)-(\d+)(-\d+)?(\.new)?$/;
 const LOCK = Buffer.from('lock');
 
 // Filesystems whose change times or behaviour under an overlay are not local to this machine:
@@ -238,6 +240,9 @@ const sweep = (runtime: string): string[] => {
 // Directories of this process's sessions, with the descriptor of their lock: removed on exit when
 // the session could not remove its own, as when the process ends on a signal.
 const live = new Map<string, number>();
+// Sandboxes started by this process: an interactive session starts one each time it applies or
+// discards the changes.
+let started = 0;
 
 // Whether the directory is this process's, and not yet removed.
 export const isLiveWorkspaceDirectory = (directory: WorkspaceDirectory): boolean =>
@@ -274,7 +279,8 @@ export const createWorkspaceDirectory = (
   const warnings = sweep(runtime);
   const start = processStart(process.pid);
   if (start === null) return { error: 'the start time of this process cannot be read from /proc' };
-  const name = `${PREFIX}${process.pid}-${start}`;
+  started += 1;
+  const name = `${PREFIX}${process.pid}-${start}-${started}`;
   const path = join(runtime, name);
   const staging = `${path}.new`;
   try {
@@ -325,6 +331,10 @@ export const createWorkspaceDirectory = (
 
 const SECOND = 1_000_000_000n;
 
+// How long the reference waits for the clock to move past the moment it is asked for: one step of
+// the coarsest filesystem, FAT, with room to spare.
+const CLOCK_WAIT_MS = 5_000;
+
 // The time after which a change to the project is the host's: the change time of a file made
 // right before the overlay is mounted, from the same clock as the project's own. A filesystem
 // that keeps coarser times, as exFAT does in steps of 10 ms and FAT in steps of 2 s, stamps a
@@ -332,13 +342,33 @@ const SECOND = 1_000_000_000n;
 // root's change time, the largest power of ten that divides it, and the reference moves back to
 // the start of a step, of two seconds for whole seconds. On a filesystem with finer times the
 // step found is small, and moving back by it only counts as changed what changed just before.
+//
+// The kernel stamps a change with the time of its last clock tick, so a change made just before
+// the call, such as the application of an earlier sandbox's changes, can carry the probe's time
+// and count as the host's. The reference is the first start of a step past the time of the call:
+// every change made before the call comes before it. On a filesystem with coarse steps, this waits
+// up to one step.
 export const referenceTime = (directory: WorkspaceDirectory, projectRoot: string): bigint => {
   const probe = join(directory.path, 'reference');
-  writeFileSync(probe, '');
-  const since = statSync(probe, { bigint: true }).ctimeNs;
+  let writes = 0;
+  const now = (): bigint => {
+    writes += 1;
+    writeFileSync(probe, String(writes));
+    return statSync(probe, { bigint: true }).ctimeNs;
+  };
   const root = statSync(projectRoot, { bigint: true }).ctimeNs;
   let step = SECOND;
   while (step > 1n && root % step !== 0n) step /= 10n;
   if (step === SECOND) step = 2n * SECOND;
-  return since - (since % step);
+  const called = now();
+  const deadline = performance.now() + CLOCK_WAIT_MS;
+  for (;;) {
+    const time = now();
+    const since = time - (time % step);
+    if (since > called) return since;
+    if (performance.now() > deadline) {
+      throw new Error(`the clock did not move past ${called} within ${CLOCK_WAIT_MS} ms`);
+    }
+    Bun.sleepSync(1);
+  }
 };

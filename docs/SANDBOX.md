@@ -346,14 +346,18 @@ and it is read only when no process can change it.
   the host during the session. The ChangeSet records the times it leaves on each entry it writes,
   so its own writes, several additions to one directory included, are not conflicts. Timestamps
   are signs of change, not a record of content: the host's processes are trusted, the worker is
-  not. The clock has a granularity, so an entry changed within the same tick as the probe counts
-  as changed: a false conflict, never a missed one. The probe is in the session's directory, on
-  another filesystem than the project, with the same clock. A project on a filesystem with
-  coarser times, as exFAT keeps steps of 10 ms and FAT of 2 s, would stamp a change made later
-  within one step with an earlier time: the step is taken from the project root's change time, the
-  largest power of ten that divides it, two seconds for whole seconds, and the reference moves
-  back to the start of a step. Modification times are not compared, since a file can carry a
-  future one without any change.
+  not. The kernel stamps a change with the time of its last clock tick, so a change made just
+  before the probe, such as the application of an earlier sandbox's changes in an interactive
+  session, can carry the probe's time: the reference is taken once the clock has moved past the
+  moment it is asked for, and every change made before then comes before it. A change made within
+  the same tick as the reference counts as changed: a false conflict, never a missed one. The
+  probe is in the session's directory, on another filesystem than the project, with the same
+  clock. A project on a filesystem with coarser times, as exFAT keeps steps of 10 ms and FAT of
+  2 s, would stamp a change made later within one step with an earlier time: the step is taken
+  from the project root's change time, the largest power of ten that divides it, two seconds for
+  whole seconds, and the reference is the start of a step, which can take up to one step to wait
+  for. Modification times are not compared, since a file can carry a future one without any
+  change.
 - **Stopping the sandbox.** Applying starts by ending the sandbox, with its commands and background
   jobs, which the confirmation lists. The broker holds tool calls until the application ends, and
   the next call starts a new sandbox over the updated project, with a new upper layer: the old one
@@ -432,9 +436,8 @@ changes; it does not make the views coherent.
 
 ### A one-shot task
 
-`--sandbox workspace` runs a one-shot task with the project behind the overlay; the interactive
-session, with its commands to review and apply, comes next. The operator decides before the task
-starts: without `--apply`, the changes are shown and discarded; with it, they are applied if the
+With a task on the command line, `--sandbox workspace` runs it once with the project behind the
+overlay, and the operator decides before the task starts: without `--apply`, the changes are shown and discarded; with it, they are applied if the
 task finishes (`done`), and discarded if it does not, whatever the agent says. `--apply` has no
 environment variable, so the decision is made for each run, and it is a usage error without the
 `workspace` profile.
@@ -460,8 +463,9 @@ environment variable, so the decision is made for each run, and it is a usage er
   as the overlay's work directory is, at any depth.
 - **Refused projects.** A project on NFS, SMB/CIFS, FUSE, 9P or Ceph: another machine or a
   process outside this kernel can change a file without the change time the conflicts rely on. A
-  session file inside the project: saving it would change the lower layer while the overlay is
-  mounted. Bubblewrap older than 0.10.0, which has no overlay options.
+  session file inside the project, given with `--session` or, in an interactive session, with
+  `/session`: saving it would change the lower layer while the overlay is mounted. Bubblewrap
+  older than 0.10.0, which has no overlay options.
 - **End of the task.** The worker and its background jobs stop, then the ChangeSet reads the upper
   layer, classifies and validates it, and the summary goes to stderr: every path with what
   changes, the lines added and removed for text files, mode changes, link targets and what a
@@ -490,6 +494,50 @@ environment variable, so the decision is made for each run, and it is a usage er
   and the exit code and the report are the application's. SIGTERM ends the process when it is
   handled, after the application if it arrives during it, and the report can then be cut short;
   SIGKILL ends it at once, with the result described above.
+
+### The interactive session
+
+Without a task, `--sandbox workspace` starts an interactive session whose changes the operator
+reviews and applies while it goes on. `--apply` is a usage error there.
+
+- **Commands.** `/changes [path]` shows the summary, or the entries at a path, under it, or the new
+  directory that holds it. `/apply` shows the summary and asks for a confirmation; `/discard` does
+  the same before throwing the changes away. Both can be used while a task runs: the tool call
+  under way is cut short with an ordinary tool error (`sandbox.restarted`), and the calls made
+  meanwhile, by the task or by subagents, wait for the new sandbox; a call interrupted while it
+  waits is not executed. Refusals, such as those of `.git`, are never applied and do not count as
+  changes to apply or discard.
+- **Confirmation.** The question carries a code of four hexadecimal digits drawn when it is asked:
+  `Apply 3 changes to the project and stop 1 background job? Type apply 7F2C to confirm; anything
+  else cancels.` Only that line, surrounding spaces aside, confirms; any other answer, an empty
+  one, `Esc` or `Ctrl+C` cancels. Nothing typed before the question appeared can hold the code, so
+  a line typed ahead never confirms. Answers are not kept in the prompt history.
+- **What is applied.** The summary is read while the sandbox runs, without changing anything in
+  the upper layer: an entry without read permission is listed as refused, and one removed while it
+  is read is passed over. Once confirmed, the sandbox stops and the changes are read again; each is
+  named by everything it applies, a file by the hash of its content. Only those the operator was
+  shown are applied: one made or changed after the summary is a conflict (`it changed after the
+  changes were shown`), and so is what depends on it, such as the content of a new directory whose
+  mode changed; the removal of a replacement stays with its new entry. The rest of the application
+  is the one-shot task's, conflicts with the host included.
+- **A new sandbox each time.** Applying or discarding stops the sandbox and its background jobs,
+  removes its directory and starts a new one, on a new overlay over the project as it is then, in a
+  directory of its own (`nullrivet-<pid>-<start>-<n>`). What was not applied is discarded with the
+  old one, which is never mounted again: once the project under it changed, what the overlay shows
+  of it is undefined. The jobs of the stopped sandbox are reported to the model as lost with the
+  next prompt, without starting a turn. A new sandbox that does not start ends the session's tools
+  for good, as a sandbox that fails on its own does; the changes of a sandbox that failed can still
+  be applied, and no new one starts.
+- **The model.** After an application or a discard, the model gets a note with the next request:
+  how many changes were applied and not applied, or discarded, and that the sandbox started again,
+  with the paths and reasons fenced as data, since the sandbox chose the names. The system prompt
+  says that the sandbox starts again when the user applies or discards its changes.
+- **Leaving.** `/exit` and `Ctrl+D` with changes to apply show the summary and ask: `apply <code>`
+  applies them and exits, `discard` discards them and exits, and any other answer keeps the
+  session. When the changes cannot be read, `discard` exits and any other answer stays. `Ctrl+C`
+  twice on an empty prompt discards them: the first press counts them, and the footer says how many
+  the second discards. An interrupt from outside the terminal, SIGINT or SIGTERM, discards them
+  without asking.
 
 `security` uses the same overlay with its upper layer kept in memory (`--tmp-overlay`): its writes
 are not meant to be applied anywhere, and they are discarded at exit. What outlasts the session is
@@ -716,7 +764,8 @@ limits or for the virtual machine backend.
 3. **`workspace`.** The ChangeSet, with the reference time, the stop before reading and the
    descriptor-based resolution, specified and tested on its own before the overlay is wired in.
    3a, the ChangeSet on its own, is done; 3b, the one-shot task with `--apply`, is done; 3c, the
-   interactive session, with its commands to review and apply, is next.
+   interactive session, with its commands to review and apply, is done; 3d, the documentation and
+   an adversarial review, is next.
 4. **`security`.** Only after the network isolation tests pass: the engagement file, the ruleset,
    revocation, pasta, the hosts file, `/scope refresh` and the window. 4b: the allowlisting HTTP
    proxy.

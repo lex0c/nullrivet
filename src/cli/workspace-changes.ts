@@ -2,7 +2,7 @@ import { errorMessage } from '../errors.ts';
 import { type ApplyOutcome, applyChanges } from '../sandbox/changeset/apply.ts';
 import { type Change, classify } from '../sandbox/changeset/classify.ts';
 import { close, openDirectory } from '../sandbox/changeset/dirfd.ts';
-import { readUpper } from '../sandbox/changeset/snapshot.ts';
+import { DEFAULT_SNAPSHOT_LIMITS, readUpper } from '../sandbox/changeset/snapshot.ts';
 import {
   type ApplyReport,
   applyReport,
@@ -50,6 +50,25 @@ export const appliedExitCode = (outcome: ApplyOutcome): number => {
   return missed ? WORKSPACE_EXIT_CODES.notApplied : 0;
 };
 
+export interface ReadChanges {
+  changes: Change[];
+  entries: ChangeEntry[];
+}
+
+// What the sandbox changed in the project open at `root`, checked and described. `live` reads it
+// while the worker runs, for a preview: what the worker writes meanwhile can be missing or half
+// written, so only a reading once it has stopped is applied.
+export const readChanges = (
+  workspace: StartedWorkspace,
+  root: number,
+  live = false,
+): ReadChanges => {
+  const upper = workspace.directory.upper;
+  const snapshot = readUpper(upper, DEFAULT_SNAPSHOT_LIMITS, live);
+  const changes = symlinkTargetsInside(classify(snapshot, root), snapshot, root, workspace.root);
+  return { changes, entries: describeChanges(changes, root, upper) };
+};
+
 export interface FinishOptions {
   // The operator's authorization, given before the task ran, to apply its changes if it finishes.
   apply: boolean;
@@ -86,9 +105,7 @@ export const finishWorkspace = (workspace: StartedWorkspace, options: FinishOpti
     let changes: Change[];
     let entries: ChangeEntry[];
     try {
-      const snapshot = readUpper(workspace.directory.upper);
-      changes = symlinkTargetsInside(classify(snapshot, root), snapshot, root, workspace.root);
-      entries = describeChanges(changes, root, workspace.directory.upper);
+      ({ changes, entries } = readChanges(workspace, root));
     } catch (error) {
       return unread(error);
     }

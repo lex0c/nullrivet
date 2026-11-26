@@ -101,8 +101,8 @@ it until end of file, so programs that start nullrivet without piping anything s
 | `-m, --model <id>` | Model as `<family>/<model>`, e.g. `openrouter/deepseek/deepseek-v4-flash`. Required unless `NULLRIVET_MODEL` is set. |
 | `-e, --effort <level>` | Reasoning effort: `low`, `medium`, `high`, `xhigh`, `max`. Ignored by models without reasoning. |
 | `-p, --permission <mode>` | `auto` (default) or `readonly`. |
-| `--sandbox <profile>` | Run the tools in a sandbox. Linux with Bubblewrap installed in a system directory; the profile is `inspect` (Bubblewrap 0.8 or later) or `workspace` (0.10 or later, one-shot tasks). See [Sandbox](#sandbox). |
-| `--apply` | With `--sandbox workspace`: apply the task's changes to the project if the task finishes. Without it, they are shown and discarded. |
+| `--sandbox <profile>` | Run the tools in a sandbox. Linux with Bubblewrap installed in a system directory; the profile is `inspect` (Bubblewrap 0.8 or later) or `workspace` (0.10 or later). See [Sandbox](#sandbox). |
+| `--apply` | With `--sandbox workspace` and a task: apply the task's changes to the project if the task finishes. Without it, they are shown and discarded. The interactive session uses `/apply` instead. |
 | `-C, --cwd <dir>` | Starting directory for relative paths, commands and `AGENTS.md` lookup. It does not restrict file access. |
 | `--json` | Emit agent events as NDJSON on stdout. |
 | `--no-agents` | Do not load `AGENTS.md` files. |
@@ -191,8 +191,8 @@ the tokens spent. The older part of a long conversation is summarized automatica
 | `Shift+Tab` | Switch between `auto` and `readonly`, also while a task runs; it applies from the next tool call and does not stop one already running. |
 | `Esc` or `Ctrl+C` while a task runs | Interrupt the task; running commands are terminated. A second `Ctrl+C` exits if the task does not stop. |
 | `Ctrl+C` on a non-empty prompt | Clear the prompt. |
-| `Ctrl+C` twice on an empty prompt | Exit (code 0). |
-| `Ctrl+D` on an empty prompt | Exit (code 0). |
+| `Ctrl+C` twice on an empty prompt | Exit (code 0). With `--sandbox workspace`, the changes not applied are discarded; the first press says how many. |
+| `Ctrl+D` on an empty prompt | Exit (code 0), as `/exit` does. |
 | `↑`/`↓` | Recall earlier prompts and commands: `↑` from the first line of the input, then `↑`/`↓` walk the history; `↓` past the newest brings back what you were typing. |
 | `Tab`, `↑`/`↓` with the command list open | Complete and choose a command. |
 
@@ -209,7 +209,10 @@ the tokens spent. The older part of a long conversation is summarized automatica
 | `/instructions [reload]` | List the loaded `AGENTS.md` files, or read them again. |
 | `/stats` | Show the token usage since nullrivet started. |
 | `/session [file\|off]` | Show the session file, start saving to a new file, or stop saving. See [Sessions](#sessions). |
-| `/exit` | Exit. |
+| `/exit` | Exit. With `--sandbox workspace` and changes not applied, it asks first whether to apply or discard them. |
+| `/changes [path]` | With `--sandbox workspace`: show what the sandbox changed, or the changes at a path. |
+| `/apply` | With `--sandbox workspace`: show the changes and apply them once you type the code the question shows. |
+| `/discard` | With `--sandbox workspace`: discard the changes, after the same kind of confirmation. |
 
 `/model`, `/compact`, `/clear` and `/session` cannot be used while a task runs. An unknown command
 is not sent; to send a prompt that starts with `/`, begin it with a space.
@@ -262,20 +265,25 @@ number of processes, so it is not a defence against code meant to exhaust them. 
 cannot start stops the session with the reason; nullrivet never falls back to running the tools
 without it.
 
-`--sandbox workspace` is the same sandbox with the project writable through an overlay, for a
-one-shot task: the agent edits, builds and tests as usual, and nothing reaches the project while
-it works. When the task ends, the changes are listed on stderr (files added, modified and removed,
-lines changed, modes, links), with files that run without being invoked, such as `.envrc` or CI
-workflows, marked. Without `--apply` they are then discarded; with it, they are applied if the
-task finished, each file whole or not at all, and a file you changed during the task is left as
-you made it and reported (exit code 4). `.git` is never changed. `Ctrl+C` after the task finished
-and before the changes are applied discards them; once applying has started, it runs to its end.
-The overlay lives in your runtime directory (`$XDG_RUNTIME_DIR`), which the profile requires on a
-tmpfs.
+`--sandbox workspace` is the same sandbox with the project writable through an overlay: the agent
+edits, builds and tests as usual, and nothing reaches the project while it works. With a task on the
+command line, when the task ends, the changes are listed on stderr (files added, modified and
+removed, lines changed, modes, links), with files that run without being invoked, such as `.envrc`
+or CI workflows, marked. Without `--apply` they are then discarded; with it, they are applied if the
+task finished, each file whole or not at all, and a file you changed during the task is left as you
+made it and reported (exit code 4). `.git` is never changed. `Ctrl+C` after the task finished and
+before the changes are applied discards them; once applying has started, it runs to its end. The
+overlay lives in your runtime directory (`$XDG_RUNTIME_DIR`), which the profile requires on a tmpfs.
+
+In an interactive session, `/changes` shows the changes so far, `/apply` applies them after you
+type the code its question shows, and `/discard` throws them away; either one starts a new sandbox
+on the project as it is then, and stops the background jobs. Exiting asks what to do with changes
+not applied.
 
 ```sh
 nullrivet --sandbox workspace "fix the failing test"            # shows the changes, discards them
 nullrivet --sandbox workspace --apply "fix the failing test"    # applies them if the task finishes
+nullrivet --sandbox workspace                                   # interactive: /changes, /apply, /discard
 ```
 
 Details and the profiles planned next: [docs/SANDBOX.md](docs/SANDBOX.md).

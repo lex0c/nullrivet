@@ -14,7 +14,9 @@ import {
 
 // What the overlay's upper layer holds, read once the worker has stopped, so nothing changes it
 // while it is read. The upper layer was written by the sandbox and is read as untrusted input:
-// links are never followed, and anything the overlay does not produce stops the reading.
+// links are never followed, and anything the overlay does not produce stops the reading. A
+// reading while the sandbox runs, for a preview, changes nothing in the layer, which the overlay
+// does not expect to change under it, and passes over entries removed while it reads.
 
 export type UpperNode =
   | { kind: 'file'; mode: number; size: number; hash: string }
@@ -80,22 +82,36 @@ export const hashFile = (fd: number): string => {
   return hash.digest('hex');
 };
 
-// The upper layer belongs to this process, and nothing else writes it once the worker stopped,
-// so an entry the sandbox left without read permission is given it back to be read.
-const readable = (dir: number, name: Buffer, mode: number, needed: number): void => {
-  if ((mode & needed) === needed) return;
-  const fd = openPathBeneath(dir, name);
-  try {
-    chmodFd(fd, (mode & 0o7777) | needed);
-  } finally {
-    closeSync(fd);
-  }
+const UNREADABLE: UpperNode = {
+  kind: 'other',
+  what: 'an entry the sandbox left without read permission',
 };
+
+// Codes of an entry removed, or replaced by one of another type, between two steps of reading it:
+// a link where a file or a directory was is refused by the descriptor-based open.
+const GONE = new Set(['ENOENT', 'ENOTDIR', 'ELOOP']);
 
 export const readUpper = (
   upperPath: string,
   limits: SnapshotLimits = DEFAULT_SNAPSHOT_LIMITS,
+  // Read while the worker runs: nothing in the layer is changed, and entries removed while it is
+  // read are left out.
+  live = false,
 ): UpperNode => {
+  // The upper layer belongs to this process, and nothing else writes it once the worker stopped,
+  // so an entry the sandbox left without read permission is given it back to be read. While the
+  // worker runs, the entry is reported unreadable instead.
+  const readable = (dir: number, name: Buffer, mode: number, needed: number): boolean => {
+    if ((mode & needed) === needed) return true;
+    if (live) return false;
+    const fd = openPathBeneath(dir, name);
+    try {
+      chmodFd(fd, (mode & 0o7777) | needed);
+    } finally {
+      closeSync(fd);
+    }
+    return true;
+  };
   let entries = 0;
   const readDir = (fd: number, mode: number, opaque: boolean): UpperNode => {
     const children = new Map<string, UpperChild>();
@@ -104,7 +120,15 @@ export const readUpper = (
       if (entries > limits.maxEntries) {
         throw new SnapshotError(`the sandbox changed more than ${limits.maxEntries} entries`);
       }
-      children.set(childKey(name), { name, node: readEntry(fd, name) });
+      let node: UpperNode;
+      try {
+        node = readEntry(fd, name);
+      } catch (error) {
+        const code = (error as { code?: unknown }).code;
+        if (live && typeof code === 'string' && GONE.has(code)) continue;
+        throw error;
+      }
+      children.set(childKey(name), { name, node });
     }
     return { kind: 'dir', mode, opaque, children };
   };
@@ -124,7 +148,7 @@ export const readUpper = (
           throw new SnapshotError(`a directory of the upper layer has the marker ${marker}`);
         }
       }
-      readable(dir, name, mode, 0o500);
+      if (!readable(dir, name, mode, 0o500)) return UNREADABLE;
       const fd = openDirectoryBeneath(dir, name);
       try {
         return readDir(fd, mode, opaque !== undefined);
@@ -141,7 +165,7 @@ export const readUpper = (
       if (stat.size > BigInt(limits.maxFileBytes)) {
         return { kind: 'other', what: `a file larger than ${limits.maxFileBytes} bytes` };
       }
-      readable(dir, name, mode, 0o400);
+      if (!readable(dir, name, mode, 0o400)) return UNREADABLE;
       const fd = openBeneath(dir, name, constants.O_RDONLY | constants.O_NONBLOCK);
       try {
         if (!fstatSync(fd).isFile()) return { kind: 'other', what: 'an entry that changed type' };

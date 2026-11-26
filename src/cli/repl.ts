@@ -33,11 +33,13 @@ import { type SessionFile, SessionLink } from './session-file.ts';
 import {
   describeModeChange,
   findCommand,
+  type ParsedSlash,
   parseSlash,
   runSlash,
   type SlashContext,
   suggestCommands,
 } from './slash.ts';
+import type { WorkspaceSession } from './workspace-session.ts';
 
 // A lone ESC byte is ambiguous until no continuation arrives: it is either the Escape key or the
 // start of an escape sequence split across reads.
@@ -63,6 +65,8 @@ export interface ReplOptions {
   env: Record<string, string | undefined>;
   // The sandbox the tools run in, for the status line and the banner.
   sandbox?: SandboxProfile;
+  // Set for the workspace sandbox: its changes, which the session reviews, applies and discards.
+  workspace?: WorkspaceSession;
 }
 
 export const formatStats = (status: StatusState): string => {
@@ -112,6 +116,14 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
     let exitTimer: ReturnType<typeof setTimeout> | null = null;
     let escTimer: ReturnType<typeof setTimeout> | null = null;
     let closed = false;
+    const workspace = options.workspace;
+    // The question a command waits on: the next line submitted answers it, whatever it says.
+    let answering: ((answer: string | null) => void) | null = null;
+    const cancelQuestion = (): void => {
+      const answer = answering;
+      answering = null;
+      answer?.(null);
+    };
 
     const render = (): void => {
       if (!closed) screen.render(composeLive(state, caps, Date.now()));
@@ -183,6 +195,7 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       if (closed) return;
       closed = true;
       const steps: (() => void)[] = [
+        () => cancelQuestion(),
         () => stopBackgroundEvents(),
         () => stopSubagentActivity(),
         () => autoContinue.dispose(),
@@ -237,6 +250,14 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       stats: () => formatStats(state.status),
       session,
       cwd: options.cwd,
+      ...(workspace === undefined ? {} : { workspace }),
+      ask: (question) =>
+        new Promise((resolveAnswer) => {
+          cancelQuestion();
+          notice('warning', question);
+          answering = resolveAnswer;
+        }),
+      show: (item) => screen.print(formatPermanent(item, caps)),
       compact: async (instructions) => {
         // Registered as the running turn so Esc and Ctrl+C interrupt it and prompts wait for it.
         const controller = new AbortController();
@@ -357,12 +378,15 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
     });
 
     const updateSlash = (value: string): void => {
-      const items = suggestCommands(value).map((c) => ({
+      const items = suggestCommands(value, workspace !== undefined).map((c) => ({
         name: c.name,
         description: c.description,
       }));
       const typed = /^\/([a-z]+)\s*$/.exec(value);
-      const usage = typed?.[1] === undefined ? undefined : findCommand(typed[1])?.usage;
+      const usage =
+        typed?.[1] === undefined
+          ? undefined
+          : findCommand(typed[1], workspace !== undefined)?.usage;
       if (items.length === 0 && usage === undefined) {
         if (state.slash !== null) dispatch({ type: 'slash', menu: null });
         return;
@@ -380,8 +404,29 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       if (input.value.length === 0) autoContinue.poke();
     };
 
+    const runCommand = async (parsed: ParsedSlash): Promise<void> => {
+      commandRunning = true;
+      try {
+        await runSlash(parsed, slashContext);
+      } finally {
+        commandRunning = false;
+      }
+      syncStatus();
+      autoContinue.poke();
+    };
+
     const submit = async (raw: string): Promise<void> => {
       const text = raw.trim();
+      if (answering !== null) {
+        // An answer, even an empty one, which cancels. It holds a confirmation code, so it is
+        // not kept in the history.
+        const answer = answering;
+        answering = null;
+        history.stopBrowsing();
+        dispatch({ type: 'submit', text });
+        answer(text);
+        return;
+      }
       if (text.length === 0) return;
       if (commandRunning) {
         notice('warning', 'A command is still running. Try again when it finishes.');
@@ -389,7 +434,7 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       }
       const parsed = parseSlash(raw);
       if (parsed !== null) {
-        if (findCommand(parsed.name) === undefined) {
+        if (findCommand(parsed.name, workspace !== undefined) === undefined) {
           // The input is kept so the text is not lost when it was meant as a prompt.
           notice(
             'error',
@@ -399,14 +444,7 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
         }
         history.add(raw.trimEnd());
         dispatch({ type: 'submit', text });
-        commandRunning = true;
-        try {
-          await runSlash(parsed, slashContext);
-        } finally {
-          commandRunning = false;
-        }
-        syncStatus();
-        autoContinue.poke();
+        await runCommand(parsed);
         return;
       }
       if (turn !== null) {
@@ -470,7 +508,19 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       return true;
     };
 
+    // Exiting discards the changes of the workspace sandbox, so the exit command asks first.
+    const requestExit = (): void => {
+      if (workspace === undefined) finish(0);
+      else if (!commandRunning) void runCommand({ name: 'exit', args: '' });
+    };
+
     const onKey = (key: KeyEvent): void => {
+      if (answering !== null && (isCtrlC(key) || isNamedKey(key, 'escape'))) {
+        history.stopBrowsing();
+        setInput({ value: '', cursor: 0 });
+        cancelQuestion();
+        return;
+      }
       if (isCtrlC(key)) {
         if (turn !== null) {
           // A turn that does not settle after an interrupt (a process that ignores signals, a
@@ -484,7 +534,14 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
           // Nothing is interrupted: leaving an idle session this way is as deliberate as /exit.
           finish(0);
         } else {
-          dispatch({ type: 'exit-arm', now: Date.now() });
+          // The changes the exit would discard, counted when the exit is armed. Refusals, such as
+          // those of .git, are never applied, and do not count.
+          let discards = 0;
+          if (workspace?.active === true) {
+            const preview = workspace.preview();
+            discards = 'error' in preview ? -1 : preview.pending;
+          }
+          dispatch({ type: 'exit-arm', now: Date.now(), discards });
           if (exitTimer !== null) clearTimeout(exitTimer);
           exitTimer = setTimeout(() => {
             dispatch({ type: 'exit-disarm' });
@@ -522,7 +579,7 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
         return;
       }
       if (result.cancelInput === 'eof') {
-        if (turn === null) finish(0);
+        if (turn === null) requestExit();
         return;
       }
       if (result.next.value !== state.input.value) history.stopBrowsing();

@@ -1,12 +1,19 @@
 import { describe, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type Agent, createAgent } from '../../src/agent/agent.ts';
 import { IN_PROCESS_BACKEND } from '../../src/agent/tool-broker.ts';
 import { PromptHistory } from '../../src/cli/prompt-history.ts';
 import { SessionLink } from '../../src/cli/session-file.ts';
-import { parseSlash, runSlash, type SlashContext, suggestCommands } from '../../src/cli/slash.ts';
+import {
+  findCommand,
+  parseSlash,
+  runSlash,
+  type SlashContext,
+  suggestCommands,
+} from '../../src/cli/slash.ts';
+import type { WorkspaceSession } from '../../src/cli/workspace-session.ts';
 import type { ResolveResult } from '../../src/providers/resolve.ts';
 import { createMockProvider } from '../helpers/mock-provider.ts';
 
@@ -57,6 +64,8 @@ const harness = async (resolve?: (id: string) => ResolveResult, cwd = '/tmp'): P
       new PromptHistory(),
     ),
     cwd,
+    ask: async () => null,
+    show: () => undefined,
   };
   return h;
 };
@@ -82,6 +91,13 @@ describe('parseSlash', () => {
 });
 
 describe('suggestCommands', () => {
+  test('offers the commands of the workspace sandbox in its sessions only', () => {
+    expect(suggestCommands('/ap').map((c) => c.name)).toEqual([]);
+    expect(suggestCommands('/ap', true).map((c) => c.name)).toEqual(['apply']);
+    expect(findCommand('discard')).toBeUndefined();
+    expect(findCommand('changes', true)?.usage).toBe('[path]');
+  });
+
   test('filters by the typed prefix while the name is incomplete', () => {
     expect(suggestCommands('/e').map((c) => c.name)).toEqual(['effort', 'exit']);
     expect(suggestCommands('/').length).toBeGreaterThan(5);
@@ -168,6 +184,23 @@ describe('/session', () => {
       expect(h.notices.at(-1)?.text).toBe(`Saving this session to ${join(dir, 'saved.json')}.`);
       await run(h, '/session');
       expect(h.notices.at(-1)?.text).toContain(`Session file: ${join(dir, 'saved.json')}`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('in the workspace sandbox, refuses a file in the project, under its overlay', async () => {
+    const dir = realpathSync(sessionDir());
+    try {
+      const h = await harness(undefined, dir);
+      // The command reads the project's path only.
+      h.ctx.workspace = { root: dir } as unknown as WorkspaceSession;
+      await run(h, '/session saved.json');
+      expect(existsSync(join(dir, 'saved.json'))).toBe(false);
+      expect(h.notices.at(-1)).toEqual({
+        level: 'error',
+        text: `the session file ${join(dir, 'saved.json')} is in the project, which the workspace sandbox does not change while it runs; save it outside the project`,
+      });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

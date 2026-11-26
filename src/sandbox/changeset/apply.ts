@@ -60,7 +60,31 @@ export interface ApplyOptions {
   // races with this process and where a failure or an interruption leaves the work half done.
   // Only tests use it, to make that change, fail or end the process at that moment.
   step?: (step: ApplyStep, change: Change) => void;
+  // The changes the operator was shown and confirmed, by changeKey, when they were read before the
+  // worker stopped: a change with another key was made or changed after that, and is left out.
+  shown?: ReadonlySet<string>;
 }
+
+export const CHANGED_SINCE_SHOWN = 'it changed after the changes were shown';
+
+// Everything a change applies: two changes with the same key apply the same thing. A file is
+// named by the hash of its content.
+export const changeKey = (change: Change): string => {
+  const path = pathKey(change.path);
+  switch (change.op) {
+    case 'write':
+      return `write ${path} ${change.before} ${change.mode} ${change.droppedBits} ${change.node.hash} ${change.modeOnly === true}`;
+    case 'mkdir':
+    case 'chmod':
+      return `${change.op} ${path} ${change.mode} ${change.droppedBits}`;
+    case 'symlink':
+      return `symlink ${path} ${change.target.toString('hex')}`;
+    case 'remove':
+      return `remove ${path} ${change.before} ${change.entries} ${change.bytes}`;
+    case 'refuse':
+      return `refuse ${path} ${change.reason}`;
+  }
+};
 
 // `checked`: the project's entry was checked, and the new one is about to be made. `moving`: the
 // new one is made, and the rename or exchange is next. `moved`: the project's entry was moved
@@ -609,7 +633,9 @@ export const applyChanges = (changes: readonly Change[], options: ApplyOptions):
     }
     const reason = underLeftOut(change.path)
       ? 'an entry it depends on is not applied'
-      : preflight(change, removed, created);
+      : options.shown !== undefined && !options.shown.has(changeKey(change))
+        ? CHANGED_SINCE_SHOWN
+        : preflight(change, removed, created);
     if (reason !== null) {
       outcome.conflicts.push({ change, reason });
       left.add(key);

@@ -67,9 +67,11 @@ describe.if(process.platform === 'linux')('the workspace directory', () => {
     const created = createWorkspaceDirectory({ XDG_RUNTIME_DIR: runtime });
     if ('error' in created) throw new Error(created.error);
     const { directory } = created;
-    expect(directory.path).toBe(
-      join(runtime, `nullrivet-${process.pid}-${processStart(process.pid)}`),
+    // Counted, for a session that starts several sandboxes.
+    expect(directory.path).toStartWith(
+      join(runtime, `nullrivet-${process.pid}-${processStart(process.pid)}-`),
     );
+    expect(directory.path).toMatch(/-\d+$/);
     expect(statSync(directory.path).mode & 0o777).toBe(0o700);
     expect(readdirSync(directory.path).sort()).toEqual(['lock', 'upper', 'work']);
     // What an overlay and a sandbox leave: a directory without permissions, and a tree deeper
@@ -144,8 +146,6 @@ describe.if(process.platform === 'linux')('the workspace directory', () => {
       const created = createWorkspaceDirectory({ XDG_RUNTIME_DIR: runtime });
       if ('error' in created) throw new Error(created.error);
       writeFileSync(join(created.directory.upper, 'new.txt'), 'new\n');
-      // Past the clock tick the project was made in, which would count as a change on the host.
-      Bun.sleepSync(20);
       const since = referenceTime(created.directory, project);
       const events: ChangesEvent[] = [];
       const code = finishWorkspace(
@@ -159,6 +159,22 @@ describe.if(process.platform === 'linux')('the workspace directory', () => {
       );
       expect(code).toBe(interrupted ? 130 : 0);
       expect(existsSync(join(project, 'new.txt'))).toBe(!interrupted);
+      removeWorkspaceDirectory(created.directory);
+    }
+  });
+
+  test('puts every change made before it, within the same clock tick, before the reference', () => {
+    const runtime = runtimeDir();
+    const project = join(runtime, 'project');
+    mkdirSync(project);
+    for (let round = 0; round < 5; round++) {
+      const created = createWorkspaceDirectory({ XDG_RUNTIME_DIR: runtime });
+      if ('error' in created) throw new Error(created.error);
+      // As the application of an earlier sandbox's changes does, right before the next starts.
+      writeFileSync(join(project, 'applied.txt'), String(round));
+      const since = referenceTime(created.directory, project);
+      expect(statSync(join(project, 'applied.txt'), { bigint: true }).ctimeNs).toBeLessThan(since);
+      expect(statSync(project, { bigint: true }).ctimeNs).toBeLessThan(since);
       removeWorkspaceDirectory(created.directory);
     }
   });

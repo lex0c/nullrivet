@@ -29,6 +29,16 @@ export interface StartedWorkspace {
   since: bigint;
 }
 
+// A sandbox of the workspace profile, started on a directory of its own.
+export interface WorkspaceSandbox {
+  backend: WorkerBackend;
+  workspace: StartedWorkspace;
+}
+
+export type WorkspaceLaunch = () => Promise<
+  (WorkspaceSandbox & { warnings: string[] }) | { error: string }
+>;
+
 export interface StartedSandbox {
   backend: WorkerBackend;
   scope: SandboxScope;
@@ -36,6 +46,9 @@ export interface StartedSandbox {
   // its real path only.
   cwd: string;
   workspace?: StartedWorkspace;
+  // Starts another sandbox of the workspace profile on a new directory, with the project as it is
+  // then, for a session that applies or discards the changes and goes on.
+  relaunch?: WorkspaceLaunch;
   warnings: string[];
 }
 
@@ -75,24 +88,39 @@ export const startSandbox = async (
     readOnlyDirs,
     jobs,
   };
-  let workspace: StartedWorkspace | undefined;
-  const warnings: string[] = [];
-  if (profile === 'workspace') {
-    if (!atLeast(host.version, OVERLAY_BWRAP_VERSION)) {
-      return {
-        error: `the workspace sandbox needs Bubblewrap ${OVERLAY_BWRAP_VERSION.join('.')} or later; ${host.bwrap} is version ${host.version.join('.')}`,
-      };
+  const scope = { profile, root: project.root };
+  if (profile === 'inspect') {
+    try {
+      const backend = await WorkerBackend.start({
+        launch: inspectLaunch(options),
+        tools,
+        jobs: true,
+      });
+      return { backend, scope, cwd: project.cwd, warnings: [] };
+    } catch (error) {
+      return { error: `the inspect sandbox did not start: ${errorMessage(error)}` };
     }
+  }
+  if (!atLeast(host.version, OVERLAY_BWRAP_VERSION)) {
+    return {
+      error: `the workspace sandbox needs Bubblewrap ${OVERLAY_BWRAP_VERSION.join('.')} or later; ${host.bwrap} is version ${host.version.join('.')}`,
+    };
+  }
+  try {
+    const filesystem = projectFilesystemError(project.root);
+    if (filesystem !== null) return { error: filesystem };
+  } catch (error) {
+    return { error: `the workspace sandbox cannot be prepared: ${errorMessage(error)}` };
+  }
+  const launch: WorkspaceLaunch = async () => {
     let created: ReturnType<typeof createWorkspaceDirectory>;
     try {
-      const filesystem = projectFilesystemError(project.root);
-      if (filesystem !== null) return { error: filesystem };
       created = createWorkspaceDirectory(env);
     } catch (error) {
       return { error: `the workspace sandbox cannot be prepared: ${errorMessage(error)}` };
     }
     if ('error' in created) return created;
-    warnings.push(...created.warnings);
+    let workspace: StartedWorkspace;
     try {
       // Taken before the overlay is mounted: nothing the sandbox does can come before it.
       const since = referenceTime(created.directory, project.root);
@@ -101,25 +129,26 @@ export const startSandbox = async (
       discardDirectory(created.directory);
       return { error: `the workspace sandbox cannot be prepared: ${errorMessage(error)}` };
     }
-  }
-  try {
-    const backend = await WorkerBackend.start({
-      launch:
-        workspace === undefined
-          ? inspectLaunch(options)
-          : workspaceLaunch(options, workspace.directory),
-      tools,
-      jobs: true,
-    });
-    return {
-      backend,
-      scope: { profile, root: project.root },
-      cwd: project.cwd,
-      ...(workspace === undefined ? {} : { workspace }),
-      warnings,
-    };
-  } catch (error) {
-    if (workspace !== undefined) discardDirectory(workspace.directory);
-    return { error: `the ${profile} sandbox did not start: ${errorMessage(error)}` };
-  }
+    try {
+      const backend = await WorkerBackend.start({
+        launch: workspaceLaunch(options, workspace.directory),
+        tools,
+        jobs: true,
+      });
+      return { backend, workspace, warnings: created.warnings };
+    } catch (error) {
+      discardDirectory(workspace.directory);
+      return { error: `the workspace sandbox did not start: ${errorMessage(error)}` };
+    }
+  };
+  const started = await launch();
+  if ('error' in started) return started;
+  return {
+    backend: started.backend,
+    scope,
+    cwd: project.cwd,
+    workspace: started.workspace,
+    relaunch: launch,
+    warnings: started.warnings,
+  };
 };

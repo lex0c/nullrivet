@@ -70,7 +70,7 @@ AGENTS.md files describe conventions for the files in their directory and its su
 // which is never applied: a commit made in the sandbox would be lost with it.
 const projectFacts = (sandbox: SandboxScope): string =>
   sandbox.profile === 'workspace'
-    ? `- The project directory ${JSON.stringify(sandbox.root)} is writable, but your changes stay in the sandbox: they reach the user's project only if the user applies them when the task ends, and are discarded otherwise. Changes under .git are never applied: do not commit, branch or change git settings; leave your changes in the working tree.
+    ? `- The project directory ${JSON.stringify(sandbox.root)} is writable, but your changes stay in the sandbox: they reach the user's project only if the user applies them, and are discarded otherwise. When the user applies or discards them during a session, the sandbox starts again on the project as it is then: background jobs stop, and a note tells you what became of your changes. Changes under .git are never applied: do not commit, branch or change git settings; leave your changes in the working tree.
 - The system directories are read-only: writes to them fail.`
     : `- The project directory ${JSON.stringify(sandbox.root)} and the system directories are read-only: writes to them fail.`;
 

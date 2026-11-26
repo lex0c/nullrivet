@@ -11,6 +11,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { stripAnsi } from '../../src/sanitize/ansi.ts';
 import { overlayTestsRun, tmpfsDirectory } from '../helpers/sandbox.ts';
 import {
   type ChatRequest,
@@ -18,6 +19,7 @@ import {
   cliCommand,
   cliEnv,
   type FakeOllama,
+  inTerminal,
   startCli,
   startFakeOllama,
   toolMessages,
@@ -252,4 +254,174 @@ describe.if(overlayTestsRun)('--sandbox workspace', () => {
       }),
     );
   }, 30_000);
+});
+
+// An interactive session in a terminal, whose output is read as it comes.
+const interactive = (w: ReturnType<typeof setup>) => {
+  const child = Bun.spawn(inTerminal(cliCommand(['--sandbox', 'workspace'])), {
+    env: { ...w.env, TERM: 'xterm-256color' },
+    cwd: w.project,
+    stdin: 'pipe',
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  let output = '';
+  const reading = (async () => {
+    const decoder = new TextDecoder();
+    for await (const chunk of child.stdout) output += decoder.decode(chunk, { stream: true });
+  })();
+  // The terminal output with its escape sequences removed.
+  const text = (): string => stripAnsi(output);
+  const waitFor = async (pattern: RegExp, from = 0): Promise<RegExpExecArray> => {
+    const deadline = Date.now() + 20_000;
+    for (;;) {
+      const found = pattern.exec(text().slice(from));
+      if (found !== null) return found;
+      if (Date.now() > deadline) throw new Error(`no ${pattern} in:\n${text().slice(from)}`);
+      await Bun.sleep(50);
+    }
+  };
+  const type = (input: string): void => {
+    child.stdin.write(input);
+    child.stdin.flush();
+  };
+  const exited = async (): Promise<number> => {
+    const code = await child.exited;
+    await reading;
+    return code;
+  };
+  return { child, text, waitFor, type, exited };
+};
+
+// The prompt `change it` makes the changes; `look` reads the project in the sandbox.
+const byPrompt = (request: ChatRequest) => {
+  const last = request.messages.at(-1);
+  if (last?.role === 'user' && last.content.includes('change it')) {
+    return { toolCalls: [{ name: 'bash', args: { command: CHANGES } }] };
+  }
+  if (last?.role === 'user' && last.content.includes('look')) {
+    return { toolCalls: [{ name: 'bash', args: { command: 'cat app.txt; ls' } }] };
+  }
+  return { text: 'done' };
+};
+
+describe.if(overlayTestsRun)('an interactive session in the workspace sandbox', () => {
+  test('applies the changes with the code it shows, and goes on in a new sandbox', async () => {
+    const w = setup();
+    server.handle(byPrompt);
+    const before = server.requests.length;
+    const session = interactive(w);
+    await session.waitFor(/Type \/help/);
+    session.type('change it\r');
+    await session.waitFor(/done/);
+    untouched(w);
+    const mark = session.text().length;
+    session.type('/apply\r');
+    const [, code] = await session.waitFor(/Type apply ([0-9A-F]{4}) to confirm/, mark);
+    expect(session.text().slice(mark)).toContain('Apply 3 changes to the project?');
+    session.type(`apply ${code}\r`);
+    await session.waitFor(/A new sandbox runs on the project as it is now/, mark);
+    expect(readFileSync(w.file('app.txt'), 'utf8')).toBe('one\ntwo\n');
+    expect(readFileSync(w.file('added.txt'), 'utf8')).toBe('new\n');
+    expect(existsSync(w.file('notes.txt'))).toBe(false);
+    expect(readdirSync(w.file('.git'))).toEqual([]);
+    // The new sandbox shows the project as it is now, and the model is told what was applied.
+    session.type('look\r');
+    const seen = () =>
+      server.requests
+        .slice(before)
+        .some((r) => toolMessages(r).some((m) => m.content.includes('added.txt')));
+    const deadline = Date.now() + 20_000;
+    while (!seen() && Date.now() < deadline) await Bun.sleep(50);
+    const requests = server.requests.slice(before);
+    const looked = requests.find((r) => r.messages.at(-1)?.content.includes('look'));
+    expect(looked?.messages.at(-1)?.content).toContain("The user applied the sandbox's changes");
+    const result = toolMessages(requests.at(-1)).at(-1)?.content ?? '';
+    expect(result).toContain('two');
+    expect(result).toContain('added.txt');
+    expect(result).not.toContain('notes.txt');
+    await Bun.sleep(300);
+    // Nothing is pending in the new sandbox: the session ends without a question.
+    session.type('/exit\r');
+    expect(await session.exited()).toBe(0);
+    expect(readdirSync(w.runtime)).toEqual([]);
+  }, 60_000);
+
+  test('applies nothing on another answer, and asks before an exit discards the changes', async () => {
+    const w = setup();
+    server.handle(byPrompt);
+    const session = interactive(w);
+    await session.waitFor(/Type \/help/);
+    session.type('change it\r');
+    await session.waitFor(/done/);
+    let mark = session.text().length;
+    session.type('/apply\r');
+    const [, code] = await session.waitFor(/Type apply ([0-9A-F]{4}) to confirm/, mark);
+    session.type(`apply ${code === '0000' ? '0001' : '0000'}\r`);
+    await session.waitFor(/Nothing was applied/, mark);
+    untouched(w);
+    // The changes at one path.
+    mark = session.text().length;
+    session.type('/changes app.txt\r');
+    await session.waitFor(/modified app\.txt/, mark);
+    expect(session.text().slice(mark)).not.toContain('added.txt');
+    mark = session.text().length;
+    session.type('/exit\r');
+    await session.waitFor(/Type apply [0-9A-F]{4} to apply them and exit/, mark);
+    session.type('stay\r');
+    await session.waitFor(/The session goes on/, mark);
+    mark = session.text().length;
+    session.type('/exit\r');
+    await session.waitFor(/or discard to\s+discard them and exit/, mark);
+    session.type('discard\r');
+    expect(await session.exited()).toBe(0);
+    untouched(w);
+    expect(readdirSync(w.runtime)).toEqual([]);
+  }, 60_000);
+
+  test('applies the changes on the way out with the code', async () => {
+    const w = setup();
+    server.handle(byPrompt);
+    const session = interactive(w);
+    await session.waitFor(/Type \/help/);
+    session.type('change it\r');
+    await session.waitFor(/done/);
+    const mark = session.text().length;
+    session.type('/exit\r');
+    const [, code] = await session.waitFor(/Type apply ([0-9A-F]{4}) to apply them and exit/, mark);
+    session.type(`apply ${code}\r`);
+    expect(await session.exited()).toBe(0);
+    expect(readFileSync(w.file('added.txt'), 'utf8')).toBe('new\n');
+    expect(readdirSync(w.runtime)).toEqual([]);
+  }, 60_000);
+
+  test('refuses --apply, which /apply replaces', async () => {
+    const w = setup();
+    const session = Bun.spawn(inTerminal(cliCommand(['--sandbox', 'workspace', '--apply'])), {
+      env: { ...w.env, TERM: 'xterm-256color' },
+      cwd: w.project,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    const [code, output] = await Promise.all([session.exited, new Response(session.stdout).text()]);
+    expect(code).toBe(2);
+    expect(output).toContain('in the interactive session, /apply applies them');
+    expect(readdirSync(w.runtime)).toEqual([]);
+  }, 30_000);
+
+  test('discards the changes when Ctrl+C is pressed twice, and says how many first', async () => {
+    const w = setup();
+    server.handle(byPrompt);
+    const session = interactive(w);
+    await session.waitFor(/Type \/help/);
+    session.type('change it\r');
+    await session.waitFor(/done/);
+    const mark = session.text().length;
+    session.type('\x03');
+    await session.waitFor(/Press Ctrl\+C again to exit and discard 3 changes/, mark);
+    session.type('\x03');
+    expect(await session.exited()).toBe(0);
+    untouched(w);
+    expect(readdirSync(w.runtime)).toEqual([]);
+  }, 60_000);
 });

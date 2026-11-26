@@ -105,6 +105,10 @@ export interface Agent {
   backgroundStarts(): number;
   // What runs in the background now: jobs, and subagents running or waiting for a slot.
   backgroundWork(): BackgroundWork;
+  // Queues a note from the runtime for the model, such as a change the user made to the session
+  // between turns. It goes with the next request and starts no turn of its own; clearing the
+  // conversation drops it.
+  notify(notice: RuntimeNotice): void;
   readonly conversation: Conversation;
   readonly bootWarnings: readonly string[];
   // The sandbox the tools run in, fixed for the agent's life; undefined when they run in process.
@@ -260,6 +264,7 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
   }
   const isGitRepo = await isInsideGitRepo(options.cwd);
   let running = false;
+  const notes: RuntimeNotice[] = [];
 
   const systemPrompt = (): string =>
     buildSystemPrompt({
@@ -309,16 +314,16 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
           instructions: options.instructions,
           limits,
           ...(agent.effort === undefined ? {} : { effort: agent.effort }),
-          ...(jobs === null && subagents === null
-            ? {}
-            : {
-                notices: () =>
-                  nextNotices(
-                    jobs,
-                    subagents,
-                    reportDataBudget(agent.provider.capabilities.context_window),
-                  ),
-              }),
+          notices: () => [
+            ...notes.splice(0),
+            ...(jobs === null && subagents === null
+              ? []
+              : nextNotices(
+                  jobs,
+                  subagents,
+                  reportDataBudget(agent.provider.capabilities.context_window),
+                )),
+          ],
           emit: runOptions.onEvent ?? (() => undefined),
           signal,
         },
@@ -361,6 +366,7 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
 
     clear(): void {
       conversation.clear();
+      notes.length = 0;
       // Boot instructions are sent with every request; the ones attached to tool results of the
       // discarded conversation must be attached again when needed.
       options.instructions?.retainOnly(new Set(bootInstructions.map((file) => file.path)));
@@ -437,6 +443,10 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
 
     backgroundStarts(): number {
       return (jobs?.startedCount ?? 0) + (subagents?.startedCount ?? 0);
+    },
+
+    notify(notice: RuntimeNotice): void {
+      notes.push(notice);
     },
 
     backgroundWork(): BackgroundWork {

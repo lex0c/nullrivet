@@ -135,7 +135,16 @@ const footerRow = (state: TuiState, caps: Capabilities): string => {
   const work = state.status.background;
   let left: string;
   if (state.exitArmedAt !== null) {
-    left = paint(caps, 'warn', 'Press Ctrl+C again to exit');
+    const discards = state.exitDiscards;
+    left = paint(
+      caps,
+      'warn',
+      discards === 0
+        ? 'Press Ctrl+C again to exit'
+        : discards < 0
+          ? "Press Ctrl+C again to exit and discard the sandbox's changes"
+          : `Press Ctrl+C again to exit and discard ${discards} ${discards === 1 ? 'change' : 'changes'}`,
+    );
   } else {
     const execution =
       state.status.mode === 'auto'

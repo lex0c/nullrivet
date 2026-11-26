@@ -98,6 +98,7 @@ describe('buildSystemPrompt', () => {
     expect(text).toContain(
       'The project directory "/work" is writable, but your changes stay in the sandbox',
     );
+    expect(text).toContain('When the user applies or discards them during a session');
     expect(text).toContain('Changes under .git are never applied: do not commit');
     expect(text).toContain('The system directories are read-only');
     expect(text).not.toContain('and the system directories are read-only');
