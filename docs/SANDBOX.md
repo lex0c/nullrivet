@@ -304,12 +304,15 @@ EPERM, while IPv4, IPv6 and netlink routing sockets are created.
 ### Memory-backed storage
 
 From phase 3, writable layers live in `$XDG_RUNTIME_DIR`, a per-user tmpfs on systems with systemd,
-so an abnormal exit leaves nothing on disk, and what remains is removed when the user's last session
-ends or at reboot. The variable's value is not taken on trust: the host checks with `statfs` that
-the directory is a tmpfs, and that it belongs to the user and no one else can write to it.
-Checked: `statfs` in Bun reported tmpfs (`0x1021994`) for the runtime directory and another type
-for `/home`. Without a directory that passes, the profiles that need one refuse to start; there is
-no option to accept a directory on disk.
+so an abnormal exit leaves no files on disk, and what remains is removed when the user's last
+session ends or at reboot. A tmpfs is memory, and the system can move it to swap like any other
+memory: a swap partition or file on disk can then hold pages of it. Keeping those pages off the disk
+is the system's to set, with encrypted swap, no swap, or the `noswap` mount option of tmpfs (Linux
+6.4); nullrivet does not check for it, as with the rest of its memory. The variable's value is not
+taken on trust: the host checks with `statfs` that the directory is a tmpfs, and that it belongs to
+the user and no one else can write to it. Checked: `statfs` in Bun reported tmpfs (`0x1021994`) for
+the runtime directory and another type for `/home`. Without a directory that passes, the profiles
+that need one refuse to start; there is no option to accept a directory on disk.
 
 ### Files the worker writes
 
@@ -439,7 +442,8 @@ environment variable, so the decision is made for each run, and it is a usage er
 - **Where the changes live.** The upper and work directories are in
   `$XDG_RUNTIME_DIR/nullrivet-<pid>-<start>/`, the user's runtime tmpfs, created with mode 0700.
   The runtime directory must be the user's own, writable by no one else, and on a tmpfs, so that
-  what a process killed with SIGKILL leaves is never on disk; without one, as under cron, the
+  what a process killed with SIGKILL leaves is not kept in files on disk (swap aside, as described
+  under memory-backed storage); without one, as under cron, the
   profile refuses to start rather than use `/tmp`, which can be shared or on disk. The
   overlay keeps its markers in `user.*` extended attributes, which tmpfs holds from Linux 6.6 on:
   the start checks for them and says so. What the agent writes counts against that tmpfs, which
@@ -462,9 +466,11 @@ environment variable, so the decision is made for each run, and it is a usage er
   layer, classifies and validates it, and the summary goes to stderr: every path with what
   changes, the lines added and removed for text files, mode changes, link targets and what a
   removed directory held. What a new directory holds is counted under it. The comparison runs on
-  the host, over as many files as the sandbox wrote, so it is bounded: past 32 MiB read or 20
-  million comparison steps in all, the files left show their size only, marked as not compared,
-  and the summary says how many. Files that run or
+  the host, over as many files as the sandbox wrote, so it is bounded: once 32 MiB have been read
+  or 20 million comparison steps taken, no other file is compared, and the comparison under way
+  gets only the steps left. A file whose comparison does not finish within its limits, its own or
+  those left, shows its size only, marked as not compared, never counts that are only an upper
+  bound; the summary says how many. Files that run or
   steer an agent without being invoked (`AGENTS.md`, `.envrc`, CI workflows, git hook
   directories) are marked, and names are shown with control and bidirectional characters escaped.
   With `--json`, `changes:preview`, then `changes:discarded`, `changes:applied` or

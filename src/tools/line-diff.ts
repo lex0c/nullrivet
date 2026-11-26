@@ -25,6 +25,9 @@ export interface FileDiff {
   snippet: DiffLine[];
   // Changed lines that are not in the snippet.
   hiddenChanges: number;
+  // The changed region was too large or too costly to compare, and is counted as replaced whole:
+  // the counts are an upper bound, not the fewest lines removed and added.
+  approximate?: true;
 }
 
 const CONTEXT_LINES = 2;
@@ -332,14 +335,17 @@ export const lineDiff = (before: string, after: string, budget?: DiffBudget): Fi
       ['add', countB - unchanged],
       ['ctx', contextAfter],
     ];
-    return summarize(
-      countRuns(runs),
-      runs,
-      firstLines(a, start, endA, SNIPPET_LINES),
-      firstLines(b, start, endB, SNIPPET_LINES),
-      0,
-      firstLine,
-    );
+    return {
+      ...summarize(
+        countRuns(runs),
+        runs,
+        firstLines(a, start, endA, SNIPPET_LINES),
+        firstLines(b, start, endB, SNIPPET_LINES),
+        0,
+        firstLine,
+      ),
+      approximate: true,
+    };
   }
 
   const linesA = a.slice(start, endA).split('\n');
@@ -368,7 +374,7 @@ export const lineDiff = (before: string, after: string, budget?: DiffBudget): Fi
   const left = { steps: allowed };
   const distance = editDistance(idsA, idsB, left);
   if (budget !== undefined) budget.steps -= allowed - left.steps;
-  if (distance === null) return show(replaced, countRuns(replaced));
+  if (distance === null) return { ...show(replaced, countRuns(replaced)), approximate: true };
   // Each edit removes or adds one line, and the sides differ by m - n lines.
   const counts = { added: (distance + m - n) / 2, removed: (distance - m + n) / 2 };
   const windowA = idsA.subarray(0, SNIPPET_WINDOW);
@@ -405,6 +411,7 @@ export const readFileDiff = (meta: Record<string, unknown> | undefined): FileDif
   const count = (key: string): boolean =>
     typeof diff[key] === 'number' && Number.isInteger(diff[key]) && (diff[key] as number) >= 0;
   if (!count('added') || !count('removed') || !count('hiddenChanges')) return null;
+  if (diff.approximate !== undefined && diff.approximate !== true) return null;
   if (!Array.isArray(diff.snippet) || diff.snippet.length > SNIPPET_LINES) return null;
   if (!diff.snippet.every((line) => isDiffLine(line) && line.text.length <= MAX_LINE_CHARS)) {
     return null;

@@ -30,7 +30,8 @@ export interface ChangeEntry {
   // Lines added and removed, for a text file small enough to compare.
   lines?: { added: number; removed: number };
   binary?: true;
-  // A file not compared: the summary had reached its limit on comparisons.
+  // A file whose lines were not counted: comparing it took more than the summary allows for one
+  // file, or for all of them together. Counts that would only be an upper bound are not shown.
   uncompared?: true;
   // A file's size, or what a directory removed or created holds.
   bytes?: number;
@@ -218,6 +219,10 @@ export const describeChanges = (
         return;
       }
       const diff = lineDiff(beforeText, afterText, budget);
+      if (diff.approximate === true) {
+        entry.uncompared = true;
+        return;
+      }
       entry.lines = { added: diff.added, removed: diff.removed };
       if (diff.snippet.length > 0) entry.snippet = diff.snippet;
     };

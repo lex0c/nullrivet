@@ -7,9 +7,11 @@ import {
   mkdtempSync,
   readdirSync,
   realpathSync,
+  statfsSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   appliedExitCode,
@@ -33,6 +35,7 @@ import {
   removeLiveWorkspaceDirectories,
   removeWorkspaceDirectory,
 } from '../../src/sandbox/workspace.ts';
+import { lineDiff } from '../../src/tools/line-diff.ts';
 import { tmpfsDirectory } from '../helpers/sandbox.ts';
 
 const dirs: string[] = [];
@@ -44,6 +47,12 @@ afterEach(() => {
     Bun.spawnSync(['rm', '-rf', dir]);
   }
 });
+
+// A directory on disk, which a runtime directory must not be: the first of these that is not a
+// tmpfs, whose magic number statfs reports. Any of them can be one, as /tmp often is.
+const diskBase = ['/var/tmp', tmpdir(), homedir()].find(
+  (dir) => existsSync(dir) && statfsSync(dir).type !== 0x01021994,
+);
 
 const runtimeDir = (): string => {
   const dir = tmpfsDirectory('nullrivet-runtime-');
@@ -164,16 +173,19 @@ describe.if(process.platform === 'linux')('the workspace directory', () => {
     expect(readdirSync(open)).toEqual([]);
   });
 
-  test('refuses a runtime directory on disk, where the changes would outlive a killed process', () => {
-    // /var/tmp is kept between reboots, on disk.
-    const disk = realpathSync(mkdtempSync(join('/var/tmp', 'nullrivet-runtime-')));
-    dirs.push(disk);
-    const created = createWorkspaceDirectory({ XDG_RUNTIME_DIR: disk });
-    expect('error' in created ? created.error : 'created').toBe(
-      `XDG_RUNTIME_DIR ${disk} must be on a tmpfs: the workspace sandbox keeps its changes in memory, never on disk`,
-    );
-    expect(readdirSync(disk)).toEqual([]);
-  });
+  test.skipIf(diskBase === undefined)(
+    'refuses a runtime directory on disk, where the changes would outlive a killed process',
+    () => {
+      if (diskBase === undefined) throw new Error('no directory on disk');
+      const disk = realpathSync(mkdtempSync(join(diskBase, 'nullrivet-runtime-')));
+      dirs.push(disk);
+      const created = createWorkspaceDirectory({ XDG_RUNTIME_DIR: disk });
+      expect('error' in created ? created.error : 'created').toBe(
+        `XDG_RUNTIME_DIR ${disk} must be on a tmpfs: the workspace sandbox keeps its changes in memory, not in files on disk`,
+      );
+      expect(readdirSync(disk)).toEqual([]);
+    },
+  );
 
   test('fails a run whose changes cannot be read, with or without --apply', () => {
     const runtime = runtimeDir();
@@ -201,14 +213,20 @@ describe.if(process.platform === 'linux')('the workspace directory', () => {
   });
 
   test('stops comparing files past its limit, and lists the rest with their size', () => {
+    const before = 'one\ntwo\nthree\n';
+    const after = 'one\n2\nthree\n';
+    // The steps one comparison takes.
+    const probe = { steps: 1_000_000 };
+    lineDiff(before, after, probe);
+    const steps = 1_000_000 - probe.steps;
     const runtime = runtimeDir();
     const project = join(runtime, 'project');
     const upper = join(runtime, 'upper');
     mkdirSync(project);
     mkdirSync(upper);
     for (const name of ['a.txt', 'b.txt']) {
-      writeFileSync(join(project, name), 'one\ntwo\nthree\n');
-      writeFileSync(join(upper, name), 'one\n2\nthree\n');
+      writeFileSync(join(project, name), before);
+      writeFileSync(join(upper, name), after);
     }
     const root = openDirectory(project);
     try {
@@ -223,16 +241,21 @@ describe.if(process.platform === 'linux')('the workspace directory', () => {
         ['a.txt', unlimited],
         ['b.txt', unlimited],
       ]);
-      // The first file read spends the bytes, and its comparison spends the steps.
+      // The first file read spends the bytes; the steps left after it do not cover the second
+      // comparison, which stops and is not shown as counts that are only an upper bound.
       for (const limits of [
         { bytes: 1, steps: 1_000_000 },
-        { bytes: 1_000_000, steps: 1 },
+        { bytes: 1_000_000, steps: steps + 1 },
       ]) {
         expect(counted(limits)).toEqual([
           ['a.txt', unlimited],
           ['b.txt', true],
         ]);
       }
+      expect(counted({ bytes: 1_000_000, steps: steps - 1 })).toEqual([
+        ['a.txt', true],
+        ['b.txt', true],
+      ]);
       const plain = {
         added: (text: string) => text,
         removed: (text: string) => text,
@@ -243,8 +266,9 @@ describe.if(process.platform === 'linux')('the workspace directory', () => {
         describeChanges(changes, root, upper, { bytes: 1, steps: 1 }),
         plain,
       );
+      expect(text).toContain('  modified a.txt  12B\n');
       expect(text).toContain('  modified b.txt  12B\n');
-      expect(text).toContain('The lines of 1 file were not counted');
+      expect(text).toContain('The lines of 2 files were not counted');
     } finally {
       close(root);
     }

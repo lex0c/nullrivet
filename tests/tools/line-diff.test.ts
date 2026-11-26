@@ -175,8 +175,13 @@ describe('lineDiff', () => {
       b[count >> 1] = 'same';
       return [a.join('\n'), b.join('\n')];
     };
-    expect(lineDiff(...sides(5_001))).toMatchObject({ added: 5_001, removed: 5_001 });
+    expect(lineDiff(...sides(5_001))).toMatchObject({
+      added: 5_001,
+      removed: 5_001,
+      approximate: true,
+    });
     expect(lineDiff(...sides(501))).toMatchObject({ added: 500, removed: 500 });
+    expect(lineDiff(...sides(501)).approximate).toBeUndefined();
   });
 
   test('comparisons that share a budget take their steps from it, and stop once it is spent', () => {
@@ -191,7 +196,11 @@ describe('lineDiff', () => {
     expect(left).toBeGreaterThan(0);
     expect(left).toBeLessThan(700_000);
     // What is left does not cover a second comparison of the same size.
-    expect(lineDiff(...sides, budget)).toMatchObject({ added: 501, removed: 501 });
+    expect(lineDiff(...sides, budget)).toMatchObject({
+      added: 501,
+      removed: 501,
+      approximate: true,
+    });
     expect(budget.steps).toBeLessThan(0);
     // Without a budget, the same comparison gets its own steps.
     expect(lineDiff(...sides)).toMatchObject({ added: 500, removed: 500 });
@@ -203,7 +212,7 @@ describe('lineDiff', () => {
     before[75_000] = 'same';
     after[75_000] = 'same';
     const diff = lineDiff(before.join('\n'), after.join('\n'));
-    expect(diff).toMatchObject({ added: 150_000, removed: 150_000 });
+    expect(diff).toMatchObject({ added: 150_000, removed: 150_000, approximate: true });
     expect(types(diff.snippet)).toBe('dddddddddd');
     expect(positions(diff.snippet).slice(0, 2)).toEqual([
       ['old0', 1, undefined],
@@ -285,6 +294,8 @@ describe('readFileDiff', () => {
       { ...valid, snippet: [{ type: 'add', text: 'x', newLine: '2' }] },
       { ...valid, snippet: [{ type: 'del', text: 'x', oldLine: 0.5 }] },
       { ...valid, snippet: [null] },
+      { ...valid, approximate: false },
+      { ...valid, approximate: 'yes' },
     ];
     for (const diff of malformed) expect(readFileDiff({ diff })).toBeNull();
   });
