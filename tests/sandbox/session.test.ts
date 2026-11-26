@@ -261,10 +261,17 @@ describe.if(process.platform === 'linux')('the changes of a workspace session', 
   test('says when an application may have changed the AGENTS.md files', async () => {
     const w = setup();
     const session = await start(w);
-    const changes = new WorkspaceSession(w.project, session, () => undefined);
+    // AGENTS.md links to CLAUDE.md, the file the agent loaded.
+    const changes = new WorkspaceSession(
+      w.project,
+      session,
+      () => undefined,
+      () => [join(w.project, 'CLAUDE.md')],
+    );
     for (const [name, changed] of [
       ['notes.txt', false],
       ['AGENTS.md', true],
+      ['CLAUDE.md', true],
     ] as const) {
       writeFileSync(join(session.workspace?.directory.upper ?? '', name), 'x\n');
       const preview = changes.preview();

@@ -235,17 +235,59 @@ export const symlinkTargetsInside = (
   );
 };
 
+export const LINK_THROUGH_REFUSED = 'it leads through a link that is not applied';
+
 // The links of `links`, with each one that leads out refused; over the project as it is, with the
-// links about to be created.
+// links about to be created. They come in the order to create them: each after the links it leads
+// through. A link is checked with those present, so it must never exist without them: created in
+// this order, and with the creation stopping at the first failure, a link whose way depends on a
+// link that could not be made is never made either, and never leads through the project's entry
+// there instead.
 export const linksInsideProject = (
   links: readonly SymlinkChange[],
   projectRoot: number,
   projectPath: string,
 ): Change[] => {
   const pending = new Map(links.map((link) => [pathKey(link.path), link.target]));
+  // The pending links each resolution passed through.
+  let through = new Set<string>();
   const lookup: Lookup = (path) => {
-    const target = pending.get(pathKey(path));
-    return target === undefined ? projectAt(projectRoot, path) : { kind: 'symlink', target };
+    const key = pathKey(path);
+    const target = pending.get(key);
+    if (target === undefined) return projectAt(projectRoot, path);
+    through.add(key);
+    return { kind: 'symlink', target };
   };
-  return refuseLeaving(links, lookup, projectPath);
+  const budget = { lookups: MAX_LOOKUPS };
+  const checked = new Map<string, { change: Change; through: Set<string> }>();
+  for (const link of links) {
+    through = new Set();
+    const reason = refusal(lookup, projectPath, link.path.slice(0, -1), link.target, budget);
+    const change: Change = reason === null ? link : { op: 'refuse', path: link.path, reason };
+    checked.set(pathKey(link.path), { change, through });
+  }
+  // Depth first, each link after those it passes through. A link that passes through one refused,
+  // or through itself, reached again while its own are being placed, is refused as well.
+  const ordered: Change[] = [];
+  const state = new Map<string, 'placing' | 'placed'>();
+  const place = (key: string): boolean => {
+    const entry = checked.get(key);
+    if (entry === undefined) return true;
+    const seen = state.get(key);
+    if (seen === 'placed') return entry.change.op !== 'refuse';
+    if (seen === 'placing') return false;
+    state.set(key, 'placing');
+    let kept = entry.change.op !== 'refuse';
+    for (const dependency of entry.through) {
+      if (dependency !== key && !place(dependency)) kept = false;
+    }
+    if (!kept && entry.change.op !== 'refuse') {
+      entry.change = { op: 'refuse', path: entry.change.path, reason: LINK_THROUGH_REFUSED };
+    }
+    state.set(key, 'placed');
+    ordered.push(entry.change);
+    return kept;
+  };
+  for (const key of checked.keys()) place(key);
+  return ordered;
 };

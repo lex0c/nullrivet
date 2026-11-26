@@ -28,8 +28,8 @@ export interface Preview {
 export interface Applied {
   // Null when the changes could not be read once the sandbox stopped, and none was applied.
   report: ApplyReport | null;
-  // An AGENTS.md file of the project may have changed: one was written or removed, or a directory
-  // that could hold one was removed or replaced.
+  // An AGENTS.md file of the project may have changed: one was written or removed, a file one
+  // links to was changed, or a directory that could hold one was removed or replaced.
   instructionsChanged: boolean;
   failure: string | null;
   // Why no sandbox runs after the application, or null when a new one started.
@@ -80,6 +80,8 @@ export class WorkspaceSession {
     readonly root: string,
     private readonly sandbox: SandboxSession,
     private readonly notify: (notice: RuntimeNotice) => void,
+    // The real paths of the AGENTS.md files the agent loaded, which can be links to other files.
+    private readonly instructionFiles: () => readonly string[] = () => [],
   ) {}
 
   // Whether the sandbox is being stopped and replaced, for an application or a discard.
@@ -132,7 +134,7 @@ export class WorkspaceSession {
   // again.
   async apply(preview: Preview, last = false): Promise<Applied> {
     const cycle = await this.sandbox.cycle(
-      (workspace) => applyShown(workspace, preview.shown),
+      (workspace) => applyShown(workspace, preview.shown, this.instructionFiles()),
       !last,
     );
     const { report, failure, instructionsChanged } = cycle.result;
@@ -183,18 +185,26 @@ export class WorkspaceSession {
 
 const AGENTS_MD = Buffer.from('AGENTS.md');
 
-const touchesInstructions = (changes: readonly Change[]): boolean =>
-  changes.some(
+const touchesInstructions = (
+  changes: readonly Change[],
+  root: string,
+  loaded: readonly string[],
+): boolean => {
+  const files = new Set(loaded);
+  return changes.some(
     (change) =>
       change.path.at(-1)?.equals(AGENTS_MD) === true ||
-      (change.op === 'remove' && change.before === 'dir'),
+      (change.op === 'remove' && change.before === 'dir') ||
+      files.has(join(root, ...change.path.map((part) => part.toString()))),
   );
+};
 
 // Applies the changes in the upper layer, read once the worker has stopped, that `shown` holds.
 // Never throws: the sandbox is replaced whatever happens here.
 const applyShown = (
   workspace: StartedWorkspace,
   shown: ReadonlySet<string>,
+  instructionFiles: readonly string[],
 ): Pick<Applied, 'report' | 'failure' | 'instructionsChanged'> => {
   let root: number;
   try {
@@ -219,14 +229,14 @@ const applyShown = (
       return {
         report: applyReport(outcome),
         failure: null,
-        instructionsChanged: touchesInstructions(outcome.applied),
+        instructionsChanged: touchesInstructions(outcome.applied, workspace.root, instructionFiles),
       };
     } catch (error) {
       return {
         report: null,
         failure: `applying the changes failed, and the project may hold some of them: ${errorMessage(error)}`,
         // Which were applied is not known.
-        instructionsChanged: touchesInstructions(changes),
+        instructionsChanged: touchesInstructions(changes, workspace.root, instructionFiles),
       };
     }
   } catch (error) {

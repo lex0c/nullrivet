@@ -407,7 +407,10 @@ and it is read only when no process can change it.
   made there later, as a link `missing/../etc/passwd` becomes a way out once another application
   makes `missing` a link to `/usr/`. The links of one check take at most a million lookups in all;
   the rest are refused. Links are created last, each checked again over the project as it then is,
-  since an entry a link leads through may not have been applied.
+  since an entry a link leads through may not have been applied, and in the order of their ways: a
+  link that leads through another link to be created comes after it, so that, the creation stopping
+  at the first failure, a link is never made without the links it was checked with; one that leads
+  through a link refused is refused too.
 - **Resolution.** Every target path is resolved from a descriptor of the project directory, one
   component at a time, beneath it and without following a symbolic link or crossing a mount
   (`openat2` with `RESOLVE_BENEATH`, `RESOLVE_NO_SYMLINKS`, `RESOLVE_NO_MAGICLINKS` and
@@ -554,13 +557,13 @@ reviews and applies while it goes on. `--apply` is a usage error there.
   next prompt, without starting a turn. A new sandbox that does not start ends the session's tools
   for good, as a sandbox that fails on its own does; the changes of a sandbox that failed can still
   be applied, and no new one starts.
-- **The model.** After an application or a discard, the model gets a note with the next request:
-  how many changes were applied and not applied, or discarded, and that the sandbox started again,
-  with the paths and reasons fenced as data, since the sandbox chose the names. The system prompt
-  says that the sandbox starts again when the user applies or discards its changes. An application
-  that may have changed an `AGENTS.md` file, writing or removing one or removing a directory, reads
-  the instructions again from the project when no task runs; while one does, the session says to
-  run `/instructions reload` once it ends.
+- **The model.** After an application or a discard, the model gets a note with the next request: how
+  many changes were applied and not applied, or discarded, and that the sandbox started again, with
+  the paths and reasons fenced as data, since the sandbox chose the names. The system prompt says
+  that the sandbox starts again when the user applies or discards its changes. An application that
+  may have changed an `AGENTS.md` file, writing or removing one, changing a file a loaded one links
+  to, or removing a directory, reads the instructions again from the project as soon as neither a
+  task nor a command runs.
 - **Leaving.** `/exit` and `Ctrl+D` with changes to apply show the summary and ask: `apply <code>`
   applies them and exits, `discard` discards them and exits, and any other answer keeps the
   session. When the changes cannot be read, `discard` exits and any other answer stays. `Ctrl+C`

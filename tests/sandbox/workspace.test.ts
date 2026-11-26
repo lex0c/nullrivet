@@ -8,9 +8,11 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readlinkSync,
   realpathSync,
   statfsSync,
   statSync,
+  symlinkSync,
   truncateSync,
   utimesSync,
   writeFileSync,
@@ -523,6 +525,53 @@ describe.if(process.platform === 'linux')('the links of the changes', () => {
       ['last', 'kept'],
       ['plain', 'kept'],
     ]);
+  });
+
+  test('makes a link after the links it leads through, and not at all when one of them fails', () => {
+    for (const fail of [false, true]) {
+      const runtime = runtimeDir();
+      const project = join(runtime, 'project');
+      const upper = join(runtime, 'upper');
+      mkdirSync(join(project, 'locked'), { recursive: true });
+      writeFileSync(join(project, 'safe.txt'), 'safe');
+      symlinkSync('/etc', join(project, 'locked', 'z'));
+      // The sandbox points locked/z at a file of the project, and adds a link through it.
+      mkdirSync(join(upper, 'locked'), { recursive: true });
+      chmodSync(join(upper, 'locked'), statSync(join(project, 'locked')).mode & 0o7777);
+      symlinkSync('../safe.txt', join(upper, 'locked', 'z'));
+      symlinkSync('locked/z', join(upper, 'a'));
+      const root = openDirectory(project);
+      try {
+        // Whether `a` was there when locked/z was about to be replaced.
+        const seen: { a: boolean | null } = { a: null };
+        const outcome = applyChanges(classify(readUpper(upper), root), {
+          projectRoot: root,
+          projectPath: project,
+          upperPath: upper,
+          since: BigInt(Date.now() + 1_000) * 1_000_000n,
+          step: (step, change) => {
+            const path = change.path.map(String).join('/');
+            if (fail && path === 'locked/z') throw new Error('the host holds locked/z');
+            if (step === 'moving' && path === 'locked/z') {
+              seen.a = lstatSync(join(project, 'a'), { throwIfNoEntry: false }) !== undefined;
+            }
+          },
+        });
+        if (fail) {
+          expect(lstatSync(join(project, 'a'), { throwIfNoEntry: false })).toBeUndefined();
+          expect(readlinkSync(join(project, 'locked', 'z'))).toBe('/etc');
+          expect(outcome.stopped?.change.path.map(String).join('/')).toBe('locked/z');
+          expect(outcome.notReached.map((change) => change.path.map(String).join('/'))).toContain(
+            'a',
+          );
+        } else {
+          expect(seen.a).toBe(false);
+          expect(realpathSync(join(project, 'a'))).toBe(join(project, 'safe.txt'));
+        }
+      } finally {
+        close(root);
+      }
+    }
   });
 
   test('stops resolving links once they took too many steps', () => {

@@ -34,6 +34,8 @@ export interface SlashContext {
   workspace?: WorkspaceSession;
   // Asks the operator a question, answered by the next line submitted; null when it is cancelled.
   ask: (question: string) => Promise<string | null>;
+  // Reads the AGENTS.md files again once no task runs: they may have changed in the project.
+  reloadInstructionsWhenIdle: () => void;
   // Writes what the sandbox changed, or what applying it did, to the scrollback.
   show: (
     item: { kind: 'changes'; entries: ChangeEntry[] } | { kind: 'applied'; report: ApplyReport },
@@ -110,9 +112,10 @@ const applyPreview = async (ctx: SlashContext, preview: Preview, last: boolean):
   // The instructions are read from the project, which now holds what was applied.
   if (applied.instructionsChanged) {
     if (ctx.agent.running) {
+      ctx.reloadInstructionsWhenIdle();
       ctx.notice(
-        'warning',
-        'AGENTS.md files of the project may have changed while a task runs; /instructions reload reads them again once it ends.',
+        'info',
+        'AGENTS.md files of the project may have changed: the instructions are read again once the task ends.',
       );
     } else {
       const reloaded = await ctx.agent.reloadInstructions();

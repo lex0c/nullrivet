@@ -78,6 +78,7 @@ const harness = async (
     cwd,
     ask: async () => null,
     show: () => undefined,
+    reloadInstructionsWhenIdle: () => undefined,
   };
   return h;
 };
@@ -219,6 +220,42 @@ describe('/apply', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('/apply during a task', () => {
+  test('reads the AGENTS.md files again once the task ends, not while it runs', async () => {
+    const h = await harness();
+    let stale = 0;
+    // The agent runs a task.
+    h.ctx.agent = Object.defineProperty(Object.create(h.agent), 'running', { value: true });
+    h.ctx.reloadInstructionsWhenIdle = () => {
+      stale += 1;
+    };
+    h.ctx.workspace = {
+      root: '/tmp',
+      active: true,
+      busy: false,
+      runningJobs: () => 0,
+      preview: () => ({
+        entries: [{ path: 'AGENTS.md', change: 'modified', kind: 'file' }],
+        shown: new Set<string>(),
+        pending: 1,
+      }),
+      apply: async () => ({
+        report: { applied: ['AGENTS.md'], notApplied: [], stopped: null },
+        failure: null,
+        instructionsChanged: true,
+        stopped: null,
+        warnings: [],
+      }),
+    } as unknown as WorkspaceSession;
+    h.ctx.ask = async (question) => `apply ${/apply ([0-9A-F]{4})/.exec(question)?.[1]}`;
+    await run(h, '/apply');
+    expect(stale).toBe(1);
+    expect(h.notices.map((notice) => notice.text)).toContain(
+      'AGENTS.md files of the project may have changed: the instructions are read again once the task ends.',
+    );
   });
 });
 

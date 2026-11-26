@@ -233,8 +233,11 @@ export const runCli = async (io: CliIO): Promise<number> => {
         ...(restartable === null || sandbox === null
           ? {}
           : {
-              workspace: new WorkspaceSession(sandbox.scope.root, restartable, (notice) =>
-                agent.notify(notice),
+              workspace: new WorkspaceSession(
+                sandbox.scope.root,
+                restartable,
+                (notice) => agent.notify(notice),
+                () => agent.instructions().map((file) => file.path),
               ),
             }),
         resolveModel: (id) => resolveWith(id, {}),

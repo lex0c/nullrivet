@@ -395,6 +395,38 @@ describe.if(overlayTestsRun)('an interactive session in the workspace sandbox', 
     expect(readdirSync(w.runtime)).toEqual([]);
   }, 60_000);
 
+  test('reads AGENTS.md again once a task during which it was applied ends', async () => {
+    const w = setup();
+    server.handle(async (request) => {
+      const last = request.messages.at(-1);
+      if (last?.role === 'user' && last.content.includes('write rules')) {
+        return {
+          toolCalls: [
+            { name: 'bash', args: { command: "echo 'Use tabs.' > AGENTS.md; sleep 20" } },
+          ],
+        };
+      }
+      // The task goes on after the application, so the instructions wait for its end.
+      await Bun.sleep(3_000);
+      return { text: 'done' };
+    });
+    const session = interactive(w);
+    await session.waitFor(/Type \/help/);
+    session.type('write rules\r');
+    await session.waitFor(/Running echo/);
+    await Bun.sleep(1_000);
+    const mark = session.text().length;
+    // Applied while the task runs: the command it runs is cut short by the new sandbox.
+    session.type('/apply\r');
+    const [, code] = await session.waitFor(/Type apply ([0-9A-F]{4}) to confirm/, mark);
+    session.type(`apply ${code}\r`);
+    await session.waitFor(/the instructions are read again once the task ends/, mark);
+    expect(readFileSync(w.file('AGENTS.md'), 'utf8')).toBe('Use tabs.\n');
+    await session.waitFor(/Loaded AGENTS\.md files:/, mark);
+    session.type('/exit\r');
+    expect(await session.exited()).toBe(0);
+  }, 60_000);
+
   test('refuses --apply, which /apply replaces', async () => {
     const w = setup();
     const session = Bun.spawn(inTerminal(cliCommand(['--sandbox', 'workspace', '--apply'])), {

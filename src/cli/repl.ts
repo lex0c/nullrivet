@@ -126,6 +126,14 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
     let escTimer: ReturnType<typeof setTimeout> | null = null;
     let closed = false;
     const workspace = options.workspace;
+    // The project's AGENTS.md files may have changed while a task ran: they are read again, as
+    // /instructions reload does, as soon as neither a task nor a command runs.
+    let instructionsStale = false;
+    const reloadIfStale = (): void => {
+      if (!instructionsStale || closed || turn !== null || commandRunning) return;
+      instructionsStale = false;
+      void runCommand({ name: 'instructions', args: 'reload' });
+    };
     // The question a command waits on: the next line submitted answers it, whatever it says.
     let answering: ((answer: string | null) => void) | null = null;
     const cancelQuestion = (): void => {
@@ -265,6 +273,9 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       session,
       cwd: options.cwd,
       ...(workspace === undefined ? {} : { workspace }),
+      reloadInstructionsWhenIdle: () => {
+        instructionsStale = true;
+      },
       ask: (question) =>
         new Promise((resolveAnswer) => {
           cancelQuestion();
@@ -341,6 +352,7 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
         .finally(() => {
           if (turn === controller) turn = null;
           scheduler.request();
+          reloadIfStale();
           autoContinue.poke();
         });
     };
@@ -436,6 +448,7 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
         commandRunning = false;
       }
       syncStatus();
+      reloadIfStale();
       autoContinue.poke();
     };
 
