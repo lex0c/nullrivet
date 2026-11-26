@@ -584,22 +584,31 @@ the evidence log, when the engagement file enables it.
 The namespaces are configured by helper processes the host starts for that purpose; the host
 process never joins them, so the agent loop and the providers keep the host's network.
 
-1. Bubblewrap creates the sandbox's user and network namespaces, reports the sandbox's PID
-   (`--info-fd`) and waits (`--block-fd`) before starting the worker.
-2. A helper enters those namespaces from outside the sandbox and installs the ruleset; only then
-   does pasta connect the network namespace to the outside. The user that created a user namespace
-   holds every capability in it from the parent namespace, so the helper needs no privilege on the
-   host, and no process inside the sandbox keeps `CAP_NET_ADMIN`. Later ruleset changes use the
-   same path.
-3. The worker starts with every capability dropped from its bounding set, `no_new_privs`, and
-   `--disable-userns`, so it can neither change the ruleset nor create a user namespace in which
-   it would hold capabilities again.
+1. The host makes a user and a network namespace, with the user's id mapped to their root
+   (`unshare --user --map-root-user --net`), and runs Bubblewrap in them with `--share-net`.
+   Bubblewrap puts the sandbox in a user namespace of its own, nested in the first, as the user's
+   id, with every capability dropped (`--cap-drop ALL`) and `--disable-userns`, and waits on
+   `--block-fd` before starting the worker.
+2. Helpers enter the first two namespaces from outside, by the process id of Bubblewrap, which
+   runs in them (`nsenter --user --net --preserve-credentials --keep-caps`), and, in order:
+   install a ruleset that authorizes nothing, while the namespace has only its loopback; set the
+   ping group range, so ICMP echo works without raw sockets; start pasta, which gives the
+   namespace its way out, still closed; install the scope's ruleset in one transaction, and check
+   that the kernel holds that table alone, with both chains dropping by default.
+3. Only then is the worker released, by writing to the block descriptor. A step that fails ends
+   the sandbox unreleased. Bubblewrap reads the descriptor once and goes on at its end as well, so
+   a host that dies mid-way does not hold it back: what holds is the ruleset that authorizes
+   nothing, installed first, and `--die-with-parent`, which ends the sandbox with the host.
 
-Checked: rules install without root in a user-owned namespace; with the capabilities dropped,
-`nft flush ruleset` fails with "Operation not permitted"; Bubblewrap sets `no_new_privs` by default
-(`NoNewPrivs: 1`); a sandbox may create a nested user namespace by default, and cannot with
-`--disable-userns`. A Docker container without `NET_ADMIN` behaved the same, with
-`ip route del default` refused.
+The host, as the namespaces' owner, holds every capability over them, from its own namespace;
+nothing in the sandbox does, being in a namespace nested below them. Checked: from inside,
+`nft flush ruleset` and writing a network sysctl fail, and so does making a user namespace. The
+helper must enter the namespace that owns the network namespace: entering the one of the
+sandbox's process gives capabilities there only, and `nft` fails with "Operation not permitted".
+`--keep-caps` keeps the namespace's capabilities across the helper's exec, which drops them for
+an id other than root. A mapped root is what lets the host set the ping group range: the network
+namespace's sysctls belong to it, and a namespace Bubblewrap makes without one leaves them out of
+reach, and ICMP with them. The range names the namespace's own ids, `0 0`, the user's group.
 
 The ruleset is installed by a program already on the host, with no network needed. Checked: a
 sidecar container sharing the locked namespace could not download nftables to apply new rules.
@@ -641,16 +650,25 @@ interface. Checked: a connection from inside fails at once with "Network is unre
 ### User-mode networking
 
 In `security`, passt's `pasta` connects the namespace to the host network once the rules are in
-place. Without it the profile does not start. Before phase 4, tests establish:
+place. Without it the profile does not start. It runs in the namespaces' user namespace, by the
+name `pasta`, which chooses its mode, with nothing forwarded in either direction or protocol
+(`-t none -u none -T none -U none`), without DHCP, and without mapping the gateway's address to
+the host's loopback (`--no-map-gw`). A pasta that ends leaves the namespace without a way out, and
+is not started again. Tests with real namespaces, and servers on the host's own address
+(`tests/sandbox/network.test.ts`), establish:
 
-- that the host's loopback services are not reachable through pasta's address mapping, with the
-  mapping disabled (`--no-map-gw`) and checked;
-- that TCP, UDP and ICMP to an authorized destination pass, and to any other do not, in both
-  address families;
-- that a helper outside the sandbox can replace the ruleset of a running sandbox;
-- that a TCP connection kept open stops at its next packet when `/scope refresh` removes its
-  destination and when the window ends, and that a connection opened just before a change behaves
-  as the new ruleset says.
+- that TCP, UDP and ICMP echo to an authorized destination pass, and to any other are refused at
+  once, the cloud metadata address and IPv6 included; IPv6 to an authorized destination is not
+  tested yet, on hosts without an IPv6 route;
+- that the host's loopback services are not reachable, through the host's address or the
+  gateway's, even with the gateway authorized: without `--no-map-gw`, a service listening on the
+  host's loopback answered through the gateway;
+- that nothing of the namespace is forwarded to the host;
+- that a TCP connection kept open stops at its next packet when its destination is revoked, and a
+  new one is refused;
+- that the sandbox's command never runs when the ruleset or pasta fails, or when the sandbox
+  ends before it is released, and that a pasta that ends is reported and leaves the network
+  closed.
 
 ### Names and DNS
 
@@ -801,8 +819,9 @@ limits or for the virtual machine backend.
    interactive session, with its commands to review and apply, is done; 3d, the documentation and
    an adversarial review, is done.
 4. **`security`.** Only after the network isolation tests pass: the engagement file, the ruleset,
-   revocation, pasta, the hosts file, `/scope refresh` and the window. 4b: the allowlisting HTTP
-   proxy.
+   revocation, pasta, the hosts file, `/scope refresh` and the window. Its first step, the
+   network layer with its tests (the namespaces, the ruleset, pasta, revocation), is done; the
+   engagement file is next. 4b: the allowlisting HTTP proxy.
 5. **Evidence log**, written by the host, with credentials removed from the arguments.
 6. **Virtual machine backend** for macOS and for raw-socket laboratories.
 

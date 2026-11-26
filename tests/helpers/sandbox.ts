@@ -1,6 +1,7 @@
 import { mkdtempSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { atLeast, OVERLAY_BWRAP_VERSION, sandboxHost } from '../../src/sandbox/bwrap.ts';
+import { networkTools } from '../../src/sandbox/network/namespace.ts';
 
 // The sandbox tests need Bubblewrap and unprivileged user namespaces. They are skipped where
 // those are missing, unless NULLRIVET_TEST_REQUIRE_SANDBOX is set, as in CI, where a sandbox that
@@ -28,3 +29,10 @@ export const overlayTestsRun =
 // tmpfs: in /dev/shm, a tmpfs on Linux, since the temporary directory can be on disk, as in CI.
 export const tmpfsDirectory = (prefix: string): string =>
   realpathSync(mkdtempSync(join('/dev/shm', prefix)));
+
+// The network tests need the sandbox, and nftables, util-linux and passt in system directories.
+// They are skipped where those are missing, unless NULLRIVET_TEST_REQUIRE_NETWORK is set, as in
+// CI, where a missing one must fail them instead.
+export const networkTestsRun =
+  (sandboxTestsRun && typeof networkTools() !== 'string') ||
+  process.env.NULLRIVET_TEST_REQUIRE_NETWORK === '1';

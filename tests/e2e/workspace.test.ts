@@ -32,7 +32,10 @@ beforeAll(() => {
   server = startFakeOllama();
 });
 afterAll(() => server.stop());
+// Sessions in a terminal still running when their test ends, as one that failed leaves them.
+const terminals: { kill: () => void }[] = [];
 afterEach(() => {
+  for (const terminal of terminals.splice(0)) terminal.kill();
   for (const dir of dirs.splice(0)) {
     Bun.spawnSync(['chmod', '-R', 'u+rwx', dir]);
     rmSync(dir, { recursive: true, force: true });
@@ -265,6 +268,7 @@ const interactive = (w: ReturnType<typeof setup>) => {
     stdout: 'pipe',
     stderr: 'pipe',
   });
+  terminals.push(child);
   let output = '';
   const reading = (async () => {
     const decoder = new TextDecoder();
