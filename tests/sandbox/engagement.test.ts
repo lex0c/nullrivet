@@ -373,6 +373,24 @@ describe('resolving the engagement', () => {
     ]);
   });
 
+  test('holds each entry of a name to the rule, a name given twice with other ports included', async () => {
+    const result = await resolveEngagement(
+      parsed({
+        scope: {
+          allow: [
+            { cidr: '10.0.0.0/8', ports: [443] },
+            { host: 'app.example', ports: [22] },
+            { host: 'app.example', ports: [443] },
+          ],
+        },
+      }),
+      resolver({ 'app.example': ['10.0.0.1'] }),
+    );
+    expect(result.ok ? 'resolved' : result.error).toEndWith(
+      'app.example resolves to 10.0.0.1 (private)',
+    );
+  });
+
   test('stops at a name whose ports a cidr holding its internal address does not allow', async () => {
     // The cidr allows 443; the name, every port: the answer would open the rest on 10.0.0.1.
     for (const ports of [undefined, [443, 8080]]) {

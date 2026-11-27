@@ -477,29 +477,31 @@ export const resolveEngagement = async (
     const network = parseNetwork(address);
     return network === null ? [] : [{ network, what: 'an address of this host' }];
   });
-  const portsOf = new Map<string, readonly number[] | undefined>();
-  for (const entry of engagement.allow) {
-    if (entry.kind === 'host') portsOf.set(entry.host, entry.ports);
-  }
   // A cidr allows the name's ports when it has no ports, or all of them; a denied one makes the
   // address unreachable whatever the ports.
   const covers = (cidrPorts: readonly number[] | undefined, ports: readonly number[] | undefined) =>
     cidrPorts === undefined || ports?.every((port) => cidrPorts.includes(port)) === true;
-  for (const [host, found] of addresses) {
-    const ports = portsOf.get(host);
-    for (const address of found) {
+  // Each entry of a name on its own, with its own ports: a name can appear more than once, and the
+  // scope authorizes every one of its entries.
+  const refused = new Set<string>();
+  for (const entry of engagement.allow) {
+    if (entry.kind !== 'host') continue;
+    for (const address of addresses.get(entry.host) ?? []) {
       const network = parseNetwork(address) as Network;
       const internal = [...own, ...INTERNAL].find((range) => holds(range.network, network));
       if (internal === undefined) continue;
       const named =
         engagement.deny.some((cidr) => holds(cidr, network)) ||
         engagement.allow.some(
-          (entry) =>
-            entry.kind === 'network' && holds(entry.network, network) && covers(entry.ports, ports),
+          (cidr) =>
+            cidr.kind === 'network' &&
+            holds(cidr.network, network) &&
+            covers(cidr.ports, entry.ports),
         );
-      if (!named) failures.push(`${host} resolves to ${address} (${internal.what})`);
+      if (!named) refused.add(`${entry.host} resolves to ${address} (${internal.what})`);
     }
   }
+  failures.push(...refused);
   if (failures.length > 0) {
     return {
       ok: false,

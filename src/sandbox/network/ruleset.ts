@@ -287,9 +287,10 @@ export const rulesetFor = (
   const output = [
     'oif "lo" accept',
     ...times.map((time) => `${time} goto refuse`),
-    NDP_OUT,
-    // A routing header sends the packet on to addresses past the one the rules match.
+    // A routing header sends the packet on to addresses past the one the rules match: refused
+    // in both directions, before anything else.
     'meta nfproto ipv6 exthdr rt exists goto refuse',
+    NDP_OUT,
     'ip daddr @deny4 goto refuse',
     'ip6 daddr @deny6 goto refuse',
     `ip daddr . tcp dport @tcp4 ${pass}`,
@@ -309,15 +310,20 @@ export const rulesetFor = (
     rate === undefined
       ? []
       : [
+          // A flow the meter counted already: a UDP flow nothing answered stays new for each of its
+          // datagrams, which are not new connections. The mark is the ruleset's; nothing in the
+          // sandbox can set it.
+          'ct mark 0x00000001 accept',
           `ct state new meta nfproto ipv4 update @new4 { ip daddr limit rate over ${rate}/second burst ${rate} packets } goto refuse`,
           'ct state new meta nfproto ipv4 ip daddr != @new4 goto refuse',
           `ct state new meta nfproto ipv6 update @new6 { ip6 daddr limit rate over ${rate}/second burst ${rate} packets } goto refuse`,
           'ct state new meta nfproto ipv6 ip6 daddr != @new6 goto refuse',
-          'accept',
+          'ct mark set 0x00000001 accept',
         ];
   const input = [
     'iif "lo" accept',
     ...times.map((time) => `${time} drop`),
+    'meta nfproto ipv6 exthdr rt exists drop',
     NDP_IN,
     'ip saddr @deny4 drop',
     'ip6 saddr @deny6 drop',

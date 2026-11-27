@@ -166,15 +166,23 @@ describe('the ruleset of a scope', () => {
     expect(at('meta nfproto ipv6 exthdr rt exists goto refuse')).toBeLessThan(
       at('ip6 daddr . tcp dport @tcp6 goto admit'),
     );
-    // With a rate, what the scope authorizes is metered, and only that; a meter that could not
-    // take the address refuses, and the next of it accepts.
-    expect(lines.slice(at('chain admit {') + 1, at('chain admit {') + 6)).toEqual([
+    // With a rate, what the scope authorizes is metered, and only that, once for each flow; a
+    // meter that could not take the address refuses.
+    expect(lines.slice(at('chain admit {') + 1, at('chain admit {') + 7)).toEqual([
+      'ct mark 0x00000001 accept',
       'ct state new meta nfproto ipv4 update @new4 { ip daddr limit rate over 20/second burst 20 packets } goto refuse',
       'ct state new meta nfproto ipv4 ip daddr != @new4 goto refuse',
       'ct state new meta nfproto ipv6 update @new6 { ip6 daddr limit rate over 20/second burst 20 packets } goto refuse',
       'ct state new meta nfproto ipv6 ip6 daddr != @new6 goto refuse',
-      'accept',
+      'ct mark set 0x00000001 accept',
     ]);
+    // A routing header is refused first in both directions, before neighbour discovery.
+    expect(at('meta nfproto ipv6 exthdr rt exists goto refuse')).toBeLessThan(
+      at('icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit }'),
+    );
+    expect(at('meta nfproto ipv6 exthdr rt exists drop')).toBeLessThan(
+      at('icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert }'),
+    );
     expect(lines.filter((line) => line.includes('update @new4'))).toHaveLength(1);
     // Without a rate, what the scope authorizes is accepted at once.
     expect(generate({ allow: [], deny: [] }).join('')).toContain(
@@ -995,6 +1003,74 @@ describe.if(networkTestsRun && process.platform === 'linux')('the network of a s
     await sandbox.ended;
     expect(existsSync(join(sandbox.marker, 'ran'))).toBe(false);
   }, 60_000);
+});
+
+// The ruleset alone, in a namespace of its own with an interface that answers nothing: what its
+// rules do to real packets, which the sandbox's tests reach only through pasta.
+describe.if(networkTestsRun && process.platform === 'linux')('the ruleset on real packets', () => {
+  const inNamespace = (scope: Scope, python: string): string => {
+    const tools = networkTools() as NetworkTools;
+    const dir = mkdtempSync(join(tmpdir(), 'nullrivet-ruleset-'));
+    try {
+      const scripts = rulesetFor(scope, 'nullrivet_a', null).map((text, index) => {
+        const path = join(dir, `${index}.nft`);
+        writeFileSync(path, text);
+        return path;
+      });
+      writeFileSync(join(dir, 'client.py'), python);
+      const setup = [
+        'ip link add d0 type dummy && ip link set d0 up',
+        'ip addr add 10.9.0.1/16 dev d0 && ip -6 addr add fd00:99::1/64 dev d0 nodad',
+        `for script in ${scripts.join(' ')}; do ${tools.nft} -f "$script" || exit 1; done`,
+        `python3 -I ${join(dir, 'client.py')}`,
+      ].join(' && ');
+      const run = Bun.spawnSync(
+        [tools.unshare, '--user', '--map-root-user', '--net', tools.sh, '-c', setup],
+        { env: { PATH: '/usr/bin:/usr/sbin:/bin:/sbin', TZ: 'UTC' } },
+      );
+      if (run.exitCode !== 0) throw new Error(run.stderr.toString());
+      return run.stdout.toString().trim();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  test('refuses a packet with an IPv6 routing header to an authorized destination', () => {
+    const result = inNamespace(
+      { allow: [{ network: net('fd00:99::/64') }], deny: [] },
+      [
+        'import socket, ipaddress',
+        'def send(header):',
+        '    s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)',
+        '    if header: s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_RTHDR, header)',
+        '    try: s.sendto(b"x", ("fd00:99::2", 9)); return "sent"',
+        '    except OSError as e: return type(e).__name__',
+        // Segment routing, which an unprivileged process may set: the packet goes to the first
+        // segment, which the rules see, and on to the last, which they do not.
+        'segments = [ipaddress.IPv6Address(a).packed for a in ("fd00:98::1", "fd00:99::2")]',
+        'header = bytes([0, 4, 4, 1, 1, 0, 0, 0]) + b"".join(segments)',
+        'print(send(None), send(header))',
+      ].join('\n'),
+    );
+    expect(result).toBe('sent PermissionError');
+  });
+
+  test('counts a flow once against the rate, however many datagrams it sends unanswered', () => {
+    const result = inNamespace(
+      { allow: [{ network: net('10.9.0.0/16') }], deny: [], newConnectionsPerSecond: 2 },
+      [
+        'import socket',
+        'def send(address, sock=None):',
+        '    s = sock or socket.socket(socket.AF_INET, socket.SOCK_DGRAM)',
+        '    try: s.sendto(b"x", (address, 9)); return 1',
+        '    except OSError: return 0',
+        'one = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)',
+        'print(sum(send("10.9.1.1", one) for _ in range(10)), sum(send("10.9.1.2") for _ in range(10)))',
+      ].join('\n'),
+    );
+    // One flow: its ten datagrams. Ten flows, one socket each: two, the rate.
+    expect(result).toBe('10 2');
+  });
 });
 
 describe.if(networkTestsRun && process.platform === 'linux')('the window of a scope', () => {

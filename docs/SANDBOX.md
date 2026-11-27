@@ -662,9 +662,14 @@ sidecar container sharing the locked namespace could not download nftables to ap
   set full makes nft's update do nothing, and the rule would not match: the next rule refuses a new
   connection to an address the meter does not hold. Tested: 70,000 datagrams to destinations out
   of scope, then ten connections to one in scope at two a second: two or three passed. Without
-  this, the refused flood filled the meter and the limit held no more, as a review measured.
-- A packet with an IPv6 routing header is refused: it goes on to addresses past the one the rules
-  match.
+  this, the refused flood filled the meter and the limit held no more, as a review measured. A
+  flow is counted once: conntrack keeps a UDP flow nothing answered new for each of its datagrams,
+  so the first one the meter lets through marks the flow (`ct mark`), which the sandbox cannot set,
+  and the rest of it passes the meter. Tested on real packets: one flow sent its ten datagrams,
+  and ten flows two of theirs, at two a second.
+- A packet with an IPv6 routing header is refused in both directions, before anything else but
+  the loopback and the window: it goes on to addresses past the one the rules match. Tested on a
+  real packet with a segment routing header, which an unprivileged process can set.
 
 ### Revoking a destination
 
@@ -858,7 +863,8 @@ refused.
   ports. The sandbox's `/etc/hosts` holds the loopback and each name with its addresses.
 - A name that resolves to an address off the public internet stops the session too, unless a `cidr`
   of the file holds that address: in `deny`, or in `allow` with every port of the name, so that an
-  answer cannot open ports the `cidr` does not. An authorization by name must not reach the inside
+  answer cannot open ports the `cidr` does not. Each entry of a name is held to it with its own
+  ports, a name given twice included. An authorization by name must not reach the inside
   by an answer of DNS, as a cloud's metadata service at `169.254.169.254`. These are the
   unspecified, private, shared, loopback, link-local, multicast and reserved ranges of IPv4; of
   IPv6 the unspecified and loopback addresses, the IPv4-compatible, IPv4-mapped, NAT64
