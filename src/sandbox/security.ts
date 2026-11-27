@@ -59,6 +59,8 @@ export interface SecurityOptions {
   now?: () => Date;
   // Gives up a start still under way, as an interrupt does.
   signal?: AbortSignal;
+  // For tests: how long the network's preparation may take, thirty seconds otherwise.
+  prepareTimeoutMs?: number;
 }
 
 export interface RefreshReport {
@@ -165,8 +167,12 @@ export class SecuritySession implements EngagementWindow {
     const etc = join(directory.path, 'etc');
     let control: NetworkControl | null = null;
     let preparing: Promise<void> = Promise.resolve();
+    // Given up with the start: the preparation's helpers are killed, so the undoing that waits for
+    // it does not outlast the start's time by theirs.
+    const abandon = new AbortController();
     const undo = async (): Promise<void> => {
-      // A preparation the start stopped waiting for may still run: what it made is ended after.
+      abandon.abort();
+      // What the preparation made is ended once it has stopped.
       await preparing.catch(() => undefined);
       await control?.dispose().catch(() => undefined);
       try {
@@ -202,6 +208,7 @@ export class SecuritySession implements EngagementWindow {
               unit,
               limits: PASTA_LIMITS,
             },
+            signal: abandon.signal,
           },
         );
         // Checked again right before the release: the start can take longer than the window.
@@ -221,6 +228,9 @@ export class SecuritySession implements EngagementWindow {
         jobs: true,
         prepare,
         ...(options.signal === undefined ? {} : { signal: options.signal }),
+        ...(options.prepareTimeoutMs === undefined
+          ? {}
+          : { prepareTimeoutMs: options.prepareTimeoutMs }),
       });
     } catch (error) {
       await undo();
@@ -346,7 +356,12 @@ export class SecuritySession implements EngagementWindow {
   private tick(): void {
     if (this.closing !== null) return;
     if (!this.ending.signal.aborted && windowState(this.engagement, this.now()) === 'after') {
-      void this.end();
+      void this.end().catch((error: unknown) =>
+        this.options.notice(
+          'warning',
+          `the end of the engagement window failed: ${errorMessage(error)}`,
+        ),
+      );
     }
     const failure = this.control.failure();
     if (failure !== null && !this.reportedFailure && !this.ending.signal.aborted) {
@@ -361,16 +376,21 @@ export class SecuritySession implements EngagementWindow {
     if (this.ending.signal.aborted) return;
     this.ending.abort();
     const until = iso((this.engagement.window as { until: Date }).until);
-    const network = this.control.close();
+    // Each step is taken whatever the others did, and every failure is told.
     const problems: string[] = [];
+    const network = this.control.close().catch((error: unknown) => {
+      problems.push(errorMessage(error));
+    });
     try {
       await this.backend.stopJobs();
     } catch (error) {
       problems.push(errorMessage(error));
       // Jobs that could not be confirmed ended go with the worker.
-      await this.backend.close();
+      await this.backend.close().catch((closing: unknown) => {
+        problems.push(`the worker could not be closed: ${errorMessage(closing)}`);
+      });
     }
-    await network.catch((error: unknown) => problems.push(errorMessage(error)));
+    await network;
     this.options.notice(
       problems.length === 0 ? 'info' : 'warning',
       `The engagement window ended at ${until}: the network is closed, commands are refused, and the running ones were stopped.${problems.length === 0 ? '' : ` ${problems.join('; ')}`}`,

@@ -4,6 +4,7 @@ import { errorMessage } from '../../errors.ts';
 import { cgroupLimits, type Limits, missingLimits } from '../limits.ts';
 import {
   enterArgs,
+  GIVEN_UP,
   HELPER_ENV,
   holdsNetwork,
   type Namespaces,
@@ -204,6 +205,7 @@ export class Pasta {
     namespaces: Namespaces,
     address?: PastaAddress,
     scope?: PastaScope,
+    signal?: AbortSignal,
   ): Promise<Pasta> {
     const { pid } = namespaces;
     if (!holdsNetwork(namespaces)) {
@@ -242,14 +244,18 @@ export class Pasta {
     });
     const pasta = new Pasta(child, scope);
     try {
-      await pasta.ready(tools, namespaces);
+      await pasta.ready(tools, namespaces, signal);
     } catch (error) {
       await pasta.discard(error);
     }
     return pasta;
   }
 
-  private async ready(tools: NetworkTools, namespaces: Namespaces): Promise<void> {
+  private async ready(
+    tools: NetworkTools,
+    namespaces: Namespaces,
+    signal?: AbortSignal,
+  ): Promise<void> {
     const { pid } = namespaces;
     const deadline = Date.now() + READY_TIMEOUT_MS;
     let ended: string | null = null;
@@ -258,6 +264,7 @@ export class Pasta {
     });
     while (!configured(pid)) {
       if (ended !== null) throw new Error(ended);
+      if (signal?.aborted === true) throw new Error(GIVEN_UP);
       if (Date.now() > deadline) {
         throw new Error(`pasta did not configure the namespace within ${READY_TIMEOUT_MS} ms`);
       }
@@ -269,7 +276,7 @@ export class Pasta {
     await Bun.sleep(SETTLE_MS);
     if (ended !== null) throw new Error(ended);
     const [v4 = '', v6 = ''] = (
-      await runInNamespaces(tools, namespaces, [tools.sh, '-c', ROUTES])
+      await runInNamespaces(tools, namespaces, [tools.sh, '-c', ROUTES], '', signal)
     ).split('--\n');
     if (!holdsNetwork(namespaces) || !routedOut(v4, v6)) {
       throw new Error('pasta did not configure the network namespace pinned');

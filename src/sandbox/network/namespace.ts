@@ -157,19 +157,26 @@ export const HELPER_ENV: Record<string, string> = {
 };
 
 const HELPER_TIMEOUT_MS = 10_000;
+export const GIVEN_UP = 'the preparation of the network was given up';
 const SHOWN_ERROR_CHARS = 500;
 // A listing of a scope of many networks runs to megabytes.
 const MAX_OUTPUT_CHARS = 64 * 1024 * 1024;
 
 // Runs a program in the namespaces, with `input` on its stdin, and resolves with its output; rejects
-// with its error output when it fails or does not end within the timeout.
+// with its error output when it fails, does not end within the timeout, or `signal` gives it up, which
+// kills it at once.
 export const runInNamespaces = (
   tools: NetworkTools,
   namespaces: Namespaces,
   argv: readonly string[],
   input = '',
+  signal?: AbortSignal,
 ): Promise<string> =>
   new Promise((resolve, reject) => {
+    if (signal?.aborted === true) {
+      reject(new Error(GIVEN_UP));
+      return;
+    }
     const [file, ...args] = [...enterArgs(tools, namespaces), ...argv];
     const child = spawn(file as string, args, { stdio: ['pipe', 'pipe', 'pipe'], env: HELPER_ENV });
     let stdout = '';
@@ -181,16 +188,23 @@ export const runInNamespaces = (
       if (stderr.length < SHOWN_ERROR_CHARS) stderr += chunk.toString();
     });
     const timer = setTimeout(() => child.kill('SIGKILL'), HELPER_TIMEOUT_MS);
+    const giveUp = (): void => {
+      child.kill('SIGKILL');
+    };
+    signal?.addEventListener('abort', giveUp, { once: true });
     child.once('error', (error) => {
       clearTimeout(timer);
+      signal?.removeEventListener('abort', giveUp);
       reject(error);
     });
     // After its output streams closed: the exit can come before their last data.
-    child.once('close', (code, signal) => {
+    child.once('close', (code, ended) => {
       clearTimeout(timer);
+      signal?.removeEventListener('abort', giveUp);
       if (code === 0) resolve(stdout);
+      else if (signal?.aborted === true) reject(new Error(GIVEN_UP));
       else {
-        const how = signal === null ? `code ${code}` : signal;
+        const how = ended === null ? `code ${code}` : ended;
         reject(
           new Error(`${argv[0]} failed (${how}): ${stderr.trim().slice(0, SHOWN_ERROR_CHARS)}`),
         );

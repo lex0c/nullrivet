@@ -295,7 +295,7 @@ describe.if(linux && runs)('a sandbox of the security profile', () => {
     for (const nft of [tools.nft, hanging]) {
       const [ok, other] = [await listening(), await listening()];
       let delay = 0;
-      const window = endingIn(4);
+      const window = endingIn(6);
       const until = new Date(window.until).getTime();
       const { session, run } = await start(
         {
@@ -316,11 +316,18 @@ describe.if(linux && runs)('a sandbox of the security profile', () => {
         },
       );
       // Out of every job and command: neither their cancellation nor the stop of the jobs ends it.
-      // Each connection is stamped with the time it was tried, before it.
-      // The command waits for it to leave its group, which is killed when the command ends.
-      await run('bash', {
-        command: `setsid sh -c 'while :; do t=$(date +%s.%N); (exec 3<>/dev/tcp/${host()}/${ok}) 2>/dev/null && echo $t >> /tmp/reached; sleep 0.05; done' >/dev/null 2>&1 </dev/null & sleep 0.5`,
+      // Each connection is stamped with the time it was tried, before it. bash, whose /dev/tcp
+      // connects: sh can be dash, which has none. The command returns once five connections
+      // succeeded, with their count: what reaches its target before the end must be shown, or no
+      // refusal after it would mean anything.
+      const ready = await run('bash', {
+        command: [
+          `setsid bash -c 'while :; do t=$(date +%s.%N); (exec 3<>/dev/tcp/${host()}/${ok}) 2>/dev/null && echo $t >> /tmp/reached; sleep 0.05; done' >/dev/null 2>&1 </dev/null &`,
+          'for i in $(seq 60); do [ "$(cat /tmp/reached 2>/dev/null | wc -l)" -ge 5 ] && break; sleep 0.05; done',
+          'echo "reached $(cat /tmp/reached 2>/dev/null | wc -l)"',
+        ].join('\n'),
       });
+      expect(Number(/reached (\d+)/.exec(ready)?.[1])).toBeGreaterThanOrEqual(5);
       await Bun.sleep(until - Date.now() - 1_000);
       delay = 2_500;
       const refreshing = session.refresh();
@@ -374,6 +381,34 @@ describe.if(linux && runs)('a sandbox of the security profile', () => {
     expect(activeUnits(`nullrivet-pasta-${process.pid}-`)).toEqual([]);
     const answered = await refreshing;
     expect(answered).toEqual({ error: 'the sandbox was closed' });
+  }, 60_000);
+
+  test('gives up a preparation that hangs within its time, its helpers killed, nothing left', async () => {
+    const ok = await listening();
+    const tools = networkTools() as NetworkTools;
+    const hang = `sleep 61.${process.pid % 1000}`;
+    // An nft that hangs, deaf to SIGTERM.
+    const nft = join(scratch, 'deaf-nft');
+    writeFileSync(nft, `#!/bin/sh\ntrap '' TERM\nexec ${hang}\n`, { mode: 0o755 });
+    const launch = await launchOptions();
+    const before = sandboxDirectories();
+    const started = Date.now();
+    const result = await SecuritySession.start({
+      host: launch.host,
+      launch,
+      env: process.env,
+      notice: () => undefined,
+      address: ADDRESS,
+      engagementPath: engagementFile({ scope: { allow: [{ cidr: `${host()}/32`, ports: [ok] }] } }),
+      tools: { ...tools, nft },
+      prepareTimeoutMs: 1_000,
+    });
+    expect('error' in result ? result.error : 'started').toContain('not prepared within 1 s');
+    // The start's time, and not the ten seconds a helper has.
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(Bun.spawnSync(['pgrep', '-f', hang]).exitCode).toBe(1);
+    expect(sandboxDirectories()).toEqual(before);
+    expect(activeUnits(`nullrivet-pasta-${process.pid}-`)).toEqual([]);
   }, 60_000);
 
   test('does not start when its window has ended, nor leaves anything of a start that failed', async () => {

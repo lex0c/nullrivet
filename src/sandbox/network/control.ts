@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, statfsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import {
+  GIVEN_UP,
   HELPER_ENV,
   inNewNamespaces,
   type Namespaces,
@@ -49,6 +50,8 @@ export interface NetworkOptions {
   address?: PastaAddress;
   // A scope of its own for pasta.
   pasta?: PastaScope;
+  // Gives up the preparation: its helpers are killed, and what it made undone.
+  signal?: AbortSignal;
 }
 
 const GROUP_RANGE = '/proc/sys/net/ipv4/ping_group_range';
@@ -82,21 +85,28 @@ export class NetworkControl {
     scope: Scope,
     options: NetworkOptions = {},
   ): Promise<NetworkControl> {
+    const { signal } = options;
     let pasta: Pasta;
     try {
       const [first] = SCOPE_TABLES;
-      await install(tools, namespaces, NOTHING, first, null);
+      await install(tools, namespaces, NOTHING, first, null, signal);
       // Every group of the namespace, which maps only the user's: its processes may open ICMP
       // echo sockets. The range is read in the namespace's ids.
-      await runInNamespaces(tools, namespaces, [tools.sh, '-c', `printf '0 0' > ${GROUP_RANGE}`]);
-      pasta = await Pasta.start(tools, namespaces, options.address, options.pasta);
+      await runInNamespaces(
+        tools,
+        namespaces,
+        [tools.sh, '-c', `printf '0 0' > ${GROUP_RANGE}`],
+        '',
+        signal,
+      );
+      pasta = await Pasta.start(tools, namespaces, options.address, options.pasta, signal);
     } catch (error) {
       releaseNamespaces(namespaces);
       throw error;
     }
     const control = new NetworkControl(tools, namespaces, pasta, SCOPE_TABLES[0]);
     try {
-      await control.replace(scope);
+      await control.replace(scope, signal);
     } catch (error) {
       const closed = await control.dispose().then(
         () => null,
@@ -115,13 +125,13 @@ export class NetworkControl {
 
   // Replaces the ruleset with `scope`'s, in one transaction, and checks it, after the
   // installations before it. Refused once the network is closed. One that fails closes it.
-  replace(scope: Scope): Promise<void> {
+  replace(scope: Scope, signal?: AbortSignal): Promise<void> {
     if (this.closing !== null) return Promise.reject(new Error('the network was closed'));
     return this.serial(async () => {
       if (this.closing !== null) throw new Error('the network was closed');
       try {
         const next = SCOPE_TABLES.find((table) => table !== this.active) as ScopeTable;
-        await install(this.tools, this.namespaces, scope, next, this.active);
+        await install(this.tools, this.namespaces, scope, next, this.active, signal);
         this.active = next;
       } catch (error) {
         if (this.closing !== null) throw new Error('the network was closed');
@@ -233,8 +243,16 @@ export const normalizedListing = (listed: string): string => {
 
 // What a namespace that holds nothing else lists once `text` is installed in it: the same text as
 // nft parses it and the kernel holds it, to compare with.
-const reference = (tools: NetworkTools, paths: readonly string[]): Promise<string> =>
+const reference = (
+  tools: NetworkTools,
+  paths: readonly string[],
+  signal?: AbortSignal,
+): Promise<string> =>
   new Promise((resolve, reject) => {
+    if (signal?.aborted === true) {
+      reject(new Error(GIVEN_UP));
+      return;
+    }
     const [file, ...args] = inNewNamespaces(tools, [
       tools.sh,
       '-c',
@@ -255,14 +273,21 @@ const reference = (tools: NetworkTools, paths: readonly string[]): Promise<strin
       if (stderr.length < 500) stderr += chunk.toString();
     });
     const timer = setTimeout(() => child.kill('SIGKILL'), 10_000);
+    const giveUp = (): void => {
+      child.kill('SIGKILL');
+    };
+    signal?.addEventListener('abort', giveUp, { once: true });
     child.once('error', (error) => {
       clearTimeout(timer);
+      signal?.removeEventListener('abort', giveUp);
       reject(error);
     });
     // After its output streams closed: the exit can come before their last data.
     child.once('close', (code) => {
       clearTimeout(timer);
+      signal?.removeEventListener('abort', giveUp);
       if (code === 0) resolve(stdout);
+      else if (signal?.aborted === true) reject(new Error(GIVEN_UP));
       else reject(new Error(`the reference ruleset could not be made: ${stderr.trim()}`));
     });
     child.stdin.on('error', () => undefined);
@@ -279,14 +304,17 @@ const install = async (
   scope: Scope,
   table: ScopeTable,
   previous: ScopeTable | null,
+  signal?: AbortSignal,
 ): Promise<void> => {
   await withScripts(rulesetFor(scope, table, previous), async (paths) => {
-    for (const path of paths) await runInNamespaces(tools, namespaces, [tools.nft, '-f', path]);
+    for (const path of paths) {
+      await runInNamespaces(tools, namespaces, [tools.nft, '-f', path], '', signal);
+    }
     // Both settle before either fails: a helper still starting must not outlive the namespaces'
     // descriptors, which a failure releases.
     const [listed, made] = await Promise.allSettled([
-      runInNamespaces(tools, namespaces, [tools.nft, '-j', 'list', 'ruleset']),
-      reference(tools, paths),
+      runInNamespaces(tools, namespaces, [tools.nft, '-j', 'list', 'ruleset'], '', signal),
+      reference(tools, paths, signal),
     ]);
     if (listed.status === 'rejected') throw listed.reason;
     if (made.status === 'rejected') throw made.reason;
