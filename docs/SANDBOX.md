@@ -596,7 +596,9 @@ process never joins them, so the agent loop and the providers keep the host's ne
    namespace its way out, still closed; install the scope's ruleset in one transaction, and check
    that the kernel holds exactly what was written: what it lists, without handles, must equal what
    a namespace that holds nothing else lists once the same text is installed in it, every table,
-   chain, set and rule included.
+   chain, set, element and rule included, the elements the traffic adds to the rate limit's sets
+   aside. The text goes to nft in a file of a directory only the user can read: an argument is
+   limited to 128 KiB, and nftables 1.0.9 cannot read a script from a pipe.
 3. Only then is the worker released, by writing to the block descriptor. A step that fails ends
    the sandbox unreleased. Bubblewrap reads the descriptor once and goes on at its end as well, so
    a host that dies mid-way does not hold it back: what holds is the ruleset that authorizes
@@ -632,16 +634,23 @@ sidecar container sharing the locked namespace could not download nftables to ap
 ### Revoking a destination
 
 The scope's installations run one after another, two transactions being each atomic but not
-ordered, and each replaces the scope's table alone. Revoking does not wait its turn among them:
-it adds, at once, a table of its own that stops all but the loopback, at a priority before the
-scope's. A packet must pass every base chain of its hook, and no installation of a scope touches
-that table, so an installation under way cannot authorize anything again once it is there, even
-for an instant. Should it fail to go in, pasta ends, which leaves the namespace without a way out.
-An installation that fails, or that the kernel does not hold as written, revokes the network.
-Tested with a client connecting every 50 ms while an nft slowed down lands its installation after
-the revocation: no connection passed from the moment of the revocation. Also tested: an nft that
-installs something else than it was given, and one that cannot list the ruleset, both revoke the
-network.
+ordered, and each replaces the scope's table alone. Closing waits for none of them, nor for a
+helper: pasta ends at once, which leaves the namespace without a way out, and beside it a table of
+its own goes in that stops all but the loopback, at a priority before the scope's. A packet must
+pass every base chain of its hook, and no installation of a scope touches that table. An
+installation that fails, or that the kernel does not hold as written, closes the network. Tested
+with a client connecting every 50 ms: nothing passed from the moment of the close, while an nft
+slowed down landed its installation after it, and while an nft hung installing the closing table;
+an nft that installs something else than it was given, and one that cannot list the ruleset, both
+close the network; traffic that fills the rate limit's sets does not.
+
+The destinations are elements of interval sets, a network with a port for TCP and UDP, so the
+rules stay few whatever the scope's size; networks inside others are left out, since an interval
+set refuses overlaps. A transaction is limited by the host's socket buffer (`wmem_max`, 208 KiB
+by default), which a user namespace cannot raise: a scope of more than a thousand elements goes
+in several, the first replacing the table with part of them, the others adding the rest, so what
+they authorize along the way is part of the scope, never more. Tested with three thousand
+networks.
 
 The scope can shrink during a session: `/scope refresh` drops an address a name no longer resolves
 to, and the window ends. A connection opened earlier must not outlive its authorization, as it

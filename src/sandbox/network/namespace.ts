@@ -101,7 +101,8 @@ export const HELPER_ENV: Record<string, string> = { PATH: '/usr/bin:/usr/sbin:/b
 
 const HELPER_TIMEOUT_MS = 10_000;
 const SHOWN_ERROR_CHARS = 500;
-const MAX_OUTPUT_CHARS = 1024 * 1024;
+// A listing of a scope of many networks runs to megabytes.
+const MAX_OUTPUT_CHARS = 64 * 1024 * 1024;
 
 // Runs a program in the namespaces of `pid`, with `input` on its stdin, and resolves with its
 // output; rejects with its error output when it fails or does not end within the timeout.

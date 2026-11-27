@@ -8,6 +8,12 @@ import { isIPv4, isIPv6 } from 'node:net';
 // refused at its connection's next packet. What is refused gets a TCP reset or an ICMP
 // "administratively prohibited", so a tool reports it at once instead of waiting for a timeout.
 //
+// The destinations are elements of interval sets, a network with a port for TCP and UDP, so the
+// rules stay few whatever the scope's size. A transaction is limited by the host's socket buffer,
+// which a user namespace cannot raise: a large scope goes in several, the first replacing the
+// table with part of the elements, the others adding the rest. What they authorize along the way
+// is part of the scope, never more.
+//
 // Every address and port in the text comes from this module's own formatting of parsed values:
 // nothing given as text reaches nft as it was written.
 
@@ -94,19 +100,10 @@ const checkNetwork = (network: Network): string => {
   return `${parsed.address}/${parsed.prefix}`;
 };
 
-const portList = (ports: readonly number[]): string => {
-  if (ports.length === 0 || !ports.every(isPort)) {
-    throw new Error('ports must be integers from 1 to 65535, at least one');
-  }
-  return `{ ${[...new Set(ports)].sort((a, b) => a - b).join(', ')} }`;
-};
-
 const REFUSE_RULES = [
   'meta l4proto tcp reject with tcp reset',
   'reject with icmpx admin-prohibited',
 ];
-
-const ip = (family: 4 | 6): string => (family === 4 ? 'ip' : 'ip6');
 
 // Neighbor discovery on the link to the gateway: IPv6 does not work without it, and packets with
 // a hop limit of 255 never left the link.
@@ -117,6 +114,8 @@ const NDP_IN =
 
 export const TABLE = 'nullrivet';
 export const CLOSED_TABLE = 'nullrivet_closed';
+// The sets of the rate limit, whose elements the traffic adds.
+export const DYNAMIC_SETS: readonly string[] = ['new4', 'new6'];
 
 // The table that closes the network for good, apart from the scope's and before it: a packet must
 // pass every base chain of its hook, so this one stops all but the loopback's, whatever the
@@ -136,68 +135,160 @@ export const CLOSED_RULESET = [
   '',
 ].join('\n');
 
-// The scope's table, as one nft transaction that replaces it whole or not at all.
-export const rulesetFor = (scope: Scope): string => {
+// Elements a transaction takes at most, well within the host's default socket buffer.
+const ELEMENTS_PER_TRANSACTION = 1000;
+
+interface Member {
+  network: Network;
+  port?: number;
+}
+
+const value = (network: Network): bigint =>
+  network.family === 4 ? v4Value(network.address) : v6Value(network.address);
+
+// The members without those inside another of the same family and port: an interval set refuses
+// elements that overlap, and two networks either nest or do not meet. Sorted by family, port,
+// first address and size, a member is inside another only if it is inside the last one kept.
+const outermost = (members: readonly Member[]): Member[] => {
+  const ranged = members.map((member) => {
+    const bits = member.network.family === 4 ? V4_BITS : V6_BITS;
+    const start = value(member.network);
+    return { member, start, end: start + (1n << (bits - BigInt(member.network.prefix))) - 1n };
+  });
+  ranged.sort(
+    (a, b) =>
+      a.member.network.family - b.member.network.family ||
+      (a.member.port ?? 0) - (b.member.port ?? 0) ||
+      (a.start < b.start ? -1 : a.start > b.start ? 1 : 0) ||
+      a.member.network.prefix - b.member.network.prefix,
+  );
+  const kept: Member[] = [];
+  let last: (typeof ranged)[number] | null = null;
+  for (const entry of ranged) {
+    const sameGroup =
+      last !== null &&
+      last.member.network.family === entry.member.network.family &&
+      last.member.port === entry.member.port;
+    if (sameGroup && last !== null && entry.start <= last.end) continue;
+    kept.push(entry.member);
+    last = entry;
+  }
+  return kept;
+};
+
+interface SetSpec {
+  name: string;
+  type: string;
+  members: Member[];
+}
+
+const element = (member: Member): string =>
+  member.port === undefined
+    ? checkNetwork(member.network)
+    : `${checkNetwork(member.network)} . ${member.port}`;
+
+// The scope's table, as the transactions that install it, in order: the first replaces the table
+// whole or not at all; each of the others adds elements to its sets.
+export const rulesetFor = (scope: Scope): string[] => {
   const rate = scope.newConnectionsPerSecond;
   if (rate !== undefined && !(Number.isInteger(rate) && rate >= 1 && rate <= 1_000_000)) {
     throw new Error('the rate must be an integer number of new connections per second, at least 1');
   }
-  const output: string[] = ['oif "lo" accept', NDP_OUT];
-  const input: string[] = ['iif "lo" accept', NDP_IN];
-  for (const network of scope.deny) {
-    const target = checkNetwork(network);
-    output.push(`${ip(network.family)} daddr ${target} goto refuse`);
-    input.push(`${ip(network.family)} saddr ${target} drop`);
-  }
-  if (rate !== undefined) {
-    output.push(
-      `ct state new meta nfproto ipv4 update @new4 { ip daddr limit rate over ${rate}/second } goto refuse`,
-      `ct state new meta nfproto ipv6 update @new6 { ip6 daddr limit rate over ${rate}/second } goto refuse`,
-    );
-  }
+  const ported: Member[] = [];
+  const any: Member[] = [];
   for (const destination of scope.allow) {
-    const family = destination.network.family;
-    const target = checkNetwork(destination.network);
-    const [echo, reply] =
-      family === 4
-        ? ['icmp type echo-request', 'icmp type echo-reply']
-        : ['icmpv6 type echo-request', 'icmpv6 type echo-reply'];
-    const errors =
-      family === 4
-        ? 'icmp type { destination-unreachable, time-exceeded, parameter-problem }'
-        : 'icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem }';
-    const ports = destination.ports === undefined ? '' : ` dport ${portList(destination.ports)}`;
-    const sports = destination.ports === undefined ? '' : ` sport ${portList(destination.ports)}`;
-    const daddr = `${ip(family)} daddr ${target}`;
-    const saddr = `${ip(family)} saddr ${target}`;
-    output.push(
-      destination.ports === undefined
-        ? `${daddr} meta l4proto tcp accept`
-        : `${daddr} tcp${ports} accept`,
-      destination.ports === undefined
-        ? `${daddr} meta l4proto udp accept`
-        : `${daddr} udp${ports} accept`,
-      `${daddr} ${echo} accept`,
-    );
-    input.push(
-      destination.ports === undefined
-        ? `ct state established ${saddr} meta l4proto tcp accept`
-        : `ct state established ${saddr} tcp${sports} accept`,
-      destination.ports === undefined
-        ? `ct state established ${saddr} meta l4proto udp accept`
-        : `ct state established ${saddr} udp${sports} accept`,
-      `ct state established ${saddr} ${reply} accept`,
-      // Errors about authorized traffic, such as a closed UDP port or a hop limit reached.
-      `ct state related ${saddr} ${errors} accept`,
+    checkNetwork(destination.network);
+    if (destination.ports === undefined) {
+      any.push({ network: destination.network });
+      continue;
+    }
+    if (destination.ports.length === 0 || !destination.ports.every(isPort)) {
+      throw new Error('ports must be integers from 1 to 65535, at least one');
+    }
+    for (const port of new Set(destination.ports))
+      ported.push({ network: destination.network, port });
+  }
+  const family = (members: readonly Member[], wanted: 4 | 6) =>
+    outermost(members.filter((member) => member.network.family === wanted));
+  const echo = scope.allow.map((destination) => ({ network: destination.network }));
+  const deny = scope.deny.map((network) => ({ network }));
+  const sets: SetSpec[] = [];
+  for (const wanted of [4, 6] as const) {
+    const address = wanted === 4 ? 'ipv4_addr' : 'ipv6_addr';
+    sets.push(
+      { name: `deny${wanted}`, type: address, members: family(deny, wanted) },
+      { name: `tcp${wanted}`, type: `${address} . inet_service`, members: family(ported, wanted) },
+      { name: `udp${wanted}`, type: `${address} . inet_service`, members: family(ported, wanted) },
+      { name: `any${wanted}`, type: address, members: family(any, wanted) },
+      { name: `echo${wanted}`, type: address, members: family(echo, wanted) },
     );
   }
-  output.push('goto refuse');
-  const lines = [
+  // The elements, split into transactions of a bounded size.
+  const chunks: { set: string; elements: string[] }[][] = [[]];
+  let count = 0;
+  for (const set of sets) {
+    for (const member of set.members) {
+      if (count === ELEMENTS_PER_TRANSACTION) {
+        chunks.push([]);
+        count = 0;
+      }
+      const chunk = chunks.at(-1) as { set: string; elements: string[] }[];
+      const last = chunk.at(-1);
+      if (last?.set === set.name) last.elements.push(element(member));
+      else chunk.push({ set: set.name, elements: [element(member)] });
+      count += 1;
+    }
+  }
+  const first = new Map((chunks[0] ?? []).map((part) => [part.set, part.elements]));
+  const output = [
+    'oif "lo" accept',
+    NDP_OUT,
+    'ip daddr @deny4 goto refuse',
+    'ip6 daddr @deny6 goto refuse',
+    ...(rate === undefined
+      ? []
+      : [
+          `ct state new meta nfproto ipv4 update @new4 { ip daddr limit rate over ${rate}/second } goto refuse`,
+          `ct state new meta nfproto ipv6 update @new6 { ip6 daddr limit rate over ${rate}/second } goto refuse`,
+        ]),
+    'ip daddr . tcp dport @tcp4 accept',
+    'ip daddr . udp dport @udp4 accept',
+    'ip6 daddr . tcp dport @tcp6 accept',
+    'ip6 daddr . udp dport @udp6 accept',
+    'ip daddr @any4 meta l4proto { tcp, udp } accept',
+    'ip6 daddr @any6 meta l4proto { tcp, udp } accept',
+    'ip daddr @echo4 icmp type echo-request accept',
+    'ip6 daddr @echo6 icmpv6 type echo-request accept',
+    'goto refuse',
+  ];
+  const input = [
+    'iif "lo" accept',
+    NDP_IN,
+    'ip saddr @deny4 drop',
+    'ip6 saddr @deny6 drop',
+    'ct state established ip saddr . tcp sport @tcp4 accept',
+    'ct state established ip saddr . udp sport @udp4 accept',
+    'ct state established ip6 saddr . tcp sport @tcp6 accept',
+    'ct state established ip6 saddr . udp sport @udp6 accept',
+    'ct state established ip saddr @any4 meta l4proto { tcp, udp } accept',
+    'ct state established ip6 saddr @any6 meta l4proto { tcp, udp } accept',
+    'ct state established ip saddr @echo4 icmp type echo-reply accept',
+    'ct state established ip6 saddr @echo6 icmpv6 type echo-reply accept',
+    // Errors about authorized traffic, such as a closed UDP port or a hop limit reached.
+    'ct state related ip saddr @echo4 icmp type { destination-unreachable, time-exceeded, parameter-problem } accept',
+    'ct state related ip6 saddr @echo6 icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem } accept',
+  ];
+  const setLine = (set: SetSpec): string => {
+    const elements = first.get(set.name);
+    return `  set ${set.name} { type ${set.type}; flags interval;${elements === undefined ? '' : ` elements = { ${elements.join(', ')} };`} }`;
+  };
+  const table = [
     // The scope's table alone is replaced, created first so that deleting it never fails: the
     // table that closes the network, once there, stays.
     `add table inet ${TABLE}`,
     `delete table inet ${TABLE}`,
     `table inet ${TABLE} {`,
+    ...sets.map(setLine),
     '  set new4 { type ipv4_addr; size 65536; flags dynamic, timeout; timeout 10s; }',
     '  set new6 { type ipv6_addr; size 65536; flags dynamic, timeout; timeout 10s; }',
     '  chain output {',
@@ -213,6 +304,12 @@ export const rulesetFor = (scope: Scope): string => {
     '  }',
     '}',
     '',
-  ];
-  return lines.join('\n');
+  ].join('\n');
+  const rest = chunks
+    .slice(1)
+    .map(
+      (chunk) =>
+        `${chunk.map((part) => `add element inet ${TABLE} ${part.set} { ${part.elements.join(', ')} }`).join('\n')}\n`,
+    );
+  return [table, ...rest];
 };

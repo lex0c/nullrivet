@@ -73,25 +73,57 @@ describe('the ruleset of a scope', () => {
   });
 
   test('denies before it allows, and accepts an incoming packet only from where it may go', () => {
-    const text = rulesetFor({
-      allow: [{ network: net('203.0.113.0/28'), ports: [443] }],
+    const [text = ''] = rulesetFor({
+      allow: [
+        { network: net('203.0.113.0/28'), ports: [443, 80, 443] },
+        // Inside the network above, for the same port: an interval set refuses the overlap.
+        { network: net('203.0.113.8/30'), ports: [443] },
+        { network: net('2001:db8::/64') },
+      ],
       deny: [net('203.0.113.5')],
       newConnectionsPerSecond: 20,
     });
     const lines = text.split('\n').map((line) => line.trim());
     const at = (start: string) => lines.findIndex((line) => line.startsWith(start));
-    expect(at('ip daddr 203.0.113.5/32 goto refuse')).toBeLessThan(at('ip daddr 203.0.113.0/28'));
+    expect(at('ip daddr @deny4 goto refuse')).toBeLessThan(at('ip daddr . tcp dport @tcp4 accept'));
     expect(at('ct state new meta nfproto ipv4 update @new4')).toBeLessThan(
-      at('ip daddr 203.0.113.0/28'),
+      at('ip daddr . tcp dport @tcp4 accept'),
+    );
+    expect(lines).toContain(
+      'set tcp4 { type ipv4_addr . inet_service; flags interval; elements = { 203.0.113.0/28 . 80, 203.0.113.0/28 . 443 }; }',
+    );
+    expect(lines).toContain(
+      'set any6 { type ipv6_addr; flags interval; elements = { 2001:db8:0:0:0:0:0:0/64 }; }',
+    );
+    expect(lines).toContain(
+      'set deny4 { type ipv4_addr; flags interval; elements = { 203.0.113.5/32 }; }',
     );
     // No rule accepts a packet only because its connection is established.
     for (const line of lines.filter((rule) => rule.includes('ct state established'))) {
-      expect(line).toContain('saddr 203.0.113.0/28');
+      expect(line).toMatch(/saddr( \. (tcp|udp) sport)? @(tcp|udp|any|echo)[46] /);
     }
     expect(lines.filter((line) => line.includes('policy drop;'))).toHaveLength(2);
     // Only the scope's table is replaced: the one that closes the network stays.
     expect(lines.slice(0, 2)).toEqual(['add table inet nullrivet', 'delete table inet nullrivet']);
     expect(text).not.toContain('flush');
+  });
+
+  test('splits a large scope into transactions that only add to the first', () => {
+    const allow = Array.from({ length: 1500 }, (_, i) => ({
+      network: net(`10.${100 + Math.floor(i / 250)}.${i % 250}.0/24`),
+      ports: [443],
+    }));
+    const transactions = rulesetFor({ allow, deny: [] });
+    expect(transactions.length).toBeGreaterThan(1);
+    expect(transactions[0]).toContain('delete table inet nullrivet');
+    for (const later of transactions.slice(1)) {
+      expect(
+        later
+          .split('\n')
+          .filter((line) => line !== '')
+          .every((line) => line.startsWith('add element inet nullrivet ')),
+      ).toBe(true);
+    }
   });
 });
 
@@ -166,8 +198,8 @@ elif mode == 'rate':
         finally: s.close()
     out('rate made', made)
 elif mode == 'watch':
-    end = time.time() + 4
-    while time.time() < end:
+    end = time.time() + 20
+    while time.time() < end and not os.path.exists(os.path.join(marker, 'stop')):
         s = socket.socket(); s.settimeout(0.2)
         try: s.connect((host, int(tcp_ok))); out('reached', time.time())
         except OSError: pass
@@ -473,22 +505,24 @@ describe.if(networkTestsRun && process.platform === 'linux')('the network of a s
     expect(outcome['tcp allowed after']).not.toMatch(/^reply/);
   }, 60_000);
 
-  // An nft that takes a second, once, as a helper slowed down would, and installs something else
-  // than it is given, once, or fails to list.
-  const brokenNft = (behavior: 'slow' | 'tamper' | 'unlisted') => {
-    const dir = mkdtempSync(join(tmpdir(), 'nullrivet-nft-'));
+  // An nft that, once, takes a second to install a scope, as a helper slowed down would, installs
+  // something else than it is given, cannot list the ruleset, or hangs installing the table that
+  // closes the network.
+  const brokenNft = (behavior: 'slow' | 'tamper' | 'unlisted' | 'hang') => {
+    const dir = mkdtempSync(join(tmpdir(), 'nullrivet-nft-test-'));
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
     const once = join(dir, 'once');
     const nft = join(dir, 'nft');
+    const scope = '[ "$1" = -f ] && ! grep -q nullrivet_closed "$2"';
     // When the condition holds, once, the action runs instead of nft.
     const [condition, action] = {
-      slow: ['true', `sleep 1; exec ${t().nft} "$@"`],
-      // An installation is nft with the ruleset as its one argument.
+      slow: [scope, `sleep 1; exec ${t().nft} "$@"`],
       tamper: [
-        '[ "$#" = 1 ]',
-        `exec ${t().nft} "$1\nadd rule inet nullrivet output ip daddr 192.0.2.99 accept"`,
+        scope,
+        `{ cat "$2"; echo 'add element inet nullrivet any4 { 192.0.2.99/32 }'; } > ${dir}/tampered; exec ${t().nft} -f ${dir}/tampered`,
       ],
       unlisted: ['[ "$1" = -j ]', 'exit 1'],
+      hang: ['[ "$1" = -f ] && grep -q nullrivet_closed "$2"', 'exec sleep 30'],
     }[behavior];
     writeFileSync(
       nft,
@@ -498,35 +532,94 @@ describe.if(networkTestsRun && process.platform === 'linux')('the network of a s
     return { tools: { ...t(), nft }, arm: () => writeFileSync(once, '') };
   };
 
-  test('lets nothing through from the moment of a revocation, whatever installation is under way', async () => {
+  const watched = async (
+    behavior: Parameters<typeof brokenNft>[0],
+    scope?: (s: Servers) => Scope,
+  ) => {
     const s = await servers();
     cleanups.push(s.close);
-    const nft = brokenNft('slow');
+    const nft = brokenNft(behavior);
     const sandbox = startSandbox(nft.tools, s, 'watch');
     await Bun.sleep(200);
-    const control = await NetworkControl.prepare(nft.tools, sandbox.pid, hostScope(s), {
+    const control = await NetworkControl.prepare(nft.tools, sandbox.pid, (scope ?? hostScope)(s), {
       address: ADDRESS,
     });
     cleanups.push(() => control.close());
     sandbox.release();
     await sandbox.waitFor('reached');
-    // An installation that lands a second later, after the revocation.
+    const reachedAfter = (seconds: number) =>
+      sandbox.lines.filter(([name, at]) => name === 'reached' && (at as number) > seconds);
+    return { s, nft, sandbox, control, reachedAfter };
+  };
+
+  test('lets nothing through once closed, and keeps it so whatever installation lands after', async () => {
+    const { s, nft, sandbox, control, reachedAfter } = await watched('slow');
+    // An installation that lands a second later, after the close.
     nft.arm();
     const granting = control.replace(hostScope(s));
     await Bun.sleep(100);
-    await control.revoke();
-    const revokedAt = Date.now() / 1000;
-    await expect(control.replace(hostScope(s))).rejects.toThrow('the network was revoked');
+    await control.close();
+    const closedAt = Date.now() / 1000;
+    await expect(control.replace(hostScope(s))).rejects.toThrow('the network was closed');
     await granting.catch(() => undefined);
+    // Beside pasta's end, the table that stops everything, which the late installation left.
+    const held = await runInNamespaces(t(), sandbox.pid, [t().nft, 'list', 'ruleset']);
+    expect(held).toContain('table inet nullrivet_closed');
+    await Bun.sleep(1_500);
+    signal(sandbox, 'stop');
     await sandbox.waitFor('watched');
-    const late = sandbox.lines.filter(
-      ([name, at]) => name === 'reached' && (at as number) > revokedAt + 0.05,
-    );
-    expect(late).toEqual([]);
+    expect(reachedAfter(closedAt + 0.05)).toEqual([]);
     expect(control.failure()).toBeNull();
   }, 60_000);
 
-  test('revokes the network when the kernel does not hold the scope as written', async () => {
+  test('closes at once even when nft hangs installing the table that closes', async () => {
+    const { nft, sandbox, control, reachedAfter } = await watched('hang');
+    nft.arm();
+    const started = Date.now();
+    await control.close();
+    // pasta ended without waiting for the helper, which hangs until its timeout.
+    expect(Date.now() - started).toBeLessThan(2_000);
+    await Bun.sleep(1_500);
+    signal(sandbox, 'stop');
+    await sandbox.waitFor('watched');
+    expect(reachedAfter(started / 1000 + 0.5)).toEqual([]);
+  }, 60_000);
+
+  test('keeps the scope when traffic fills the sets of the rate limit during a replacement', async () => {
+    const { s, sandbox, control, reachedAfter } = await watched('slow', (servers) => ({
+      ...hostScope(servers),
+      newConnectionsPerSecond: 1000,
+    }));
+    const startedAt = Date.now() / 1000;
+    for (let i = 0; i < 3; i++) {
+      await control.replace({ ...hostScope(s), newConnectionsPerSecond: 1000 });
+      await Bun.sleep(200);
+    }
+    expect(control.failure()).toBeNull();
+    await Bun.sleep(1_500);
+    signal(sandbox, 'stop');
+    await sandbox.waitFor('watched');
+    expect(reachedAfter(startedAt + 0.8).length).toBeGreaterThan(0);
+  }, 60_000);
+
+  test('installs a scope of thousands of networks, in several transactions', async () => {
+    const { s, control, sandbox, reachedAfter } = await watched('slow');
+    const networks = Array.from({ length: 3000 }, (_, i) => ({
+      network: net(`10.${100 + Math.floor(i / 250)}.${i % 250}.0/24`),
+      ports: [443],
+    }));
+    const scope = { ...hostScope(s), allow: [...hostScope(s).allow, ...networks] };
+    expect(rulesetFor(scope).length).toBeGreaterThan(1);
+    const installedAt = Date.now() / 1000;
+    await control.replace(scope);
+    expect(control.failure()).toBeNull();
+    await Bun.sleep(1_500);
+    signal(sandbox, 'stop');
+    await sandbox.waitFor('watched');
+    expect(reachedAfter(installedAt + 0.5).length).toBeGreaterThan(0);
+  }, 60_000);
+
+  test('closes the network when the kernel does not hold the scope as written', async () => {
     const s = await servers();
     cleanups.push(s.close);
     for (const behavior of ['tamper', 'unlisted'] as const) {
