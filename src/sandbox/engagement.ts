@@ -39,14 +39,54 @@ export interface ResolvedEngagement {
 }
 
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
+const READ_CHUNK_BYTES = 64 * 1024;
 const MAX_NAME_CHARS = 200;
 const MAX_HOSTS = 1000;
 // Each network or address once per port, or once for every port, and each denied network. Twenty
 // thousand install in about a second; the ninety thousand that 4 MiB can hold pass the time a
 // helper has.
 const MAX_DESTINATIONS = 20_000;
-const LOOKUP_TIMEOUT_MS = 10_000;
 const LOOKUPS_AT_ONCE = 16;
+// How long one name may take, and all of them together: the session waits for them to start.
+const RESOLUTION_LIMITS = { lookupMs: 10_000, totalMs: 30_000 };
+const FAILURES_SHOWN = 10;
+
+// Addresses that are not on the public internet. A name that resolves to one is a mistake, or an
+// answer meant to reach the inside: a cloud's metadata service answers at a link-local address. It
+// is authorized only when a cidr of the file holds it, allowed or denied.
+const INTERNAL: readonly { network: Network; what: string }[] = (
+  [
+    ['0.0.0.0/8', 'unspecified'],
+    ['10.0.0.0/8', 'private'],
+    ['100.64.0.0/10', 'shared'],
+    ['127.0.0.0/8', 'loopback'],
+    ['169.254.0.0/16', 'link-local, where cloud metadata services answer'],
+    ['172.16.0.0/12', 'private'],
+    ['192.0.0.0/24', 'reserved'],
+    ['192.168.0.0/16', 'private'],
+    ['198.18.0.0/15', 'reserved'],
+    ['224.0.0.0/4', 'multicast'],
+    ['240.0.0.0/4', 'reserved'],
+    ['::/128', 'unspecified'],
+    ['::1/128', 'loopback'],
+    ['::ffff:0:0/96', 'IPv4-mapped'],
+    ['fc00::/7', 'private'],
+    ['fec0::/10', 'site-local'],
+    ['fe80::/10', 'link-local'],
+    ['ff00::/8', 'multicast'],
+  ] as const
+).map(([text, what]) => ({ network: parseNetwork(text) as Network, what }));
+
+// Whether `network` holds `address`.
+const holds = (network: Network, address: Network): boolean =>
+  network.family === address.family &&
+  parseNetwork(`${address.address}/${network.prefix}`)?.address === network.address;
+
+const listed = (failures: string[]): string =>
+  [
+    ...failures.sort().slice(0, FAILURES_SHOWN),
+    ...(failures.length > FAILURES_SHOWN ? [`and ${failures.length - FAILURES_SHOWN} more`] : []),
+  ].join('; ');
 
 type Result<T> = { ok: true; value: T } | { ok: false; error: string };
 
@@ -303,10 +343,24 @@ export const readEngagement = async (path: string): Promise<Result<Engagement>> 
       const info = await handle.stat();
       if (!info.isFile())
         return { ok: false, error: `the engagement file is not a regular file: ${path}` };
-      if (info.size > MAX_FILE_BYTES) {
-        return { ok: false, error: `the engagement file is larger than 4 MiB: ${path}` };
+      const tooLarge = {
+        ok: false,
+        error: `the engagement file is larger than 4 MiB: ${path}`,
+      } as const;
+      if (info.size > MAX_FILE_BYTES) return tooLarge;
+      // Read until the end or past the limit, whatever the size said: the file can grow
+      // meanwhile, and a file of /proc says 0 for any size.
+      const chunks: Buffer[] = [];
+      let length = 0;
+      for (;;) {
+        const chunk = Buffer.alloc(READ_CHUNK_BYTES);
+        const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
+        if (bytesRead === 0) break;
+        length += bytesRead;
+        if (length > MAX_FILE_BYTES) return tooLarge;
+        chunks.push(chunk.subarray(0, bytesRead));
       }
-      text = await handle.readFile('utf8');
+      text = Buffer.concat(chunks, length).toString('utf8');
     } finally {
       await handle.close();
     }
@@ -323,12 +377,9 @@ export type LookupAll = (host: string) => Promise<string[]>;
 export const lookupAll: LookupAll = async (host) =>
   (await lookup(host, { all: true, verbatim: true })).map((entry) => entry.address);
 
-const withTimeout = <T>(promise: Promise<T>, ms: number, what: string): Promise<T> =>
+const withTimeout = <T>(promise: Promise<T>, ms: number, message: string): Promise<T> =>
   new Promise((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error(`${what} did not answer within ${ms / 1000} s`)),
-      ms,
-    );
+    const timer = setTimeout(() => reject(new Error(message)), ms);
     promise.then(
       (value) => {
         clearTimeout(timer);
@@ -342,40 +393,67 @@ const withTimeout = <T>(promise: Promise<T>, ms: number, what: string): Promise<
   });
 
 // Resolves the engagement's names with the host's resolver and builds its scope: each address a
-// name resolves to is authorized with that name's ports. A name that resolves to nothing stops the
-// session, as a typing mistake in a target would.
+// name resolves to is authorized with that name's ports. A name that resolves to nothing, or in
+// time, stops the session, as a typing mistake in a target would; so does one that resolves to an
+// address off the public internet that no cidr of the file holds.
 export const resolveEngagement = async (
   engagement: Engagement,
   resolve: LookupAll = lookupAll,
+  limits: { lookupMs: number; totalMs: number } = RESOLUTION_LIMITS,
 ): Promise<Result<ResolvedEngagement>> => {
   const hosts = [
     ...new Set(engagement.allow.flatMap((entry) => (entry.kind === 'host' ? [entry.host] : []))),
   ];
   const addresses = new Map<string, string[]>();
   const failures: string[] = [];
-  for (let start = 0; start < hosts.length; start += LOOKUPS_AT_ONCE) {
-    await Promise.all(
-      hosts.slice(start, start + LOOKUPS_AT_ONCE).map(async (host) => {
-        try {
-          const found = await withTimeout(
-            resolve(host),
-            LOOKUP_TIMEOUT_MS,
-            `the resolver for ${host}`,
-          );
-          // Addresses the ruleset takes: one with a zone, as fe80::1%eth0, is left out.
-          const valid = [...new Set(found.filter((address) => parseNetwork(address) !== null))];
-          if (valid.length === 0) failures.push(`${host}: no address`);
-          else addresses.set(host, valid);
-        } catch (error) {
-          failures.push(`${host}: ${errorMessage(error)}`);
-        }
-      }),
-    );
+  // Each lookup ends by its own limit or by what is left of the whole, so that none is still
+  // running once this returns.
+  const deadline = Date.now() + limits.totalMs;
+  const queue = [...hosts];
+  const lookUp = async (): Promise<void> => {
+    for (let host = queue.shift(); host !== undefined; host = queue.shift()) {
+      const left = deadline - Date.now();
+      const ms = Math.min(limits.lookupMs, left);
+      const message =
+        ms < limits.lookupMs
+          ? `not resolved within the ${limits.totalMs / 1000} s all names have`
+          : `the resolver did not answer within ${limits.lookupMs / 1000} s`;
+      if (ms <= 0) {
+        failures.push(`${host}: ${message}`);
+        continue;
+      }
+      try {
+        const found = await withTimeout(resolve(host), ms, message);
+        // Addresses the ruleset takes: one with a zone, as fe80::1%eth0, is left out.
+        const valid = [...new Set(found.filter((address) => parseNetwork(address) !== null))];
+        if (valid.length === 0) failures.push(`${host}: no address`);
+        else addresses.set(host, valid);
+      } catch (error) {
+        failures.push(`${host}: ${errorMessage(error)}`);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(LOOKUPS_AT_ONCE, hosts.length) }, lookUp));
+  if (failures.length > 0) {
+    return { ok: false, error: `names of the engagement do not resolve: ${listed(failures)}` };
+  }
+  const named = [
+    ...engagement.allow.flatMap((entry) => (entry.kind === 'network' ? [entry.network] : [])),
+    ...engagement.deny,
+  ];
+  for (const [host, found] of addresses) {
+    for (const address of found) {
+      const network = parseNetwork(address) as Network;
+      const internal = INTERNAL.find((range) => holds(range.network, network));
+      if (internal !== undefined && !named.some((cidr) => holds(cidr, network))) {
+        failures.push(`${host} resolves to ${address} (${internal.what})`);
+      }
+    }
   }
   if (failures.length > 0) {
     return {
       ok: false,
-      error: `names of the engagement do not resolve: ${failures.sort().join('; ')}`,
+      error: `names of the engagement resolve to addresses that are not on the public internet, which a cidr of the file must hold to be authorized: ${listed(failures)}`,
     };
   }
   const allow: AllowedDestination[] = engagement.allow.flatMap((entry) => {

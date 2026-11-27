@@ -13,7 +13,7 @@ import {
 } from '../../src/sandbox/engagement.ts';
 import { rulesetFor } from '../../src/sandbox/network/ruleset.ts';
 
-// The example of the documentation, without the evidence log, which is not available yet.
+// The example of the documentation.
 const EXAMPLE = {
   name: 'ACME external test',
   scope: {
@@ -245,6 +245,19 @@ describe('reading the engagement file', () => {
   });
 });
 
+test.skipIf(process.platform !== 'linux')(
+  'reads no more than the limit of a file whose size does not say it',
+  async () => {
+    // A file of /proc that says 0 for its size and holds far more than 4 MiB.
+    const started = Date.now();
+    const read = await readEngagement('/proc/self/pagemap');
+    expect(read.ok ? 'accepted' : read.error).toBe(
+      'the engagement file is larger than 4 MiB: /proc/self/pagemap',
+    );
+    expect(Date.now() - started).toBeLessThan(5_000);
+  },
+);
+
 describe('resolving the engagement', () => {
   const resolver = (answers: Record<string, string[]>) => async (host: string) => {
     const found = answers[host];
@@ -303,6 +316,83 @@ describe('resolving the engagement', () => {
     );
     const fits = await resolveEngagement(parsed({ scope: { allow: allow.slice(1) } }));
     expect(fits.ok).toBe(true);
+  });
+
+  test('stops at a name that resolves off the public internet, unless a cidr of the file holds it', async () => {
+    const answers = {
+      'metadata.example': ['169.254.169.254'],
+      'loopback.example': ['127.0.0.1'],
+      'inside.example': ['198.51.100.8', '10.1.2.3'],
+      'mapped.example': ['::ffff:169.254.169.254'],
+      'cloud6.example': ['fd00:ec2::254'],
+    };
+    const hosts = Object.keys(answers).map((host) => ({ host, ports: [443] }));
+    const refused = await resolveEngagement(parsed({ scope: { allow: hosts } }), resolver(answers));
+    expect(refused.ok ? 'resolved' : refused.error).toBe(
+      'names of the engagement resolve to addresses that are not on the public internet, which a cidr of the file must hold to be authorized: ' +
+        'cloud6.example resolves to fd00:ec2::254 (private); ' +
+        'inside.example resolves to 10.1.2.3 (private); ' +
+        'loopback.example resolves to 127.0.0.1 (loopback); ' +
+        'mapped.example resolves to ::ffff:169.254.169.254 (IPv4-mapped); ' +
+        'metadata.example resolves to 169.254.169.254 (link-local, where cloud metadata services answer)',
+    );
+    // Named by the file: allowed, or denied, which leaves it unreachable.
+    const named = await resolveEngagement(
+      parsed({
+        scope: {
+          allow: [
+            { host: 'inside.example' },
+            { host: 'metadata.example' },
+            { cidr: '10.0.0.0/8', ports: [22] },
+          ],
+          deny: [{ cidr: '169.254.0.0/16' }],
+        },
+      }),
+      resolver(answers),
+    );
+    expect(named.ok ? named.value.names.map((name) => name.addresses) : named.error).toEqual([
+      ['198.51.100.8', '10.1.2.3'],
+      ['169.254.169.254'],
+    ]);
+  });
+
+  test('stops at names not resolved in time, all of them within the time the whole has', async () => {
+    const hosts = Array.from({ length: 40 }, (_, i) => ({
+      host: `slow${String(i).padStart(2, '0')}.example`,
+    }));
+    const started = Date.now();
+    const result = await resolveEngagement(
+      parsed({ scope: { allow: hosts } }),
+      () => new Promise<string[]>(() => undefined),
+      { lookupMs: 200, totalMs: 500 },
+    );
+    expect(Date.now() - started).toBeLessThan(1_000);
+    const error = result.ok ? 'resolved' : result.error;
+    expect(error).toStartWith(
+      'names of the engagement do not resolve: slow00.example: the resolver did not answer within 0.2 s; ',
+    );
+    // Forty failures: ten listed, the rest counted.
+    expect(error).toEndWith('; and 30 more');
+    // A lookup is cut at what is left of the whole, shorter than its own limit.
+    const cut = await resolveEngagement(
+      parsed({ scope: { allow: [{ host: 'slow.example' }] } }),
+      () => new Promise<string[]>(() => undefined),
+      { lookupMs: 5_000, totalMs: 300 },
+    );
+    expect(cut.ok ? 'resolved' : cut.error).toBe(
+      'names of the engagement do not resolve: slow.example: not resolved within the 0.3 s all names have',
+    );
+    const late = await resolveEngagement(
+      parsed({ scope: { allow: hosts } }),
+      async (host) => {
+        await Bun.sleep(host.endsWith('39.example') ? 2_000 : 10);
+        return ['198.51.100.1'];
+      },
+      { lookupMs: 1_000, totalMs: 1_500 },
+    );
+    expect(late.ok ? 'resolved' : late.error).toBe(
+      'names of the engagement do not resolve: slow39.example: the resolver did not answer within 1 s',
+    );
   });
 
   test('stops at names that do not resolve, and names them all', async () => {

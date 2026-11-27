@@ -742,10 +742,12 @@ the wire belong in the virtual machine backend's laboratory profile, not in `sec
     "deny": [{ "cidr": "203.0.113.5/32" }]
   },
   "window": { "from": "2026-11-20T09:00:00-03:00", "until": "2026-11-20T18:00:00-03:00" },
-  "rate": { "newConnectionsPerSecond": 20 },
-  "evidence": { "dir": "./evidence" }
+  "rate": { "newConnectionsPerSecond": 20 }
 }
 ```
+
+The evidence log of phase 5 adds `"evidence": { "dir": "./evidence" }`; until then the field is
+refused.
 
 - `deny` wins over `allow`. A file without `allow` entries leaves the sandbox without network.
 - `rate` applies per destination address.
@@ -767,15 +769,23 @@ the wire belong in the virtual machine backend's laboratory profile, not in `sec
   that ends before it starts; a rate out of 1 to 1,000,000. `deny` takes networks only. `evidence`
   is refused until the evidence log exists, rather than ignored; `name` may not hold control
   characters. The file is opened without blocking, and a FIFO or anything else that is not a regular
-  file is refused. The file may hold 4 MiB and 1,000 host names, and the scope, once resolved,
-  20,000 destinations: each network or address once per port, or once without ports, and each denied
-  network. Twenty thousand install in about a second; the ninety thousand that 4 MiB can hold would
-  pass the time a helper has, ten seconds, and close the network.
-- Host names are compared in lower case, without a final dot, and resolved by the host's
-  resolver when the session starts, every address of both families, ten seconds at most each: a
-  name that resolves to nothing stops the session, with every such name listed, as a mistake in a
-  target would. Each address is authorized with its name's ports. The sandbox's `/etc/hosts`
-  holds the loopback and each name with its addresses.
+  file is refused; a file is read no further than its limit, whatever its size says. The file may
+  hold 4 MiB and 1,000 host names, and the scope, once resolved, 20,000 destinations: each network
+  or address once per port, or once without ports, and each denied network. Twenty thousand install
+  in about a second; the ninety thousand that 4 MiB can hold would pass the time a helper has, ten
+  seconds, and close the network.
+- Host names are compared in lower case, without a final dot, and resolved by the host's resolver
+  when the session starts, every address of both families, sixteen at a time, ten seconds at most
+  each and thirty for all of them, so that no lookup is still running once the session starts. A
+  name that resolves to nothing, or not in time, stops the session, as a mistake in a target would;
+  the error lists ten such names and counts the rest. Each address is authorized with its name's
+  ports. The sandbox's `/etc/hosts` holds the loopback and each name with its addresses.
+- A name that resolves to an address off the public internet stops the session too, unless a `cidr`
+  of the file, in `allow` or in `deny`, holds that address: an authorization by name must not reach
+  the inside by an answer of DNS, as a cloud's metadata service at `169.254.169.254`. These are the
+  unspecified, private, shared, loopback, link-local, multicast and reserved ranges of IPv4, and of
+  IPv6 the unspecified and loopback addresses, the IPv4-mapped, unique local, site-local, link-local
+  and multicast ranges. A private network is a common target: it is authorized by naming it.
 - At the start, and in the system prompt, the scope is stated as facts the host validated and
   resolved: each network and name with its ports and, for a name, the addresses it authorized;
   what is denied; the rate; the window. The system prompt adds that every other destination is
