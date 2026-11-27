@@ -128,7 +128,8 @@ export const runInNamespaces = (
       clearTimeout(timer);
       reject(error);
     });
-    child.once('exit', (code, signal) => {
+    // After its output streams closed: the exit can come before their last data.
+    child.once('close', (code, signal) => {
       clearTimeout(timer);
       if (code === 0) resolve(stdout);
       else {

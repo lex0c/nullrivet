@@ -10,9 +10,10 @@ import { isIPv4, isIPv6 } from 'node:net';
 //
 // The destinations are elements of interval sets, a network with a port for TCP and UDP, so the
 // rules stay few whatever the scope's size. A transaction is limited by the host's socket buffer,
-// which a user namespace cannot raise: a large scope goes in several, the first replacing the
-// table with part of the elements, the others adding the rest. What they authorize along the way
-// is part of the scope, never more.
+// which a user namespace cannot raise, so a scope is installed into a table of its own, one of two
+// that take turns: its sets are filled in as many transactions as they need, while it has no chain
+// on a hook and decides nothing; a last transaction, small whatever the scope's size, adds its
+// chains and deletes the table in force. A scope takes effect whole, or not at all.
 //
 // Every address and port in the text comes from this module's own formatting of parsed values:
 // nothing given as text reaches nft as it was written.
@@ -112,7 +113,9 @@ const NDP_OUT =
 const NDP_IN =
   'icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert } ip6 hoplimit 255 accept';
 
-export const TABLE = 'nullrivet';
+// The two tables a scope's ruleset takes turns in, and the one that closes the network.
+export const SCOPE_TABLES = ['nullrivet_a', 'nullrivet_b'] as const;
+export type ScopeTable = (typeof SCOPE_TABLES)[number];
 export const CLOSED_TABLE = 'nullrivet_closed';
 // The sets of the rate limit, whose elements the traffic adds.
 export const DYNAMIC_SETS: readonly string[] = ['new4', 'new6'];
@@ -187,9 +190,14 @@ const element = (member: Member): string =>
     ? checkNetwork(member.network)
     : `${checkNetwork(member.network)} . ${member.port}`;
 
-// The scope's table, as the transactions that install it, in order: the first replaces the table
-// whole or not at all; each of the others adds elements to its sets.
-export const rulesetFor = (scope: Scope): string[] => {
+// The transactions that install the scope into `table` and put it in force in place of
+// `previous`, in order. The first makes `table` anew with its sets, and the next ones add to them:
+// until the last, `table` has no chain on a hook. The last adds its chains and deletes `previous`.
+export const rulesetFor = (
+  scope: Scope,
+  table: ScopeTable,
+  previous: ScopeTable | null,
+): string[] => {
   const rate = scope.newConnectionsPerSecond;
   if (rate !== undefined && !(Number.isInteger(rate) && rate >= 1 && rate <= 1_000_000)) {
     throw new Error('the rate must be an integer number of new connections per second, at least 1');
@@ -282,15 +290,29 @@ export const rulesetFor = (scope: Scope): string[] => {
     const elements = first.get(set.name);
     return `  set ${set.name} { type ${set.type}; flags interval;${elements === undefined ? '' : ` elements = { ${elements.join(', ')} };`} }`;
   };
-  const table = [
-    // The scope's table alone is replaced, created first so that deleting it never fails: the
-    // table that closes the network, once there, stays.
-    `add table inet ${TABLE}`,
-    `delete table inet ${TABLE}`,
-    `table inet ${TABLE} {`,
+  const staged = [
+    // Made anew: created first so that deleting it never fails, whatever an earlier installation
+    // that did not finish left of it.
+    `add table inet ${table}`,
+    `delete table inet ${table}`,
+    `table inet ${table} {`,
     ...sets.map(setLine),
     '  set new4 { type ipv4_addr; size 65536; flags dynamic, timeout; timeout 10s; }',
     '  set new6 { type ipv6_addr; size 65536; flags dynamic, timeout; timeout 10s; }',
+    '}',
+    '',
+  ].join('\n');
+  const additions = chunks
+    .slice(1)
+    .map(
+      (chunk) =>
+        `${chunk.map((part) => `add element inet ${table} ${part.set} { ${part.elements.join(', ')} }`).join('\n')}\n`,
+    );
+  const activation = [
+    `table inet ${table} {`,
+    '  chain refuse {',
+    ...REFUSE_RULES.map((rule) => `    ${rule}`),
+    '  }',
     '  chain output {',
     '    type filter hook output priority filter; policy drop;',
     ...output.map((rule) => `    ${rule}`),
@@ -299,17 +321,10 @@ export const rulesetFor = (scope: Scope): string[] => {
     '    type filter hook input priority filter; policy drop;',
     ...input.map((rule) => `    ${rule}`),
     '  }',
-    '  chain refuse {',
-    ...REFUSE_RULES.map((rule) => `    ${rule}`),
-    '  }',
     '}',
+    // The table in force goes in the same transaction; the one that closes the network stays.
+    ...(previous === null ? [] : [`add table inet ${previous}`, `delete table inet ${previous}`]),
     '',
   ].join('\n');
-  const rest = chunks
-    .slice(1)
-    .map(
-      (chunk) =>
-        `${chunk.map((part) => `add element inet ${TABLE} ${part.set} { ${part.elements.join(', ')} }`).join('\n')}\n`,
-    );
-  return [table, ...rest];
+  return [staged, ...additions, activation];
 };

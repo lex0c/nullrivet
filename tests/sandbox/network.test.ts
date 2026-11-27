@@ -23,6 +23,9 @@ import {
 } from '../../src/sandbox/network/ruleset.ts';
 import { networkTestsRun } from '../helpers/sandbox.ts';
 
+// The transactions of a scope installed into one table in place of the other.
+const generate = (scope: Scope): string[] => rulesetFor(scope, 'nullrivet_b', 'nullrivet_a');
+
 const net = (text: string): Network => {
   const parsed = parseNetwork(text);
   if (parsed === null) throw new Error(`not a network: ${text}`);
@@ -62,18 +65,18 @@ describe('the ruleset of a scope', () => {
 
   test('refuses values it did not write: a network out of its form, ports, a rate', () => {
     const forged = { family: 4 as const, address: '1.2.3.4/0 accept', prefix: 32 };
-    expect(() => rulesetFor({ allow: [{ network: forged }], deny: [] })).toThrow();
+    expect(() => generate({ allow: [{ network: forged }], deny: [] })).toThrow();
     expect(() =>
-      rulesetFor({ allow: [{ network: net('203.0.113.0/28'), ports: [0] }], deny: [] }),
+      generate({ allow: [{ network: net('203.0.113.0/28'), ports: [0] }], deny: [] }),
     ).toThrow();
     expect(() =>
-      rulesetFor({ allow: [{ network: net('203.0.113.0/28'), ports: [] }], deny: [] }),
+      generate({ allow: [{ network: net('203.0.113.0/28'), ports: [] }], deny: [] }),
     ).toThrow();
-    expect(() => rulesetFor({ ...NOTHING, newConnectionsPerSecond: 0.5 })).toThrow();
+    expect(() => generate({ ...NOTHING, newConnectionsPerSecond: 0.5 })).toThrow();
   });
 
   test('denies before it allows, and accepts an incoming packet only from where it may go', () => {
-    const [text = ''] = rulesetFor({
+    const transactions = generate({
       allow: [
         { network: net('203.0.113.0/28'), ports: [443, 80, 443] },
         // Inside the network above, for the same port: an interval set refuses the overlap.
@@ -83,6 +86,7 @@ describe('the ruleset of a scope', () => {
       deny: [net('203.0.113.5')],
       newConnectionsPerSecond: 20,
     });
+    const text = transactions.join('');
     const lines = text.split('\n').map((line) => line.trim());
     const at = (start: string) => lines.findIndex((line) => line.startsWith(start));
     expect(at('ip daddr @deny4 goto refuse')).toBeLessThan(at('ip daddr . tcp dport @tcp4 accept'));
@@ -103,25 +107,36 @@ describe('the ruleset of a scope', () => {
       expect(line).toMatch(/saddr( \. (tcp|udp) sport)? @(tcp|udp|any|echo)[46] /);
     }
     expect(lines.filter((line) => line.includes('policy drop;'))).toHaveLength(2);
-    // Only the scope's table is replaced: the one that closes the network stays.
-    expect(lines.slice(0, 2)).toEqual(['add table inet nullrivet', 'delete table inet nullrivet']);
+    // The scope's table is made anew, and put in force with the deletion of the other in one last
+    // transaction: the table that closes the network stays.
+    expect(lines.slice(0, 2)).toEqual([
+      'add table inet nullrivet_b',
+      'delete table inet nullrivet_b',
+    ]);
+    expect(transactions[0]).not.toContain('hook');
+    expect(transactions.at(-1)).toContain('type filter hook output');
+    expect(transactions.at(-1)).toMatch(
+      /add table inet nullrivet_a\ndelete table inet nullrivet_a\n$/,
+    );
     expect(text).not.toContain('flush');
   });
 
-  test('splits a large scope into transactions that only add to the first', () => {
+  test('stages a large scope in transactions that decide nothing, then puts it in force in one', () => {
     const allow = Array.from({ length: 1500 }, (_, i) => ({
       network: net(`10.${100 + Math.floor(i / 250)}.${i % 250}.0/24`),
       ports: [443],
     }));
-    const transactions = rulesetFor({ allow, deny: [] });
-    expect(transactions.length).toBeGreaterThan(1);
-    expect(transactions[0]).toContain('delete table inet nullrivet');
-    for (const later of transactions.slice(1)) {
+    const transactions = generate({ allow, deny: [] });
+    expect(transactions.length).toBeGreaterThan(2);
+    expect(transactions[0]).toContain('delete table inet nullrivet_b');
+    // Until the last, no chain is on a hook: what is staged decides nothing.
+    for (const staged of transactions.slice(0, -1)) expect(staged).not.toContain('hook');
+    for (const later of transactions.slice(1, -1)) {
       expect(
         later
           .split('\n')
           .filter((line) => line !== '')
-          .every((line) => line.startsWith('add element inet nullrivet ')),
+          .every((line) => line.startsWith('add element inet nullrivet_b ')),
       ).toBe(true);
     }
   });
@@ -508,7 +523,9 @@ describe.if(networkTestsRun && process.platform === 'linux')('the network of a s
   // An nft that, once, takes a second to install a scope, as a helper slowed down would, installs
   // something else than it is given, cannot list the ruleset, or hangs installing the table that
   // closes the network.
-  const brokenNft = (behavior: 'slow' | 'tamper' | 'unlisted' | 'hang') => {
+  const brokenNft = (
+    behavior: 'slow' | 'tamper' | 'unlisted' | 'hang' | 'failAddition' | 'failActivation',
+  ) => {
     const dir = mkdtempSync(join(tmpdir(), 'nullrivet-nft-test-'));
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
     const once = join(dir, 'once');
@@ -519,7 +536,17 @@ describe.if(networkTestsRun && process.platform === 'linux')('the network of a s
       slow: [scope, `sleep 1; exec ${t().nft} "$@"`],
       tamper: [
         scope,
-        `{ cat "$2"; echo 'add element inet nullrivet any4 { 192.0.2.99/32 }'; } > ${dir}/tampered; exec ${t().nft} -f ${dir}/tampered`,
+        `table=$(sed -n 's/^table inet \\(nullrivet_[ab]\\) {$/\\1/p' "$2" | head -n 1); { cat "$2"; echo "add element inet $table any4 { 192.0.2.99/32 }"; } > ${dir}/tampered; exec ${t().nft} -f ${dir}/tampered`,
+      ],
+      // A scope's transaction fails, once: one that adds elements, or the one that puts the scope
+      // in force. What the namespace holds at that moment is kept.
+      failAddition: [
+        `${scope} && grep -q '^add element' "$2"`,
+        `${t().nft} list ruleset > ${dir}/at-failure; exit 1`,
+      ],
+      failActivation: [
+        `${scope} && grep -q 'hook output' "$2"`,
+        `${t().nft} list ruleset > ${dir}/at-failure; exit 1`,
       ],
       unlisted: ['[ "$1" = -j ]', 'exit 1'],
       hang: ['[ "$1" = -f ] && grep -q nullrivet_closed "$2"', 'exec sleep 30'],
@@ -529,7 +556,11 @@ describe.if(networkTestsRun && process.platform === 'linux')('the network of a s
       `#!/bin/sh\nif [ -e ${once} ] && ${condition}; then rm -f ${once}; ${action}; fi\nexec ${t().nft} "$@"\n`,
       { mode: 0o755 },
     );
-    return { tools: { ...t(), nft }, arm: () => writeFileSync(once, '') };
+    return {
+      tools: { ...t(), nft },
+      arm: () => writeFileSync(once, ''),
+      atFailure: () => readFileSync(join(dir, 'at-failure'), 'utf8'),
+    };
   };
 
   const watched = async (
@@ -609,7 +640,7 @@ describe.if(networkTestsRun && process.platform === 'linux')('the network of a s
       ports: [443],
     }));
     const scope = { ...hostScope(s), allow: [...hostScope(s).allow, ...networks] };
-    expect(rulesetFor(scope).length).toBeGreaterThan(1);
+    expect(generate(scope).length).toBeGreaterThan(2);
     const installedAt = Date.now() / 1000;
     await control.replace(scope);
     expect(control.failure()).toBeNull();
@@ -618,6 +649,35 @@ describe.if(networkTestsRun && process.platform === 'linux')('the network of a s
     await sandbox.waitFor('watched');
     expect(reachedAfter(installedAt + 0.5).length).toBeGreaterThan(0);
   }, 60_000);
+
+  test('puts a large scope in force whole or not at all: a failure leaves the old one, then closes', async () => {
+    for (const behavior of ['failAddition', 'failActivation'] as const) {
+      const { s, nft, sandbox, control, reachedAfter } = await watched(behavior);
+      // The new scope: thousands of networks, and the host on another port than the old one.
+      const networks = Array.from({ length: 3000 }, (_, i) => ({
+        network: net(`10.${100 + Math.floor(i / 250)}.${i % 250}.0/24`),
+        ports: [443],
+      }));
+      const scope = {
+        allow: [{ network: net(hostAddress as string), ports: [s.tcpOther] }, ...networks],
+        deny: [],
+      };
+      nft.arm();
+      await expect(control.replace(scope)).rejects.toThrow();
+      const closedAt = Date.now() / 1000;
+      // At the failure, the old scope was in force, and nothing of the new one.
+      const held = nft.atFailure();
+      expect(held).toContain(`. ${s.tcpOk}`);
+      expect(held.match(/hook output/g)).toHaveLength(1);
+      expect(control.failure()).toContain('the scope could not be installed');
+      await Bun.sleep(1_500);
+      signal(sandbox, 'stop');
+      await sandbox.waitFor('watched');
+      expect(reachedAfter(closedAt + 0.05)).toEqual([]);
+      sandbox.child.kill('SIGKILL');
+      await sandbox.ended;
+    }
+  }, 120_000);
 
   test('closes the network when the kernel does not hold the scope as written', async () => {
     const s = await servers();

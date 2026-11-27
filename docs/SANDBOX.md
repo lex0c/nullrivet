@@ -593,12 +593,14 @@ process never joins them, so the agent loop and the providers keep the host's ne
    runs in them (`nsenter --user --net --preserve-credentials`), and, in order:
    install a ruleset that authorizes nothing, while the namespace has only its loopback; set the
    ping group range, so ICMP echo works without raw sockets; start pasta, which gives the
-   namespace its way out, still closed; install the scope's ruleset in one transaction, and check
-   that the kernel holds exactly what was written: what it lists, without handles, must equal what
-   a namespace that holds nothing else lists once the same text is installed in it, every table,
-   chain, set, element and rule included, the elements the traffic adds to the rate limit's sets
-   aside. The text goes to nft in a file of a directory only the user can read: an argument is
-   limited to 128 KiB, and nftables 1.0.9 cannot read a script from a pipe.
+   namespace its way out, still closed; install the scope's ruleset, which takes effect in one
+   transaction, and check that the kernel holds exactly what was written: what it lists, without
+   handles, must equal what a namespace that holds nothing else lists once the same transactions
+   ran in it, every table, chain, set, element and rule included, the elements the traffic adds to
+   the rate limit's sets aside. The text goes to nft in files of a directory only the user can
+   read, in memory (the user's runtime directory or `/dev/shm`) when one is a tmpfs, since they
+   name the targets: an argument is limited to 128 KiB, and nftables 1.0.9 cannot read a script
+   from a pipe.
 3. Only then is the worker released, by writing to the block descriptor. A step that fails ends
    the sandbox unreleased. Bubblewrap reads the descriptor once and goes on at its end as well, so
    a host that dies mid-way does not hold it back: what holds is the ruleset that authorizes
@@ -647,16 +649,21 @@ close the network; traffic that fills the rate limit's sets does not.
 The destinations are elements of interval sets, a network with a port for TCP and UDP, so the
 rules stay few whatever the scope's size; networks inside others are left out, since an interval
 set refuses overlaps. A transaction is limited by the host's socket buffer (`wmem_max`, 208 KiB
-by default), which a user namespace cannot raise: a scope of more than a thousand elements goes
-in several, the first replacing the table with part of them, the others adding the rest, so what
-they authorize along the way is part of the scope, never more. Tested with three thousand
-networks.
+by default), which a user namespace cannot raise, so a scope is installed into a table of its
+own, one of two that take turns: its sets are filled in as many transactions as they need, a
+thousand elements each, while it has no chain on a hook and decides nothing; a last transaction,
+small whatever the scope's size, adds its chains and deletes the table in force. A scope takes
+effect whole or not at all: until that transaction, the one before is in force, entire. Tested
+with three thousand networks, and with a failure in a transaction that adds elements and in the
+one that puts the scope in force: at the failure, the namespace held the old scope alone, and the
+network closed after it. The rate limit's counts start anew with each scope, in its new table.
 
 The scope can shrink during a session: `/scope refresh` drops an address a name no longer resolves
 to, and the window ends. A connection opened earlier must not outlive its authorization, as it
 would under a rule that accepts established connections.
 
-- The helper replaces the scope's table in one nft transaction, which applies in full or not at all.
+- A new scope takes effect in one nft transaction, which applies in full or not at all, however
+  many transactions staged it.
 - Since every packet is matched, a connection to a revoked destination is refused at its next
   packet, and the process gets a reset or an error, as for any destination out of scope. No
   process is killed for it, and the boundary does not depend on removing conntrack entries.

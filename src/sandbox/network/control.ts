@@ -1,10 +1,18 @@
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readlinkSync, rmSync, statfsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { HELPER_ENV, inNewNamespaces, type NetworkTools, runInNamespaces } from './namespace.ts';
 import { Pasta, type PastaAddress } from './pasta.ts';
-import { CLOSED_RULESET, DYNAMIC_SETS, NOTHING, rulesetFor, type Scope } from './ruleset.ts';
+import {
+  CLOSED_RULESET,
+  DYNAMIC_SETS,
+  NOTHING,
+  rulesetFor,
+  SCOPE_TABLES,
+  type Scope,
+  type ScopeTable,
+} from './ruleset.ts';
 
 // A ruleset goes to nft in a file of a directory only the user can read, which nft applies as one
 // transaction: an argument is limited to 128 KiB, which a scope of many networks passes, and
@@ -48,6 +56,8 @@ export class NetworkControl {
     private readonly tools: NetworkTools,
     private readonly pid: number,
     private readonly pasta: Pasta,
+    // The table the scope in force is in.
+    private active: ScopeTable,
   ) {
     void pasta.ended.then((reason) => {
       if (this.closing === null) this.failed = reason;
@@ -67,12 +77,13 @@ export class NetworkControl {
         throw new Error(`process ${pid} runs in the host's ${kind} namespace`);
       }
     }
-    await install(tools, pid, NOTHING);
+    const [first] = SCOPE_TABLES;
+    await install(tools, pid, NOTHING, first, null);
     // Every group of the namespace, which maps only the user's: its processes may open ICMP echo
     // sockets. The range is read in the namespace's ids.
     await runInNamespaces(tools, pid, [tools.sh, '-c', `printf '0 0' > ${GROUP_RANGE}`]);
     const pasta = await Pasta.start(tools, pid, options.address);
-    const control = new NetworkControl(tools, pid, pasta);
+    const control = new NetworkControl(tools, pid, pasta, first);
     try {
       await control.replace(scope);
     } catch (error) {
@@ -95,7 +106,9 @@ export class NetworkControl {
     return this.serial(async () => {
       if (this.closing !== null) throw new Error('the network was closed');
       try {
-        await install(this.tools, this.pid, scope);
+        const next = SCOPE_TABLES.find((table) => table !== this.active) as ScopeTable;
+        await install(this.tools, this.pid, scope, next, this.active);
+        this.active = next;
       } catch (error) {
         if (this.closing !== null) throw new Error('the network was closed');
         this.failed = `the scope could not be installed: ${message(error)}`;
@@ -128,12 +141,29 @@ export class NetworkControl {
   }
 }
 
+const TMPFS = 0x01021994;
+
+// Where the scripts go, which name the scope's targets: in memory, in the user's runtime directory
+// or /dev/shm, when one is a tmpfs, so that nothing of them reaches a disk; the temporary directory
+// otherwise.
+const scriptRoot = (): string => {
+  for (const dir of [process.env.XDG_RUNTIME_DIR, '/dev/shm']) {
+    if (dir === undefined || !isAbsolute(dir)) continue;
+    try {
+      if (statfsSync(dir).type === TMPFS) return dir;
+    } catch {
+      // Missing: the next one.
+    }
+  }
+  return tmpdir();
+};
+
 // Runs `run` with files that hold `texts`, in a directory only the user can read, removed after.
 const withScripts = async <T>(
   texts: readonly string[],
   run: (paths: string[]) => Promise<T>,
 ): Promise<T> => {
-  const dir = mkdtempSync(join(tmpdir(), 'nullrivet-nft-'));
+  const dir = mkdtempSync(join(scriptRoot(), 'nullrivet-nft-'));
   try {
     const paths = texts.map((text, index) => {
       const path = join(dir, `${index}.nft`);
@@ -203,7 +233,8 @@ const reference = (tools: NetworkTools, paths: readonly string[]): Promise<strin
       clearTimeout(timer);
       reject(error);
     });
-    child.once('exit', (code) => {
+    // After its output streams closed: the exit can come before their last data.
+    child.once('close', (code) => {
       clearTimeout(timer);
       if (code === 0) resolve(stdout);
       else reject(new Error(`the reference ruleset could not be made: ${stderr.trim()}`));
@@ -212,11 +243,18 @@ const reference = (tools: NetworkTools, paths: readonly string[]): Promise<strin
     child.stdin.end();
   });
 
-// Installs `scope`'s ruleset in the namespaces of `pid`, in its transactions, then checks that the
-// kernel holds exactly what was written, as a namespace that holds nothing else does once the
-// same text is installed in it: every table, chain, set and rule, as nft lists them.
-const install = async (tools: NetworkTools, pid: number, scope: Scope): Promise<void> => {
-  await withScripts(rulesetFor(scope), async (paths) => {
+// Installs `scope`'s ruleset into `table` in the namespaces of `pid`, in its transactions, the last
+// of which puts it in force in place of `previous`; then checks that the kernel holds exactly what
+// was written, as a namespace that holds nothing else does once the same transactions ran in it:
+// every table, chain, set and rule, as nft lists them.
+const install = async (
+  tools: NetworkTools,
+  pid: number,
+  scope: Scope,
+  table: ScopeTable,
+  previous: ScopeTable | null,
+): Promise<void> => {
+  await withScripts(rulesetFor(scope, table, previous), async (paths) => {
     for (const path of paths) await runInNamespaces(tools, pid, [tools.nft, '-f', path]);
     const [held, expected] = await Promise.all([
       runInNamespaces(tools, pid, [tools.nft, '-j', 'list', 'ruleset']),

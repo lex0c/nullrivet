@@ -185,8 +185,11 @@ describe('saved output', () => {
     server.handle(toolsThenText([{ name: 'bash', args: { command: `seq 1 100000; ${sleep}` } }]));
     const cli = startCli(['run it'], { env: cliEnv(server, { TMPDIR: tmp }), cwd: tempDir() });
     await cli.waitFor((e) => e.type === 'tool:start');
+    // The saved output appears while seq still writes, before the sleep after it starts.
     const deadline = Date.now() + 10_000;
-    while (readdirSync(tmp).length === 0 && Date.now() < deadline) await Bun.sleep(20);
+    const ready = () => readdirSync(tmp).length > 0 && processRunning(sleep);
+    while (!ready() && Date.now() < deadline) await Bun.sleep(20);
+    expect(readdirSync(tmp).length).toBeGreaterThan(0);
     expect(processRunning(sleep)).toBe(true);
     cli.child.kill('SIGHUP');
     const { code } = await cli.finished;
