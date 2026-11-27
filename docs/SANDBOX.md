@@ -594,8 +594,9 @@ process never joins them, so the agent loop and the providers keep the host's ne
    install a ruleset that authorizes nothing, while the namespace has only its loopback; set the
    ping group range, so ICMP echo works without raw sockets; start pasta, which gives the
    namespace its way out, still closed; install the scope's ruleset in one transaction, and check
-   what the kernel lists against what was written: that table alone, its chains with their hooks
-   and policies, the sets of the rate limit, and as many rules in each chain as were written.
+   that the kernel holds exactly what was written: what it lists, without handles, must equal what
+   a namespace that holds nothing else lists once the same text is installed in it, every table,
+   chain, set and rule included.
 3. Only then is the worker released, by writing to the block descriptor. A step that fails ends
    the sandbox unreleased. Bubblewrap reads the descriptor once and goes on at its end as well, so
    a host that dies mid-way does not hold it back: what holds is the ruleset that authorizes
@@ -630,18 +631,23 @@ sidecar container sharing the locked namespace could not download nftables to ap
 
 ### Revoking a destination
 
-Installations run one after another: two transactions are each atomic, but not ordered, and a
-ruleset that lands after a revocation would undo it. Closing the network installs the ruleset that
-authorizes nothing at once, without waiting for an installation under way, whose helper may hang
-until its timeout, and again once that one is done; installations still waiting install nothing.
-Tested with an nft slowed down for one installation: what the namespace holds at the end
-authorizes nothing.
+The scope's installations run one after another, two transactions being each atomic but not
+ordered, and each replaces the scope's table alone. Revoking does not wait its turn among them:
+it adds, at once, a table of its own that stops all but the loopback, at a priority before the
+scope's. A packet must pass every base chain of its hook, and no installation of a scope touches
+that table, so an installation under way cannot authorize anything again once it is there, even
+for an instant. Should it fail to go in, pasta ends, which leaves the namespace without a way out.
+An installation that fails, or that the kernel does not hold as written, revokes the network.
+Tested with a client connecting every 50 ms while an nft slowed down lands its installation after
+the revocation: no connection passed from the moment of the revocation. Also tested: an nft that
+installs something else than it was given, and one that cannot list the ruleset, both revoke the
+network.
 
 The scope can shrink during a session: `/scope refresh` drops an address a name no longer resolves
 to, and the window ends. A connection opened earlier must not outlive its authorization, as it
 would under a rule that accepts established connections.
 
-- The helper replaces the ruleset in one `nft -f` transaction, which applies in full or not at all.
+- The helper replaces the scope's table in one nft transaction, which applies in full or not at all.
 - Since every packet is matched, a connection to a revoked destination is refused at its next
   packet, and the process gets a reset or an error, as for any destination out of scope. No
   process is killed for it, and the boundary does not depend on removing conntrack entries.

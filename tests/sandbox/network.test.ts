@@ -6,7 +6,7 @@ import { createServer, type Server, Socket } from 'node:net';
 import { networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sandboxHost } from '../../src/sandbox/bwrap.ts';
-import { NetworkControl, rulesetProblem } from '../../src/sandbox/network/control.ts';
+import { NetworkControl } from '../../src/sandbox/network/control.ts';
 import {
   inNewNamespaces,
   type NetworkTools,
@@ -15,7 +15,6 @@ import {
 } from '../../src/sandbox/network/namespace.ts';
 import { hostRelaysEcho } from '../../src/sandbox/network/pasta.ts';
 import {
-  buildRuleset,
   type Network,
   NOTHING,
   parseNetwork,
@@ -73,47 +72,6 @@ describe('the ruleset of a scope', () => {
     expect(() => rulesetFor({ ...NOTHING, newConnectionsPerSecond: 0.5 })).toThrow();
   });
 
-  test('finds a namespace that holds another ruleset than the one written', () => {
-    const ruleset = buildRuleset({
-      allow: [{ network: net('203.0.113.0/28'), ports: [443] }],
-      deny: [],
-    });
-    const listing = (change: { drop?: string; policy?: string; table?: string } = {}) => {
-      const rules = Object.entries(ruleset.rules).flatMap(([chain, count]) =>
-        Array.from({ length: chain === change.drop ? count - 1 : count }, () => ({
-          rule: { table: 'nullrivet', chain },
-        })),
-      );
-      return JSON.stringify({
-        nftables: [
-          { metainfo: { version: '1' } },
-          { table: { family: 'inet', name: 'nullrivet' } },
-          ...(change.table === undefined
-            ? []
-            : [{ table: { family: 'inet', name: change.table } }]),
-          { chain: { name: 'output', hook: 'output', type: 'filter', policy: 'drop' } },
-          {
-            chain: {
-              name: 'input',
-              hook: 'input',
-              type: 'filter',
-              policy: change.policy ?? 'drop',
-            },
-          },
-          { chain: { name: 'refuse' } },
-          { set: { name: 'new4' } },
-          { set: { name: 'new6' } },
-          ...rules,
-        ],
-      });
-    };
-    expect(rulesetProblem(listing(), ruleset)).toBeNull();
-    expect(rulesetProblem(listing({ drop: 'output' }), ruleset)).toContain('chain output holds');
-    expect(rulesetProblem(listing({ policy: 'accept' }), ruleset)).toContain('chain input');
-    expect(rulesetProblem(listing({ table: 'other' }), ruleset)).toContain('2 tables');
-    expect(rulesetProblem('not json', ruleset)).toContain('JSON');
-  });
-
   test('denies before it allows, and accepts an incoming packet only from where it may go', () => {
     const text = rulesetFor({
       allow: [{ network: net('203.0.113.0/28'), ports: [443] }],
@@ -131,7 +89,9 @@ describe('the ruleset of a scope', () => {
       expect(line).toContain('saddr 203.0.113.0/28');
     }
     expect(lines.filter((line) => line.includes('policy drop;'))).toHaveLength(2);
-    expect(lines[0]).toBe('flush ruleset');
+    // Only the scope's table is replaced: the one that closes the network stays.
+    expect(lines.slice(0, 2)).toEqual(['add table inet nullrivet', 'delete table inet nullrivet']);
+    expect(text).not.toContain('flush');
   });
 });
 
@@ -205,6 +165,15 @@ elif mode == 'rate':
         except OSError: pass
         finally: s.close()
     out('rate made', made)
+elif mode == 'watch':
+    end = time.time() + 4
+    while time.time() < end:
+        s = socket.socket(); s.settimeout(0.2)
+        try: s.connect((host, int(tcp_ok))); out('reached', time.time())
+        except OSError: pass
+        finally: s.close()
+        time.sleep(0.05)
+    out('watched', True)
 elif mode == 'connected':
     tcp('tcp allowed', host, tcp_ok); wait('go'); tcp('tcp allowed after', host, tcp_ok, timeout=2)
 `;
@@ -504,37 +473,79 @@ describe.if(networkTestsRun && process.platform === 'linux')('the network of a s
     expect(outcome['tcp allowed after']).not.toMatch(/^reply/);
   }, 60_000);
 
-  test('never lets an installation under way undo the revocation of a close', async () => {
-    const s = await servers();
-    cleanups.push(s.close);
-    // An nft that takes a second, once, as a helper slowed down would.
-    const dir = mkdtempSync(join(tmpdir(), 'nullrivet-slow-nft-'));
+  // An nft that takes a second, once, as a helper slowed down would, and installs something else
+  // than it is given, once, or fails to list.
+  const brokenNft = (behavior: 'slow' | 'tamper' | 'unlisted') => {
+    const dir = mkdtempSync(join(tmpdir(), 'nullrivet-nft-'));
     cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
-    const slowOnce = join(dir, 'slow');
+    const once = join(dir, 'once');
     const nft = join(dir, 'nft');
+    // When the condition holds, once, the action runs instead of nft.
+    const [condition, action] = {
+      slow: ['true', `sleep 1; exec ${t().nft} "$@"`],
+      // An installation is nft with the ruleset as its one argument.
+      tamper: [
+        '[ "$#" = 1 ]',
+        `exec ${t().nft} "$1\nadd rule inet nullrivet output ip daddr 192.0.2.99 accept"`,
+      ],
+      unlisted: ['[ "$1" = -j ]', 'exit 1'],
+    }[behavior];
     writeFileSync(
       nft,
-      `#!/bin/sh\nif [ -e ${slowOnce} ]; then rm -f ${slowOnce}; sleep 1; fi\nexec ${t().nft} "$@"\n`,
+      `#!/bin/sh\nif [ -e ${once} ] && ${condition}; then rm -f ${once}; ${action}; fi\nexec ${t().nft} "$@"\n`,
       { mode: 0o755 },
     );
-    const slow = { ...t(), nft };
-    const sandbox = startSandbox(slow, s, 'probe');
+    return { tools: { ...t(), nft }, arm: () => writeFileSync(once, '') };
+  };
+
+  test('lets nothing through from the moment of a revocation, whatever installation is under way', async () => {
+    const s = await servers();
+    cleanups.push(s.close);
+    const nft = brokenNft('slow');
+    const sandbox = startSandbox(nft.tools, s, 'watch');
     await Bun.sleep(200);
-    const control = await NetworkControl.prepare(slow, sandbox.pid, hostScope(s), {
+    const control = await NetworkControl.prepare(nft.tools, sandbox.pid, hostScope(s), {
       address: ADDRESS,
     });
     cleanups.push(() => control.close());
-    writeFileSync(slowOnce, '');
+    sandbox.release();
+    await sandbox.waitFor('reached');
+    // An installation that lands a second later, after the revocation.
+    nft.arm();
     const granting = control.replace(hostScope(s));
     await Bun.sleep(100);
-    const closing = control.close();
-    await expect(control.replace(hostScope(s))).rejects.toThrow('the network was closed');
+    await control.revoke();
+    const revokedAt = Date.now() / 1000;
+    await expect(control.replace(hostScope(s))).rejects.toThrow('the network was revoked');
     await granting.catch(() => undefined);
-    await closing;
-    // The slow installation landed after the first revocation; the last one came after it.
-    const held = await runInNamespaces(t(), sandbox.pid, [t().nft, 'list', 'ruleset']);
-    expect(held).toContain('table inet nullrivet');
-    expect(held).not.toContain(hostAddress as string);
+    await sandbox.waitFor('watched');
+    const late = sandbox.lines.filter(
+      ([name, at]) => name === 'reached' && (at as number) > revokedAt + 0.05,
+    );
+    expect(late).toEqual([]);
+    expect(control.failure()).toBeNull();
+  }, 60_000);
+
+  test('revokes the network when the kernel does not hold the scope as written', async () => {
+    const s = await servers();
+    cleanups.push(s.close);
+    for (const behavior of ['tamper', 'unlisted'] as const) {
+      const nft = brokenNft(behavior);
+      const sandbox = startSandbox(nft.tools, s, 'connected');
+      await Bun.sleep(200);
+      const control = await NetworkControl.prepare(nft.tools, sandbox.pid, hostScope(s), {
+        address: ADDRESS,
+      });
+      cleanups.push(() => control.close());
+      sandbox.release();
+      expect(await sandbox.waitFor('tcp allowed')).toBe('reply okx');
+      nft.arm();
+      await expect(control.replace(hostScope(s))).rejects.toThrow();
+      expect(control.failure()).toContain('the scope could not be installed');
+      signal(sandbox, 'go');
+      await sandbox.ended;
+      expect(Object.fromEntries(sandbox.lines)['tcp allowed after']).not.toMatch(/^reply/);
+    }
   }, 60_000);
 
   test('stays closed when pasta ends, and says so', async () => {

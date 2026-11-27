@@ -101,6 +101,11 @@ const portList = (ports: readonly number[]): string => {
   return `{ ${[...new Set(ports)].sort((a, b) => a - b).join(', ')} }`;
 };
 
+const REFUSE_RULES = [
+  'meta l4proto tcp reject with tcp reset',
+  'reject with icmpx admin-prohibited',
+];
+
 const ip = (family: 4 | 6): string => (family === 4 ? 'ip' : 'ip6');
 
 // Neighbor discovery on the link to the gateway: IPv6 does not work without it, and packets with
@@ -111,19 +116,28 @@ const NDP_IN =
   'icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert } ip6 hoplimit 255 accept';
 
 export const TABLE = 'nullrivet';
+export const CLOSED_TABLE = 'nullrivet_closed';
 
-export interface Ruleset {
-  // One nft transaction that replaces whatever the namespace had: it applies whole or not at all.
-  text: string;
-  // The rules each chain holds once it is installed, to check against what the kernel lists.
-  rules: { output: number; input: number; refuse: number };
-}
+// The table that closes the network for good, apart from the scope's and before it: a packet must
+// pass every base chain of its hook, so this one stops all but the loopback's, whatever the
+// scope's table holds then or later. No installation of a scope touches it.
+export const CLOSED_RULESET = [
+  `table inet ${CLOSED_TABLE} {`,
+  '  chain output {',
+  '    type filter hook output priority -10; policy drop;',
+  '    oif "lo" accept',
+  ...REFUSE_RULES.map((rule) => `    ${rule}`),
+  '  }',
+  '  chain input {',
+  '    type filter hook input priority -10; policy drop;',
+  '    iif "lo" accept',
+  '  }',
+  '}',
+  '',
+].join('\n');
 
-const REFUSE = ['meta l4proto tcp reject with tcp reset', 'reject with icmpx admin-prohibited'];
-
-export const rulesetFor = (scope: Scope): string => buildRuleset(scope).text;
-
-export const buildRuleset = (scope: Scope): Ruleset => {
+// The scope's table, as one nft transaction that replaces it whole or not at all.
+export const rulesetFor = (scope: Scope): string => {
   const rate = scope.newConnectionsPerSecond;
   if (rate !== undefined && !(Number.isInteger(rate) && rate >= 1 && rate <= 1_000_000)) {
     throw new Error('the rate must be an integer number of new connections per second, at least 1');
@@ -179,7 +193,10 @@ export const buildRuleset = (scope: Scope): Ruleset => {
   }
   output.push('goto refuse');
   const lines = [
-    'flush ruleset',
+    // The scope's table alone is replaced, created first so that deleting it never fails: the
+    // table that closes the network, once there, stays.
+    `add table inet ${TABLE}`,
+    `delete table inet ${TABLE}`,
     `table inet ${TABLE} {`,
     '  set new4 { type ipv4_addr; size 65536; flags dynamic, timeout; timeout 10s; }',
     '  set new6 { type ipv6_addr; size 65536; flags dynamic, timeout; timeout 10s; }',
@@ -192,13 +209,10 @@ export const buildRuleset = (scope: Scope): Ruleset => {
     ...input.map((rule) => `    ${rule}`),
     '  }',
     '  chain refuse {',
-    ...REFUSE.map((rule) => `    ${rule}`),
+    ...REFUSE_RULES.map((rule) => `    ${rule}`),
     '  }',
     '}',
     '',
   ];
-  return {
-    text: lines.join('\n'),
-    rules: { output: output.length, input: input.length, refuse: REFUSE.length },
-  };
+  return lines.join('\n');
 };
