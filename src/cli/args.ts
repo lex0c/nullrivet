@@ -6,7 +6,7 @@ import {
   type ExecutionMode,
   isExecutionMode,
   isSandboxProfile,
-  SANDBOX_PROFILES,
+  SANDBOX_PROFILE_NAMES,
   type SandboxProfile,
 } from '../tools/policy.ts';
 
@@ -17,6 +17,8 @@ export interface CliConfig {
   effort: ProviderEffort | undefined;
   mode: ExecutionMode;
   sandbox: SandboxProfile | undefined;
+  // The engagement file of the security profile, as given.
+  engagement: string | undefined;
   apply: boolean;
   cwd: string;
   json: boolean;
@@ -47,8 +49,11 @@ Options:
   -m, --model <id>            Model as <family>/<model>, e.g. anthropic/claude-sonnet-5-5
   -e, --effort <level>        Reasoning effort: ${EFFORT_LEVELS.join(', ')}
   -p, --permission <mode>     auto (default) or readonly
-      --sandbox <profile>     Run the tools in a sandbox (Linux, Bubblewrap): inspect, or
-                              workspace, where changes to the project stay in the sandbox
+      --sandbox <profile>     Run the tools in a sandbox (Linux, Bubblewrap): inspect;
+                              workspace, where changes to the project stay in the sandbox;
+                              or security, with the network of an engagement's scope
+      --engagement <file>     With --sandbox security: the engagement file, which sets the
+                              destinations the sandbox may reach, and when
       --apply                 With --sandbox workspace: apply the task's changes to the
                               project if it finishes; without it they are shown and discarded
   -C, --cwd <dir>             Starting directory (does not restrict file access)
@@ -108,7 +113,7 @@ const parseEffort = (value: string | undefined, name: string): ProviderEffort | 
 const parseSandbox = (value: string | undefined, name: string): SandboxProfile | undefined => {
   if (value === undefined || value === '') return undefined;
   if (!isSandboxProfile(value)) {
-    throw new UsageError(`${name} must be ${SANDBOX_PROFILES.join(' or ')}, got '${value}'`);
+    throw new UsageError(`${name} must be ${SANDBOX_PROFILE_NAMES}, got '${value}'`);
   }
   return value;
 };
@@ -137,6 +142,7 @@ export const parseCli = (
         effort: { type: 'string', short: 'e' },
         permission: { type: 'string', short: 'p' },
         sandbox: { type: 'string' },
+        engagement: { type: 'string' },
         apply: { type: 'boolean' },
         cwd: { type: 'string', short: 'C' },
         json: { type: 'boolean' },
@@ -168,6 +174,18 @@ export const parseCli = (
   if (apply && sandbox !== 'workspace') {
     throw new UsageError('--apply needs --sandbox workspace, whose changes it applies');
   }
+  // The scope of a network is the operator's decision for each run, so it has no environment
+  // variable either.
+  const engagement = str('engagement');
+  // Not for a run that only prints help, the version or the models: NULLRIVET_SANDBOX can name
+  // the profile for every run, and the file comes with each.
+  const runs = values.help !== true && values.version !== true && values['list-models'] !== true;
+  if (runs && sandbox === 'security' && engagement === undefined) {
+    throw new UsageError('--sandbox security needs --engagement <file>, which sets its scope');
+  }
+  if (engagement !== undefined && sandbox !== 'security') {
+    throw new UsageError('--engagement needs --sandbox security, whose network it scopes');
+  }
 
   return {
     model: str('model') ?? (env.NULLRIVET_MODEL || undefined),
@@ -179,6 +197,7 @@ export const parseCli = (
       parseMode(env.NULLRIVET_PERMISSION, 'NULLRIVET_PERMISSION') ??
       'auto',
     sandbox,
+    engagement,
     apply,
     cwd: str('cwd') ?? defaultCwd,
     json: values.json === true,

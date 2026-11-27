@@ -37,6 +37,9 @@ export interface Scope {
   deny: readonly Network[];
   // New connections each destination address may receive per second; absent, no limit.
   newConnectionsPerSecond?: number;
+  // When anything may pass; absent, always. The kernel compares each packet's time with it, so
+  // that the end holds whatever the process that installed it is doing.
+  window?: { from: Date; until: Date };
 }
 
 // The scope that authorizes nothing: the namespace keeps its loopback only.
@@ -90,6 +93,35 @@ export const parseNetwork = (text: string): Network | null => {
 };
 
 const isPort = (port: number): boolean => Number.isInteger(port) && port >= 1 && port <= 65535;
+
+const LAST_TIME = Date.UTC(2500, 0, 1);
+
+// A time as nft reads it, in UTC, which the helpers' TZ makes it read: to the second, which nft
+// keeps, rounded inward, so that the window it holds lies within the one given.
+const nftTime = (date: Date, round: (seconds: number) => number): string => {
+  const seconds = round(date.getTime() / 1000);
+  return `"${new Date(seconds * 1000).toISOString().slice(0, 19).replace('T', ' ')}"`;
+};
+
+// The matches that hold outside `window`, before its start and from its end.
+const windowRules = (window: Scope['window']): string[] => {
+  if (window === undefined) return [];
+  const { from, until } = window;
+  if (Number.isNaN(from.getTime()) || Number.isNaN(until.getTime())) {
+    throw new Error('the window must be of valid times');
+  }
+  // nft keeps a time in nanoseconds since 1970 in 64 bits, until 2554, and wraps one out of that
+  // range in silence: a start before 1970 would read as one in 2484, and refuse everything.
+  for (const date of [from, until]) {
+    if (date.getTime() < 0 || date.getTime() >= LAST_TIME) {
+      throw new Error('the window must lie between 1970 and 2500');
+    }
+  }
+  const start = nftTime(from, Math.ceil);
+  const end = nftTime(until, Math.floor);
+  if (start >= end) throw new Error('the window must last at least a second');
+  return [`meta time < ${start}`, `meta time >= ${end}`];
+};
 
 // Checked again here, whatever built the scope: a value that is not one of these types never
 // reaches the text.
@@ -198,6 +230,7 @@ export const rulesetFor = (
   table: ScopeTable,
   previous: ScopeTable | null,
 ): string[] => {
+  const times = windowRules(scope.window);
   const rate = scope.newConnectionsPerSecond;
   if (rate !== undefined && !(Number.isInteger(rate) && rate >= 1 && rate <= 1_000_000)) {
     throw new Error('the rate must be an integer number of new connections per second, at least 1');
@@ -251,6 +284,7 @@ export const rulesetFor = (
   const output = [
     'oif "lo" accept',
     NDP_OUT,
+    ...times.map((time) => `${time} goto refuse`),
     'ip daddr @deny4 goto refuse',
     'ip6 daddr @deny6 goto refuse',
     ...(rate === undefined
@@ -272,6 +306,7 @@ export const rulesetFor = (
   const input = [
     'iif "lo" accept',
     NDP_IN,
+    ...times.map((time) => `${time} drop`),
     'ip saddr @deny4 drop',
     'ip6 saddr @deny6 drop',
     'ct state established ip saddr . tcp sport @tcp4 accept',

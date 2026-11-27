@@ -104,11 +104,15 @@ describe('parseSlash', () => {
 });
 
 describe('suggestCommands', () => {
-  test('offers the commands of the workspace sandbox in its sessions only', () => {
+  test('offers the commands of a sandbox in its sessions only', () => {
     expect(suggestCommands('/ap').map((c) => c.name)).toEqual([]);
-    expect(suggestCommands('/ap', true).map((c) => c.name)).toEqual(['apply']);
+    expect(suggestCommands('/ap', 'workspace').map((c) => c.name)).toEqual(['apply']);
     expect(findCommand('discard')).toBeUndefined();
-    expect(findCommand('changes', true)?.usage).toBe('[path]');
+    expect(findCommand('changes', 'workspace')?.usage).toBe('[path]');
+    expect(findCommand('scope')).toBeUndefined();
+    expect(findCommand('scope', 'workspace')).toBeUndefined();
+    expect(findCommand('scope', 'security')?.usage).toBe('[refresh]');
+    expect(findCommand('apply', 'security')).toBeUndefined();
   });
 
   test('filters by the typed prefix while the name is incomplete', () => {

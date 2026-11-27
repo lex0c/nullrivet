@@ -454,6 +454,17 @@ describe('runTurn', () => {
     ]);
   });
 
+  test('a notice the user was told already reaches the model alone', async () => {
+    const h = harness([textTurn('done')]);
+    const pending = [[{ text: 'the window ended', shown: true }]];
+    h.deps.notices = () => pending.shift() ?? [];
+    await runTurn('go', h.deps);
+    expect(JSON.stringify(h.provider.calls[0]?.req.messages)).toContain(
+      '<agent-note>the window ended</agent-note>',
+    );
+    expect(h.events.filter((e) => e.type === 'notice')).toEqual([]);
+  });
+
   test('a notice with data adds the data fenced right after the note', async () => {
     const h = harness([textTurn('done')]);
     const pending = [[{ text: 'subagent s1 completed', data: 'Report:\nfound it' }]];

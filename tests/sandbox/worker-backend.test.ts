@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test';
+import { spawn } from 'node:child_process';
 import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -207,6 +208,33 @@ describe.if(linux)('WorkerBackend with a worker that breaks the protocol', () =>
     expect(backend.failure()).toContain('worker.ready twice');
   });
 
+  test('jobs.stopped unasked is a violation', async () => {
+    const backend = track(await fakeWorker('unasked-jobs-stopped'));
+    await Bun.sleep(100);
+    expect(backend.failure()).toContain('jobs.stopped without being asked');
+  });
+
+  test('a stop of the jobs the worker does not confirm loses it, in the time it was given', async () => {
+    // The fake worker answers nothing but tool calls.
+    const backend = track(await fakeWorker('echo'));
+    await expect(backend.stopJobs(300)).rejects.toThrow(
+      'the worker did not confirm the jobs ended within 300 ms',
+    );
+    expect(backend.failure()).toContain('the worker did not confirm the jobs ended');
+  });
+
+  test('a stop of the jobs under way ends with the worker', async () => {
+    const backend = track(await fakeWorker('echo'));
+    const stopping = backend.stopJobs(10_000).then(
+      () => 'stopped',
+      (error: Error) => error.message,
+    );
+    const started = Date.now();
+    await backend.close();
+    expect(await stopping).toBe('the sandbox was closed');
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
   test('a worker that never gets ready is stopped, with the time it was given', async () => {
     await expect(fakeWorker('no-ready', { readyTimeoutMs: 300 })).rejects.toThrow(
       'the worker was not ready within 300 ms',
@@ -279,6 +307,83 @@ describe.if(linux)('background jobs in the worker', () => {
     });
     expect(jobs.running()).toBe(0);
   });
+
+  test('stops every job on request, confirmed, and the worker goes on', async () => {
+    const { backend, jobs } = await startWithJobs();
+    for (const command of ['sleep 30', "trap '' TERM; sleep 30"]) {
+      await backend.execute(jobTool('bash_background'), { command }, context());
+    }
+    expect(jobs.running()).toBe(2);
+    await backend.stopJobs();
+    expect(await waitUntil(() => jobs.running() === 0, 2_000)).toBe(true);
+    // With nothing to stop, at once; and the worker still runs tools.
+    await backend.stopJobs();
+    const echoed = await backend.execute(tool('bash'), { command: 'echo after' }, context());
+    expect(echoed.content).toContain('after');
+    expect(backend.failure()).toBeNull();
+  }, 30_000);
+
+  test('stops a job whose start the worker received before the stop', async () => {
+    const { backend, jobs } = await startWithJobs();
+    const starting = backend.execute(
+      jobTool('bash_background'),
+      { command: 'sleep 30' },
+      context(),
+    );
+    await backend.stopJobs();
+    await starting;
+    expect(await waitUntil(() => jobs.running() === 0, 2_000)).toBe(true);
+    expect(backend.failure()).toBeNull();
+  }, 30_000);
+
+  test('stops a job still starting when the stop arrives in the same read', async () => {
+    // The protocol spoken directly: both lines in one write, so the worker reads them together.
+    const tools = ['bash', ...jobTools.map((t) => t.name)];
+    const [file, ...args] = workerCommand(tools, 'one-shot');
+    const child = spawn(file as string, args, {
+      stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'],
+      env: env(),
+    });
+    const lines: Record<string, unknown>[] = [];
+    let buffer = '';
+    (child.stdio[4] as NodeJS.ReadableStream).on('data', (chunk: Buffer) => {
+      buffer += chunk.toString();
+      for (let end = buffer.indexOf('\n'); end !== -1; end = buffer.indexOf('\n')) {
+        lines.push(JSON.parse(buffer.slice(0, end)));
+        buffer = buffer.slice(end + 1);
+      }
+    });
+    const seen = async (type: string): Promise<void> => {
+      const deadline = Date.now() + 15_000;
+      while (!lines.some((line) => line.type === type) && Date.now() < deadline)
+        await Bun.sleep(20);
+    };
+    const toWorker = child.stdio[3] as NodeJS.WritableStream;
+    try {
+      await seen('worker.ready');
+      toWorker.write(
+        `${JSON.stringify({ type: 'tool.execute', id: '1', name: 'bash_background', input: { command: 'sleep 30' }, cwd: '/' })}\n${JSON.stringify({ type: 'jobs.stop' })}\n`,
+      );
+      await seen('jobs.stopped');
+      const stopped = lines.findIndex((line) => line.type === 'jobs.stopped');
+      expect(lines[stopped]).toEqual({ type: 'jobs.stopped', running: 0 });
+      // The job the call started ended before the stop was confirmed.
+      const finished = lines
+        .slice(0, stopped)
+        .some(
+          (line) =>
+            line.type === 'job.event' &&
+            (line.event as { type?: string } | undefined)?.type === 'job.finished',
+        );
+      expect(finished).toBe(true);
+    } finally {
+      // The worker ends what it started on shutdown; killed, it would leave its jobs behind.
+      const exited = new Promise((resolve) => child.once('exit', resolve));
+      toWorker.write(`${JSON.stringify({ type: 'worker.shutdown' })}\n`);
+      await Promise.race([exited, Bun.sleep(5_000)]);
+      child.kill('SIGKILL');
+    }
+  }, 30_000);
 
   test('a job ready and ended in one chunk gives a single note', async () => {
     const { backend, jobs } = await startWithJobs();

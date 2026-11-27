@@ -85,6 +85,23 @@ describe('buildSystemPrompt', () => {
     expect(prompt('auto')).not.toContain('# Sandbox');
   });
 
+  test('in the security sandbox, says the project is written in memory and the network is the scope', () => {
+    const text = buildSystemPrompt({
+      cwd: '/work',
+      mode: 'auto',
+      platform: 'linux',
+      date: '2026-01-02',
+      isGitRepo: false,
+      sandbox: { profile: 'security', root: '/work' },
+      engagement: ['Authorized, over TCP and UDP, and ICMP echo:', '- 203.0.113.0/28, ports 443'],
+    });
+    expect(text).toContain('# Sandbox: security');
+    expect(text).toContain('is writable, but in memory');
+    expect(text).toContain('The network is limited to the engagement scope below.');
+    expect(text).not.toContain('There is no network');
+    expect(text).toContain('commands are refused');
+  });
+
   test('states the engagement scope as given, and that the kernel refuses the rest', () => {
     const text = buildSystemPrompt({
       cwd: '/work',

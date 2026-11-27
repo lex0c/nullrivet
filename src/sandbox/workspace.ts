@@ -42,8 +42,13 @@ import {
 
 type Env = Record<string, string | undefined>;
 
-export interface WorkspaceDirectory {
+// The directory a sandbox keeps on the host: a workspace's overlay, or a security sandbox's hosts
+// file.
+export interface SandboxDirectory {
   path: string;
+}
+
+export interface WorkspaceDirectory extends SandboxDirectory {
   upper: string;
   work: string;
 }
@@ -263,10 +268,10 @@ const live = new Map<string, number>();
 let started = 0;
 
 // Whether the directory is this process's, and not yet removed.
-export const isLiveWorkspaceDirectory = (directory: WorkspaceDirectory): boolean =>
+export const isLiveWorkspaceDirectory = (directory: SandboxDirectory): boolean =>
   live.has(directory.path);
 
-export const removeWorkspaceDirectory = (directory: WorkspaceDirectory): void => {
+export const removeWorkspaceDirectory = (directory: SandboxDirectory): void => {
   removeDirectory(directory.path);
   const lock = live.get(directory.path);
   live.delete(directory.path);
@@ -286,12 +291,10 @@ export const removeLiveWorkspaceDirectories = (): void => {
   live.clear();
 };
 
-// Creates the directory of a new session, after removing those of sessions whose process is gone.
-// The overlay keeps its markers in extended attributes of the user namespace, which tmpfs holds
-// from Linux 6.6 on: without them, some operations in the sandbox would fail.
-export const createWorkspaceDirectory = (
+// Creates the directory of a new sandbox, after removing those of sessions whose process is gone.
+export const createSandboxDirectory = (
   env: Env,
-): { directory: WorkspaceDirectory; warnings: string[] } | { error: string } => {
+): { directory: SandboxDirectory; warnings: string[] } | { error: string } => {
   const runtime = runtimeDirectory(env);
   if (typeof runtime !== 'string') return runtime;
   const warnings = sweep(runtime);
@@ -304,7 +307,7 @@ export const createWorkspaceDirectory = (
   try {
     mkdirSync(staging, { mode: 0o700 });
   } catch (error) {
-    return { error: `cannot create the workspace directory ${staging}: ${errorMessage(error)}` };
+    return { error: `cannot create the sandbox directory ${staging}: ${errorMessage(error)}` };
   }
   let lock: number | null = null;
   try {
@@ -323,9 +326,22 @@ export const createWorkspaceDirectory = (
     } catch {
       // Without its lock held, the next session's sweep removes it.
     }
-    return { error: `cannot create the workspace directory ${path}: ${errorMessage(error)}` };
+    return { error: `cannot create the sandbox directory ${path}: ${errorMessage(error)}` };
   }
   live.set(path, lock);
+  return { directory: { path }, warnings };
+};
+
+// Creates the directory of a workspace sandbox, with its overlay's upper and work directories. The
+// overlay keeps its markers in extended attributes of the user namespace, which tmpfs holds from
+// Linux 6.6 on: without them, some operations in the sandbox would fail.
+export const createWorkspaceDirectory = (
+  env: Env,
+): { directory: WorkspaceDirectory; warnings: string[] } | { error: string } => {
+  const created = createSandboxDirectory(env);
+  if ('error' in created) return created;
+  const { path } = created.directory;
+  const { warnings } = created;
   const directory = { path, upper: join(path, 'upper'), work: join(path, 'work') };
   try {
     mkdirSync(directory.upper, { mode: 0o700 });
@@ -339,10 +355,10 @@ export const createWorkspaceDirectory = (
     }
     if (error instanceof SysError && (error.code === 'ENOTSUP' || error.code === 'EOPNOTSUPP')) {
       return {
-        error: `the workspace sandbox needs extended attributes (user.*) in ${runtime}, which tmpfs supports from Linux 6.6`,
+        error: `the workspace sandbox needs extended attributes (user.*) in ${dirname(path)}, which tmpfs supports from Linux 6.6`,
       };
     }
-    return { error: `cannot prepare the workspace directory ${path}: ${errorMessage(error)}` };
+    return { error: `cannot prepare the sandbox directory ${path}: ${errorMessage(error)}` };
   }
   return { directory, warnings };
 };

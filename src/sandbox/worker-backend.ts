@@ -2,6 +2,7 @@ import { type ChildProcess, spawn } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
 import { BackendLostError, type ToolBackend } from '../agent/tool-broker.ts';
 import { BoundedCapture } from '../context/bounded-capture.ts';
+import { errorMessage } from '../errors.ts';
 import { terminalText } from '../sanitize/display.ts';
 import { KILL_GRACE_MS, trackProcessGroup } from '../tools/process.ts';
 import { type Tool, type ToolContext, type ToolResult, toolError } from '../tools/types.ts';
@@ -24,6 +25,17 @@ export interface WorkerLaunch {
   // The whole environment of the started process; nothing is inherited.
   env: Record<string, string>;
   inputs?: readonly Uint8Array[];
+  // The launcher reports itself on a status descriptor, a first line of JSON, then waits on a gate
+  // descriptor until released, as Bubblewrap's --json-status-fd and --block-fd do. Both follow the
+  // inputs, at the numbers `gateDescriptors` gives.
+  gate?: boolean;
+}
+
+// What a gated launcher reported, given to the preparation before its release.
+export interface Launched {
+  // The launcher's process, whose group holds everything it started.
+  pid: number;
+  status: string;
 }
 
 export interface WorkerBackendOptions {
@@ -35,6 +47,13 @@ export interface WorkerBackendOptions {
   cancelGraceMs?: number;
   // The worker runs background jobs, and reports them as they happen.
   jobs?: boolean;
+  // For a gated launch: run once the launcher reported itself, before it is released. The worker
+  // starts only when it resolves, within the preparation's time. A start that fails does not wait
+  // for it: the caller does, before it undoes what the preparation made.
+  prepare?: (launched: Launched) => Promise<void>;
+  prepareTimeoutMs?: number;
+  // Gives up a start still under way, gated or not.
+  signal?: AbortSignal;
 }
 
 const DEFAULT_READY_TIMEOUT_MS = 10_000;
@@ -42,10 +61,26 @@ const DEFAULT_READY_TIMEOUT_MS = 10_000;
 // for its output to close: the result can take twice the grace, plus a margin.
 const DEFAULT_CANCEL_GRACE_MS = 2 * KILL_GRACE_MS + 3_000;
 const SHUTDOWN_GRACE_MS = 3_000;
+// The worker waits up to ten seconds for each job it stops, all at once.
+const JOBS_STOP_TIMEOUT_MS = 15_000;
 const STDERR_CAPTURE_BYTES = 16 * 1024;
 const STDERR_SHOWN_CHARS = 2_000;
 // Where the protocol descriptors are in the child's stdio, and where launcher inputs start.
 const PROTOCOL_STDIO = ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'] as const;
+const PREPARE_TIMEOUT_MS = 30_000;
+// How long the processes of a launcher that was not released may take to be gone once killed.
+const ENDED_TIMEOUT_MS = 5_000;
+const POLL_MS = 20;
+
+// The descriptors of a gated launcher, after `inputs` launcher inputs.
+export const gateDescriptors = (inputs: number): { status: number; gate: number } => ({
+  status: PROTOCOL_STDIO.length + inputs,
+  gate: PROTOCOL_STDIO.length + inputs + 1,
+});
+
+// Gates whose launcher could not be confirmed ended: closing their last writer would release it,
+// so they stay open for as long as this process lives.
+const shut: Writable[] = [];
 
 interface PendingCall {
   resolve: (result: ToolResult) => void;
@@ -76,15 +111,24 @@ export class WorkerBackend implements ToolBackend {
   private ready = false;
   private sequence = 0;
   private untrack: () => void = () => undefined;
+  // Whether a gated launcher was released, or the launch has no gate.
+  private released: boolean;
   private readonly exited: Promise<void>;
   private readonly toWorker: Writable;
   private onReady: ((error: Error | null) => void) | null = null;
+  // The stop of the jobs asked for and not answered yet.
+  private stoppingJobs: {
+    promise: Promise<void>;
+    answer: (running: number) => void;
+    abandon: (reason: string) => void;
+  } | null = null;
 
   private constructor(
     private readonly child: ChildProcess,
     options: WorkerBackendOptions,
   ) {
     this.offered = new Set(options.tools);
+    this.released = options.launch.gate !== true;
     this.cancelGraceMs = options.cancelGraceMs ?? DEFAULT_CANCEL_GRACE_MS;
     this.jobs = options.jobs === true ? new JobProjection() : undefined;
     this.toWorker = child.stdio[3] as Writable;
@@ -119,10 +163,18 @@ export class WorkerBackend implements ToolBackend {
   // did not get ready is not left running.
   static start(options: WorkerBackendOptions): Promise<WorkerBackend> {
     const inputs = options.launch.inputs ?? [];
+    const gated = options.launch.gate === true;
     const [file, ...args] = options.launch.command;
     if (file === undefined) return Promise.reject(new Error('the worker command is empty'));
+    if (gated !== (options.prepare !== undefined)) {
+      return Promise.reject(new Error('a gated launch needs a preparation, and only one has it'));
+    }
     const child = spawn(file, args, {
-      stdio: [...PROTOCOL_STDIO, ...inputs.map(() => 'pipe' as const)],
+      stdio: [
+        ...PROTOCOL_STDIO,
+        ...inputs.map(() => 'pipe' as const),
+        ...(gated ? (['pipe', 'pipe'] as const) : []),
+      ],
       env: options.launch.env,
       // In a group of its own, so an interrupt in the terminal does not reach it and the exit
       // handler can kill everything it started.
@@ -135,19 +187,147 @@ export class WorkerBackend implements ToolBackend {
       stream.end(data);
     });
     const backend = new WorkerBackend(child, options);
+    const abort = (): void => backend.lose('the start of the sandbox was given up');
+    if (options.signal?.aborted === true) abort();
+    options.signal?.addEventListener('abort', abort, { once: true });
+    const started = gated ? backend.passGate(options, inputs.length) : backend.whenReady(options);
+    return started.finally(() => options.signal?.removeEventListener('abort', abort));
+  }
+
+  private whenReady(options: WorkerBackendOptions): Promise<WorkerBackend> {
     const timeoutMs = options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
     return new Promise((resolve, reject) => {
+      if (this.lost !== null) {
+        reject(new Error(this.lost));
+        return;
+      }
       const timer = setTimeout(
-        () => backend.lose(`the worker was not ready within ${seconds(timeoutMs)}`),
+        () => this.lose(`the worker was not ready within ${seconds(timeoutMs)}`),
         timeoutMs,
       );
-      backend.onReady = (error) => {
+      this.onReady = (error) => {
         clearTimeout(timer);
-        backend.onReady = null;
-        if (error === null) resolve(backend);
+        this.onReady = null;
+        if (error === null) resolve(this);
         else reject(error);
       };
     });
+  }
+
+  // Reads the launcher's report, runs the preparation, and releases the launcher only when it
+  // succeeded. Otherwise the launcher is killed and its group confirmed empty before the gate is
+  // closed: an end of file on the gate releases the launcher as data does.
+  private async passGate(options: WorkerBackendOptions, inputs: number): Promise<WorkerBackend> {
+    const { status: statusFd, gate: gateFd } = gateDescriptors(inputs);
+    const status = this.child.stdio[statusFd] as Readable;
+    const gate = this.child.stdio[gateFd] as Writable;
+    status.on('error', () => undefined);
+    gate.on('error', () => undefined);
+    const pid = this.child.pid;
+    const prepareTimeoutMs = options.prepareTimeoutMs ?? PREPARE_TIMEOUT_MS;
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    try {
+      if (pid === undefined) throw new Error(this.lost ?? 'the launcher did not start');
+      const prepared = (async () => {
+        const line = await this.firstLine(status);
+        await (options.prepare as NonNullable<WorkerBackendOptions['prepare']>)({
+          pid,
+          status: line,
+        });
+      })();
+      // The preparation is not waited for once the start is given up or the launcher is lost.
+      prepared.catch(() => undefined);
+      await Promise.race([
+        prepared,
+        new Promise<never>((_, reject) => {
+          deadline = setTimeout(
+            () => reject(new Error(`not prepared within ${seconds(prepareTimeoutMs)}`)),
+            prepareTimeoutMs,
+          );
+          this.onReady = (error) => {
+            if (error !== null) reject(error);
+          };
+        }),
+      ]);
+      this.onReady = null;
+      if (this.lost !== null) throw new Error(this.lost);
+    } catch (error) {
+      this.lose(`the sandbox was not prepared: ${errorMessage(error)}`);
+      const reason = this.lost ?? errorMessage(error);
+      if (await this.groupEnded()) {
+        gate.destroy();
+        status.destroy();
+        throw new Error(reason);
+      }
+      shut.push(gate);
+      throw new Error(
+        `${reason}; its processes could not be confirmed ended, so its gate stays shut`,
+      );
+    } finally {
+      clearTimeout(deadline);
+    }
+    this.released = true;
+    gate.end('x');
+    // The launcher reports its exit there too; nothing more is read.
+    status.resume();
+    return this.whenReady(options);
+  }
+
+  // The first line the launcher writes on its status descriptor.
+  private firstLine(status: Readable): Promise<string> {
+    return new Promise((resolve, reject) => {
+      let text = '';
+      const onData = (chunk: Buffer): void => {
+        text += chunk.toString();
+        const end = text.indexOf('\n');
+        if (end !== -1) {
+          finish();
+          resolve(text.slice(0, end));
+        } else if (text.length > MAX_LINE_BYTES) {
+          finish();
+          reject(new Error('the launcher reported a line over the size limit'));
+        }
+      };
+      const onEnd = (): void => {
+        finish();
+        reject(new Error(this.lost ?? 'the launcher reported nothing'));
+      };
+      const finish = (): void => {
+        status.off('data', onData);
+        status.off('end', onEnd);
+        status.pause();
+      };
+      status.on('data', onData);
+      status.on('end', onEnd);
+    });
+  }
+
+  // Whether the launcher has exited and every process of its group is gone, within the time
+  // allowed. A process of the group that is still there would be released by the gate's end.
+  private async groupEnded(): Promise<boolean> {
+    const pid = this.child.pid;
+    if (pid === undefined) return true;
+    const deadline = Date.now() + ENDED_TIMEOUT_MS;
+    const exited = await Promise.race([
+      this.exited.then(() => true),
+      Bun.sleep(ENDED_TIMEOUT_MS).then(() => false),
+    ]);
+    if (!exited) return false;
+    while (Date.now() < deadline) {
+      try {
+        process.kill(-pid, 0);
+      } catch {
+        // ESRCH: no process of the group is left.
+        return true;
+      }
+      try {
+        process.kill(-pid, 'SIGKILL');
+      } catch {
+        return true;
+      }
+      await Bun.sleep(POLL_MS);
+    }
+    return false;
   }
 
   failure(): string | null {
@@ -196,6 +376,42 @@ export class WorkerBackend implements ToolBackend {
       if (context.signal.aborted) onAbort();
       else context.signal.addEventListener('abort', onAbort, { once: true });
     });
+  }
+
+  // Ends every background job the worker runs, and resolves once it confirmed they ended; rejects
+  // when one did not, or when the worker does not answer in time. The worker and its sandbox go on.
+  stopJobs(timeoutMs = JOBS_STOP_TIMEOUT_MS): Promise<void> {
+    if (this.lost !== null) return Promise.reject(new BackendLostError(this.lost));
+    if (this.stoppingJobs !== null) return this.stoppingJobs.promise;
+    let answer: (running: number) => void = () => undefined;
+    let abandon: (reason: string) => void = () => undefined;
+    const promise = new Promise<void>((resolve, reject) => {
+      // A worker that does not answer in time is lost, as for a cancelled call: jobs it could not
+      // confirm ended go with it, and no late answer is taken for another stop.
+      const timer = setTimeout(() => {
+        const reason = `the worker did not confirm the jobs ended within ${seconds(timeoutMs)}`;
+        this.lose(reason);
+        reject(new Error(reason));
+      }, timeoutMs);
+      answer = (running) => {
+        clearTimeout(timer);
+        this.stoppingJobs = null;
+        if (running === 0) resolve();
+        else reject(new Error(`${running} background jobs did not end`));
+      };
+      abandon = (reason) => {
+        clearTimeout(timer);
+        this.stoppingJobs = null;
+        reject(new BackendLostError(reason));
+      };
+    });
+    this.stoppingJobs = {
+      promise,
+      answer: (running) => answer(running),
+      abandon: (reason) => abandon(reason),
+    };
+    this.send({ type: 'jobs.stop' });
+    return promise;
   }
 
   // Asks the worker to stop, then kills what remains of its group. Later calls are refused.
@@ -253,12 +469,24 @@ export class WorkerBackend implements ToolBackend {
         );
         return;
       }
+      if (!this.released) {
+        this.lose('the worker sent worker.ready before it was released');
+        return;
+      }
       this.ready = true;
       this.onReady?.(null);
       return;
     }
     if (!this.ready) {
       this.lose(`the worker sent ${message.type} before worker.ready`);
+      return;
+    }
+    if (message.type === 'jobs.stopped') {
+      if (this.stoppingJobs === null) {
+        this.lose('the worker sent jobs.stopped without being asked');
+        return;
+      }
+      this.stoppingJobs.answer(message.running);
       return;
     }
     if (message.type !== 'tool.result') {
@@ -292,6 +520,7 @@ export class WorkerBackend implements ToolBackend {
       call.reject(new BackendLostError(this.lost));
     }
     this.pending.clear();
+    this.stoppingJobs?.abandon(this.lost);
     this.jobs?.lose();
     this.onReady?.(new Error(this.lost));
     this.toWorker.destroy();

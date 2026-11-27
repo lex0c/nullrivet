@@ -12,6 +12,7 @@ import {
   workspaceLaunch,
 } from './bwrap.ts';
 import { limitedLaunch, prepareLimits } from './limits.ts';
+import { type SecurityNotice, SecuritySession } from './security.ts';
 import { WorkerBackend } from './worker-backend.ts';
 import {
   createWorkspaceDirectory,
@@ -50,7 +51,17 @@ export interface StartedSandbox {
   // Starts another sandbox of the workspace profile on a new directory, with the project as it is
   // then, for a session that applies or discards the changes and goes on.
   relaunch?: WorkspaceLaunch;
+  // Set for the security profile: it owns the worker, the network and their end.
+  security?: SecuritySession;
   warnings: string[];
+}
+
+// The engagement of a security sandbox, and where it says what happens to its window and network.
+export interface StartEngagement {
+  path: string;
+  notice: SecurityNotice;
+  // Gives up the start, as an interrupt does.
+  signal?: AbortSignal;
 }
 
 // Removes the directory of a workspace that did not start. The sandbox can still be ending, with
@@ -72,6 +83,7 @@ export const startSandbox = async (
   env: Record<string, string | undefined>,
   readOnlyDirs: readonly string[],
   jobs: JobSession,
+  engagement?: StartEngagement,
 ): Promise<StartedSandbox | { error: string }> => {
   const host = sandboxHost();
   if (typeof host === 'string') return { error: host };
@@ -90,6 +102,25 @@ export const startSandbox = async (
     jobs,
   };
   const scope = { profile, root: project.root };
+  if (profile === 'security') {
+    if (engagement === undefined) return { error: 'the security sandbox needs an engagement file' };
+    const started = await SecuritySession.start({
+      host,
+      launch: options,
+      env,
+      engagementPath: engagement.path,
+      notice: engagement.notice,
+      ...(engagement.signal === undefined ? {} : { signal: engagement.signal }),
+    });
+    if ('error' in started) return started;
+    return {
+      backend: started.backend,
+      scope,
+      cwd: project.cwd,
+      security: started,
+      warnings: started.warnings,
+    };
+  }
   if (profile === 'inspect') {
     const limits = await prepareLimits(env);
     try {

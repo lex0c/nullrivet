@@ -46,7 +46,7 @@ import {
 import type { AgentEndReason, AgentEventListener, CompactReason } from './events.ts';
 import { generateWithRetry } from './retry.ts';
 import { DISCOVERED_INSTRUCTIONS_HEADER } from './system-prompt.ts';
-import { executeToolCall, type ToolBackend } from './tool-broker.ts';
+import { type EngagementWindow, executeToolCall, type ToolBackend } from './tool-broker.ts';
 
 export interface LoopLimits {
   maxSteps: number;
@@ -74,6 +74,7 @@ export interface TurnDependencies {
   toolBackend: ToolBackend;
   // Read before every request and every tool call, so a mode change takes effect immediately.
   mode: () => ExecutionMode;
+  engagement?: EngagementWindow;
   cwd: string;
   systemPrompt: () => string;
   // Text sent at the start of the first user message of every request, such as the project
@@ -100,6 +101,8 @@ export interface RuntimeNotice {
   data?: string;
   // Shown to the user in place of `text`, when the note as written is meant for the model only.
   display?: string;
+  // The user was told already, when it happened: the note goes to the model alone.
+  shown?: boolean;
 }
 
 // Which limit ended a turn with `budget`.
@@ -286,6 +289,7 @@ const executeToolCalls = async (
       signal,
       backend: deps.toolBackend,
       newInstructions: unseenBeforeWrite,
+      ...(deps.engagement === undefined ? {} : { engagement: deps.engagement }),
     });
     let content = result.content;
     const attached = await discover(result.touchedPaths ?? []);
@@ -426,7 +430,7 @@ export const runTurn = async (
     const notices = deps.notices?.() ?? [];
     for (const notice of notices) {
       conversation.appendUser(agentNote(notice.text), notice.data);
-      emit({ type: 'notice', text: notice.display ?? notice.text });
+      if (notice.shown !== true) emit({ type: 'notice', text: notice.display ?? notice.text });
     }
     if (notices.length > 0) batchPending = true;
     return notices.length;

@@ -10,6 +10,7 @@ import { MODEL_CATALOG } from '../providers/catalog.ts';
 import type { FetchLike } from '../providers/discovery.ts';
 import { type ModelOverrides, resolveModel } from '../providers/resolve.ts';
 import { sandboxProject } from '../sandbox/bwrap.ts';
+import type { SecurityNotice } from '../sandbox/security.ts';
 import { SandboxSession } from '../sandbox/session.ts';
 import { type StartedSandbox, type StartedWorkspace, startSandbox } from '../sandbox/start.ts';
 import { isLiveWorkspaceDirectory, removeWorkspaceDirectory } from '../sandbox/workspace.ts';
@@ -134,6 +135,9 @@ export const runCli = async (io: CliIO): Promise<number> => {
   // before any request leaves the machine. Subagent reports are written by this process and read
   // by the tools, so their directory is exposed read-only.
   let sandbox: StartedSandbox | null = null;
+  // What the security sandbox says of its window and its network: to the operator, and to the
+  // model once the agent runs.
+  let tellSecurity: SecurityNotice = (level, text) => sink.notice(level, text);
   if (config.sandbox === 'workspace' && session !== null) {
     // Checked before anything starts.
     const project = await sandboxProject(cwd, io.env);
@@ -151,8 +155,25 @@ export const runCli = async (io: CliIO): Promise<number> => {
         EXIT_CODES.error,
       );
     }
-    const started = await startSandbox(config.sandbox, cwd, io.env, [reports], jobSession);
-    if ('error' in started) return fail(started.error, EXIT_CODES.error);
+    const started = await startSandbox(
+      config.sandbox,
+      cwd,
+      io.env,
+      [reports],
+      jobSession,
+      config.engagement === undefined
+        ? undefined
+        : {
+            // Relative to where nullrivet was started, like any other path given on the command
+            // line.
+            path: resolve(io.cwd, config.engagement),
+            notice: (level, text) => tellSecurity(level, text),
+            signal: io.signal,
+          },
+    );
+    if ('error' in started) {
+      return fail(started.error, io.signal.aborted ? EXIT_CODES.aborted : EXIT_CODES.error);
+    }
     sandbox = started;
   }
   // An interactive session applies or discards the workspace's changes as it goes, and starts a
@@ -185,6 +206,7 @@ export const runCli = async (io: CliIO): Promise<number> => {
     if (resolved === null) return fail('aborted', EXIT_CODES.aborted);
     if (!resolved.ok) return fail(resolved.error);
 
+    const security = sandbox?.security;
     const agent = await createAgent({
       provider: resolved.provider,
       tools: BUILTIN_TOOLS,
@@ -192,6 +214,9 @@ export const runCli = async (io: CliIO): Promise<number> => {
       // In a sandboxed session, the jobs run in the sandbox, which reports them to the agent.
       backgroundJobs: jobSession,
       ...(sandbox === null ? {} : { sandbox: sandbox.scope }),
+      ...(security === undefined
+        ? {}
+        : { engagement: { scope: () => security.scope(), window: security } }),
       // Subagents run in the background and report when the session is free to listen; a one-shot
       // run ends with its task, so its main agent does the work itself.
       delegation: interactive,
@@ -205,6 +230,17 @@ export const runCli = async (io: CliIO): Promise<number> => {
       ...(config.timeLimitMs === undefined ? {} : { timeLimitMs: config.timeLimitMs }),
     });
     const warnings = [...resolved.warnings, ...agent.bootWarnings, ...(sandbox?.warnings ?? [])];
+    // The scope the engagement authorizes, as the operator is to check it.
+    const notes = sandbox?.security === undefined ? [] : [sandbox.security.scope().join('\n')];
+    // Shown when it happens, by the interactive session once it runs; the model reads it with its
+    // next request.
+    let show: SecurityNotice = (level, text) => sink.notice(level, text);
+    if (sandbox?.security !== undefined) {
+      tellSecurity = (level, text) => {
+        show(level, text);
+        agent.notify({ text, shown: true });
+      };
+    }
     if (resumed !== null) {
       agent.conversation.restore(resumed.conversation);
       if (resumed.mode === 'readonly' && config.mode === 'auto') {
@@ -240,8 +276,13 @@ export const runCli = async (io: CliIO): Promise<number> => {
                 () => agent.instructions().map((file) => file.path),
               ),
             }),
+        ...(sandbox?.security === undefined ? {} : { security: sandbox.security }),
         resolveModel: (id) => resolveWith(id, {}),
         warnings,
+        notes,
+        showNotices: (notice) => {
+          show = notice;
+        },
         sessionFile: session?.file ?? null,
         resumedMessages: resumed === null ? null : resumed.conversation.messages.length,
         history,
@@ -253,6 +294,7 @@ export const runCli = async (io: CliIO): Promise<number> => {
     }
 
     for (const warning of warnings) sink.notice('warning', warning);
+    for (const note of notes) sink.notice('info', note);
     if (session !== null) {
       // The prompt of a one-shot run joins the history, so it can be recalled when the session is
       // continued interactively.
@@ -290,7 +332,13 @@ export const runCli = async (io: CliIO): Promise<number> => {
   } finally {
     // The changes of an interactive session not applied by now are discarded with its sandbox.
     await restartable?.close();
-    await sandbox?.backend.close();
+    if (sandbox?.security !== undefined) {
+      await sandbox.security
+        .close()
+        .catch((error: unknown) => sink.notice('warning', errorMessage(error)));
+    } else {
+      await sandbox?.backend.close();
+    }
     const warn = (message: string) => sink.notice('warning', message);
     for (const workspace of [restartable?.workspace, sandbox?.workspace]) {
       if (workspace !== undefined && workspace !== null) removeDirectory(workspace.directory, warn);

@@ -114,7 +114,7 @@ the mode never lifts a restriction of the profile.
 | none (default) | Host, as today | Host, as today | Coding on one's own project |
 | `inspect` | Project read-only; system directories read-only; tmpfs home and `/tmp` | None | Code review, analysis of untrusted repositories |
 | `workspace` | Project through an overlay; changes held aside until applied | None | Coding without touching the project until confirmed |
-| `security` | Working directory in an overlay; system read-only; tmpfs home | Only the engagement scope | Authorized testing, laboratories |
+| `security` | Project through an overlay kept in memory and discarded at exit; system read-only; tmpfs home | Only the engagement scope, within its window | Authorized testing, laboratories |
 
 | Mode | Profile | Result |
 |---|---|---|
@@ -585,12 +585,23 @@ The namespaces are configured by helper processes the host starts for that purpo
 process never joins them, so the agent loop and the providers keep the host's network.
 
 1. The host makes a user and a network namespace, with the user's id mapped to their root
-   (`unshare --user --map-root-user --net`), and runs Bubblewrap in them with `--share-net`.
-   Bubblewrap puts the sandbox in a user namespace of its own, nested in the first, as the user's
-   id, with every capability dropped (`--cap-drop ALL`) and `--disable-userns`, and waits on
-   `--block-fd` before starting the worker.
-2. Helpers enter the first two namespaces from outside, by the process id of Bubblewrap, which
-   runs in them (`nsenter --user --net --preserve-credentials`), and, in order:
+   (`unshare --user --map-root-user --net`), and runs Bubblewrap in them with `--share-net`, all
+   in the sandbox's scope (see Resources). Bubblewrap puts the sandbox in a user namespace of its
+   own, nested in the first, as the user's id, with every capability dropped (`--cap-drop ALL`)
+   and `--disable-userns`, reports the process it made on `--json-status-fd`, and waits on
+   `--block-fd` before starting the worker. systemd-run and unshare run what follows in place of
+   themselves, so the process the host started is Bubblewrap's; the host does not take that on
+   trust. It checks, before any helper runs, that the process Bubblewrap reported on the host's
+   own descriptor has the started process for parent and shares its network namespace, and that
+   the started process's user namespace is neither the host's nor the sandbox's. Then it opens
+   the two namespaces, and checks that the namespace opened is the one named.
+2. Helpers enter the two namespaces from outside, through the host's descriptors
+   (`nsenter --user=/proc/<host>/fd/N --net=/proc/<host>/fd/M --preserve-credentials`), which
+   name them whatever happens to the process they were taken from and to its id; the host keeps
+   them open until no helper can run. pasta refuses such a path, so it is given the process's
+   own, checked against the descriptor right before it starts, while the process is the host's
+   child and its id cannot go to another; once pasta is ready, the routes are read through the
+   descriptor, so the namespace pasta configured is the one pinned. The helpers, in order:
    install a ruleset that authorizes nothing, while the namespace has only its loopback; set the
    ping group range, so ICMP echo works without raw sockets; start pasta, which gives the
    namespace its way out, still closed; install the scope's ruleset, which takes effect in one
@@ -601,10 +612,17 @@ process never joins them, so the agent loop and the providers keep the host's ne
    read, in memory (the user's runtime directory or `/dev/shm`) when one is a tmpfs, since they
    name the targets: an argument is limited to 128 KiB, and nftables 1.0.9 cannot read a script
    from a pipe.
-3. Only then is the worker released, by writing to the block descriptor. A step that fails ends
-   the sandbox unreleased. Bubblewrap reads the descriptor once and goes on at its end as well, so
-   a host that dies mid-way does not hold it back: what holds is the ruleset that authorizes
-   nothing, installed first, and `--die-with-parent`, which ends the sandbox with the host.
+3. Only then is the worker released, by writing to the block descriptor, after the window was
+   checked once more. A step that fails, or that takes more than thirty seconds, ends the sandbox
+   unreleased. Bubblewrap goes on at the end of the block descriptor as on data, so closing it is
+   a release too: the host kills the process group, which holds the blocked processes until
+   then, and closes the descriptor only once the launcher has exited and the group is empty. A
+   group that cannot be confirmed empty keeps its descriptor open for as long as the host lives.
+   A host that dies has its descriptors closed by the kernel before the sandbox gets the signal
+   of `--die-with-parent`, so the worker may start for a moment: it runs only what the host
+   sends, which is nothing, and the namespace has at most the ruleset that authorizes nothing,
+   which goes in first. A `worker.ready` before the release is a violation, and loses the
+   worker.
 
 The host, as the namespaces' owner, holds every capability over them, from its own namespace;
 nothing in the sandbox does, being in a namespace nested below them. Checked: from inside,
@@ -667,10 +685,29 @@ would under a rule that accepts established connections.
 - Since every packet is matched, a connection to a revoked destination is refused at its next
   packet, and the process gets a reset or an error, as for any destination out of scope. No
   process is killed for it, and the boundary does not depend on removing conntrack entries.
-- Before the window starts and after it ends, the ruleset authorizes nothing. At its end, the
-  ruleset is replaced first; then the broker cancels the running command and stops the jobs. A
-  process a command left behind loses the network with the rest. The sandbox stays, so the files
-  written in it can still be read.
+- The window is in the ruleset: `meta time < "<from>"` and `meta time >= "<until>"`, written in
+  UTC with nft and the reference listed under `TZ=UTC`, rounded inward to the second nft keeps,
+  refuse every packet outside it, in both directions, after the loopback and before anything
+  that accepts. The kernel holds the end, whatever the host's process is doing: tested with the
+  host's event loop held across the end, as when it is suspended or starved, nothing passed
+  after it. No packet the sandbox sends after the end crosses the policy; bytes it wrote before,
+  which pasta or the host's buffers hold, may still reach the target. Tested: every byte a
+  connection wrote and the target received was written before the end, and no datagram of a
+  flow opened before the end came in after it.
+- The rest follows as soon as the host sees the end, within a second: the network closes for
+  good (the closing table and pasta's end), the calls of tools that start commands are
+  cancelled, and the jobs stopped, confirmed by the worker, which first waits for the jobs whose
+  start it received before the stop; a worker that does not confirm within fifteen seconds is
+  lost, with its jobs. The operator is told when it happens, and the model with its next
+  request. From then on the session holds it as
+  ended, even if the clock goes back. The broker refuses `bash` and `bash_background` outside
+  the window, before any backend, for subagents too; glob, grep and git run fixed programs (git
+  with every program a repository configures disabled) and stay available, as do reading,
+  writing and `bash_jobs`. A process a command left behind loses the network with the rest: tested
+  with one started with `setsid`, probing every 50 ms, a refresh racing the end, and an nft
+  hanging on the closing table. The sandbox stays, so the files written in it can still be read.
+- Before the window, the scope is installed whole and the kernel refuses everything; commands are
+  refused. A window that ended before the start stops the session.
 
 ### Profiles without network
 
@@ -718,7 +755,14 @@ host name. A name handled by the proxy gets no rule of its own, since a tool cou
 the address without the proxy.
 
 `/scope refresh` resolves the names again and replaces the ruleset, for targets whose addresses
-change.
+change, as one logical step: every name is resolved and checked first, and a failure changes
+nothing; then the new hosts file is written beside the old one; then the scope is put in force,
+and only then the hosts file replaced by a rename, so a name never points at an address not yet
+authorized. A rename that fails closes the network. Refreshes run one after another; a close does
+not wait for them, and none puts anything in force after it. The sandbox's `/etc/hosts` is a link
+into a directory of the host bound read-only, `/etc/nullrivet`, since a file bound by itself would
+keep the one it was bound to after a rename; a new lookup reads the new one, and a program that
+caches answers keeps its own, which the ruleset still holds to the scope.
 
 ### Raw sockets
 
@@ -751,9 +795,12 @@ refused.
 
 - `deny` wins over `allow`. A file without `allow` entries leaves the sandbox without network.
 - `rate` applies per destination address.
-- Outside `window`, the ruleset authorizes nothing and the broker refuses commands before they
-  start. When the window ends, the running command and jobs are stopped, as described under
-  Revoking a destination.
+- Outside `window`, the kernel refuses every packet and the broker refuses commands before they
+  start. When the window ends, the network closes for good and the running commands and jobs are
+  stopped, as described under Revoking a destination. Times take three decimals at most: a Date
+  keeps milliseconds, and a finer fraction would move the start earlier. They lie between 1970 and
+  2500: nft keeps a time in nanoseconds since 1970 in 64 bits, and wraps one out of that range in
+  silence, so that a start in 1900 would read as one in 2484 and refuse everything.
 - The scope reaches the model as a system prompt section stating the facts, so it can plan within
   them; nothing depends on the model reading it.
 - The file is validated whole before anything starts, and an error names the item that failed, as
@@ -822,8 +869,8 @@ the end of the session, or a signature.
 The sandbox's resources are limited, for every profile, so that a command that exhausts them, by
 design or by mistake, leaves the host usable. The limits protect the host's stability, not the
 boundary: unlike the file and network isolation, which stop the session when unavailable, a limit
-that cannot be put in force is a warning. The `security` profile is to require the cgroup limits;
-see Phases.
+that cannot be put in force is a warning, except in the `security` profile, which runs tools
+against targets and does not start without the cgroup limits.
 
 With the user's service manager, the sandbox runs in a scope of its own, made by
 `systemd-run --user --scope`: a cgroup that holds the whole sandbox, whatever namespaces it makes.
@@ -869,9 +916,20 @@ the user that start meanwhile take from the same budget, and memory and CPU are 
 session says so when it starts.
 
 systemd-run and prlimit are taken from system directories only, as Bubblewrap is, and run the
-sandbox in place of themselves, with the descriptors the worker's protocol uses. The limits apply
-to the sandbox; pasta and the network helpers of the `security` profile run outside it until
-step 4 of phase 4.
+sandbox in place of themselves, with the descriptors the worker's protocol uses.
+
+In the `security` profile, pasta runs in a scope of its own, `nullrivet-pasta-<pid>-<n>.scope`,
+made with what the manager accepted for the sandbox's: `TasksMax=8`, `MemoryMax` of 256 MiB, no
+swap and `CPUWeight=20`, so that traffic to and from the targets costs it what these allow. Its
+256 MiB come out of the sandbox's three quarters: a budget per session, not a limit the kernel
+holds on the two together, which several sessions at once would need a parent cgroup for. Once
+pasta is ready, the host checks that the process it follows is pasta itself (`pasta`, or `passt`
+and `passt.avx2`, which it runs again as), in that scope, which holds those limits; a wrapper that
+did not run it in place, or a scope that does not hold them, ends the start. Its stop ends pasta,
+then kills what is left of its scope with `cgroup.kill` and waits for `populated 0` in its
+`cgroup.events`, or for the scope's removal, five seconds at most: a stop that cannot confirm it
+fails, and the session says so. The network helpers, nsenter and nft, live for one command each,
+under a ten-second timeout, and run outside it.
 
 Tested: a process that forks under a limit of 64 tasks stops below it, in a cgroup and by
 RLIMIT_NPROC; a process that passes 256 MiB is killed, and the sandbox still runs a second later;
@@ -900,8 +958,9 @@ hard alike.
 ## Platforms
 
 - **Linux:** Bubblewrap 0.8.0 or later, for `--disable-userns`, and 0.10.0 or later for the
-  overlay the `workspace` profile mounts (`--overlay-src`; `security` will use `--tmp-overlay`), unprivileged user
-  namespaces enabled, nftables, and passt for `security`. Some distributions restrict
+  overlays the `workspace` and `security` profiles mount (`--overlay-src`, with `--overlay` and
+  `--tmp-overlay`), unprivileged user namespaces enabled, and for `security` nftables, passt, a
+  kernel with `meta time` and the user's service manager. Some distributions restrict
   unprivileged user namespaces through AppArmor; the check at start says which requirement is
   missing.
 - Bubblewrap sets the boundary up from outside it, with the user's access, so it is never looked
@@ -951,11 +1010,10 @@ hard alike.
    3. the resource limits described under Resources, for every profile, done: the `security`
       profile runs tools against targets, and a sandbox that isolates files and network would
       otherwise share the host's CPU, memory and process table;
-   4. the profile end to end, next: the hosts file, the window, `/scope refresh`; pasta and the
-      network helpers in a scope of their own, within the session's limits, since traffic to and
-      from the targets costs pasta CPU and memory outside the sandbox's; and the cgroup limits
-      required, not a warning: the profile does not start with RLIMIT_NPROC alone;
-   5. the documentation and an adversarial review.
+   4. the profile end to end, done: `--sandbox security --engagement`, the hosts file, the window
+      in the kernel, `/scope refresh`, pasta in a scope of its own, and the cgroup limits
+      required;
+   5. the documentation and an adversarial review, next.
 
    4b: the allowlisting HTTP proxy.
 5. **Evidence log**, written by the host, with credentials removed from the arguments: the tool

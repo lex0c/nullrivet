@@ -1,5 +1,6 @@
 // A worker that breaks the protocol in the way FAKE_SCENARIO names, for the host's checks.
 import { createReadStream, createWriteStream } from 'node:fs';
+import { PROTOCOL_VERSION } from '../../src/sandbox/protocol.ts';
 
 const out = createWriteStream('', { fd: 4 });
 const send = (value: unknown): void => {
@@ -12,13 +13,15 @@ const result = (content: string) => ({ content, isError: false });
 if (scenario === 'no-ready') {
   setInterval(() => undefined, 1_000);
 } else {
-  send({ type: 'worker.ready', protocol: 1, tools });
+  send({ type: 'worker.ready', protocol: PROTOCOL_VERSION, tools });
 }
-if (scenario === 'ready-twice') send({ type: 'worker.ready', protocol: 1, tools });
+if (scenario === 'ready-twice') send({ type: 'worker.ready', protocol: PROTOCOL_VERSION, tools });
 if (scenario === 'stderr-then-exit') {
   process.stderr.write('setting up the namespace failed\n');
   process.exit(3);
 }
+
+if (scenario === 'unasked-jobs-stopped') send({ type: 'jobs.stopped', running: 0 });
 
 let buffer = '';
 createReadStream('', { fd: 3 }).on('data', (chunk) => {

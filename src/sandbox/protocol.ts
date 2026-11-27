@@ -8,7 +8,7 @@ import type { ToolResult } from '../tools/types.ts';
 // is not an option of the CLI, so no prompt or flag can collide with it.
 export const WORKER_ARGUMENT = '--nullrivet-sandbox-worker';
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 // One JSON object per line in each direction. A longer line is a protocol violation.
 export const MAX_LINE_BYTES = 8 * 1024 * 1024;
@@ -37,6 +37,8 @@ export type HostToWorker =
       cwd: string;
     }
   | { type: 'tool.cancel'; id: string }
+  // Ends every background job; the worker answers jobs.stopped once they have ended, or could not.
+  | { type: 'jobs.stop' }
   | { type: 'worker.shutdown' };
 
 // Background jobs run in the worker, which sends each fact as it happens: a job started, became
@@ -47,7 +49,9 @@ export type WorkerToHost =
   | { type: 'worker.error'; message: string }
   | { type: 'job.started'; jobId: string }
   | { type: 'job.event'; seq: number; event: JobEvent }
-  | { type: 'job.shown'; jobId: string };
+  | { type: 'job.shown'; jobId: string }
+  // How many jobs still run after a jobs.stop: none, unless one did not end in the time allowed.
+  | { type: 'jobs.stopped'; running: number };
 
 export type JobMessage = Extract<WorkerToHost, { type: 'job.started' | 'job.event' | 'job.shown' }>;
 
@@ -311,6 +315,13 @@ export const parseWorkerMessage = (line: string): Parsed<WorkerToHost> => {
       }
       return { ok: true, message: { type: value.type, jobId } };
     }
+    case 'jobs.stopped': {
+      const { running } = value;
+      if (!hasExactKeys(value, ['type', 'running']) || !isCount(running)) {
+        return { ok: false, reason: 'a malformed jobs.stopped message' };
+      }
+      return { ok: true, message: { type: 'jobs.stopped', running } };
+    }
     case 'job.event': {
       const { seq } = value;
       if (!hasExactKeys(value, ['type', 'seq', 'event']) || !isCount(seq) || seq < 1) {
@@ -348,6 +359,8 @@ export const parseHostMessage = (line: string): HostToWorker | null => {
       return hasExactKeys(value, ['type', 'id']) && typeof value.id === 'string'
         ? { type: 'tool.cancel', id: value.id }
         : null;
+    case 'jobs.stop':
+      return hasExactKeys(value, ['type']) ? { type: 'jobs.stop' } : null;
     case 'worker.shutdown':
       return hasExactKeys(value, ['type']) ? { type: 'worker.shutdown' } : null;
     default:

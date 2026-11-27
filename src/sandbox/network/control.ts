@@ -1,9 +1,16 @@
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readlinkSync, rmSync, statfsSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, statfsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
-import { HELPER_ENV, inNewNamespaces, type NetworkTools, runInNamespaces } from './namespace.ts';
-import { Pasta, type PastaAddress } from './pasta.ts';
+import {
+  HELPER_ENV,
+  inNewNamespaces,
+  type Namespaces,
+  type NetworkTools,
+  releaseNamespaces,
+  runInNamespaces,
+} from './namespace.ts';
+import { Pasta, type PastaAddress, type PastaScope } from './pasta.ts';
 import {
   CLOSED_RULESET,
   DYNAMIC_SETS,
@@ -40,6 +47,8 @@ import {
 export interface NetworkOptions {
   // For a namespace that must reach the host's own address, as tests do.
   address?: PastaAddress;
+  // A scope of its own for pasta.
+  pasta?: PastaScope;
 }
 
 const GROUP_RANGE = '/proc/sys/net/ipv4/ping_group_range';
@@ -50,11 +59,12 @@ const message = (error: unknown): string =>
 export class NetworkControl {
   private failed: string | null = null;
   private closing: Promise<void> | null = null;
+  private released: Promise<void> | null = null;
   private queue: Promise<void> = Promise.resolve();
 
   private constructor(
     private readonly tools: NetworkTools,
-    private readonly pid: number,
+    private readonly namespaces: Namespaces,
     private readonly pasta: Pasta,
     // The table the scope in force is in.
     private active: ScopeTable,
@@ -64,31 +74,35 @@ export class NetworkControl {
     });
   }
 
-  // Prepares the network of the namespaces of `pid` for `scope`.
+  // Prepares the network of the namespaces for `scope`. The control owns them from then on, and
+  // releases them once closed; a preparation that fails releases them before it rejects.
   static async prepare(
     tools: NetworkTools,
-    pid: number,
+    namespaces: Namespaces,
     scope: Scope,
     options: NetworkOptions = {},
   ): Promise<NetworkControl> {
-    // Until the process has made them, its namespaces are the host's.
-    for (const kind of ['user', 'net']) {
-      if (readlinkSync(`/proc/${pid}/ns/${kind}`) === readlinkSync(`/proc/self/ns/${kind}`)) {
-        throw new Error(`process ${pid} runs in the host's ${kind} namespace`);
-      }
+    let pasta: Pasta;
+    try {
+      const [first] = SCOPE_TABLES;
+      await install(tools, namespaces, NOTHING, first, null);
+      // Every group of the namespace, which maps only the user's: its processes may open ICMP
+      // echo sockets. The range is read in the namespace's ids.
+      await runInNamespaces(tools, namespaces, [tools.sh, '-c', `printf '0 0' > ${GROUP_RANGE}`]);
+      pasta = await Pasta.start(tools, namespaces, options.address, options.pasta);
+    } catch (error) {
+      releaseNamespaces(namespaces);
+      throw error;
     }
-    const [first] = SCOPE_TABLES;
-    await install(tools, pid, NOTHING, first, null);
-    // Every group of the namespace, which maps only the user's: its processes may open ICMP echo
-    // sockets. The range is read in the namespace's ids.
-    await runInNamespaces(tools, pid, [tools.sh, '-c', `printf '0 0' > ${GROUP_RANGE}`]);
-    const pasta = await Pasta.start(tools, pid, options.address);
-    const control = new NetworkControl(tools, pid, pasta, first);
+    const control = new NetworkControl(tools, namespaces, pasta, SCOPE_TABLES[0]);
     try {
       await control.replace(scope);
     } catch (error) {
-      await control.close();
-      throw error;
+      const closed = await control.dispose().then(
+        () => null,
+        (failure: unknown) => message(failure),
+      );
+      throw closed === null ? error : new Error(`${message(error)}; ${closed}`);
     }
     return control;
   }
@@ -107,7 +121,7 @@ export class NetworkControl {
       if (this.closing !== null) throw new Error('the network was closed');
       try {
         const next = SCOPE_TABLES.find((table) => table !== this.active) as ScopeTable;
-        await install(this.tools, this.pid, scope, next, this.active);
+        await install(this.tools, this.namespaces, scope, next, this.active);
         this.active = next;
       } catch (error) {
         if (this.closing !== null) throw new Error('the network was closed');
@@ -124,14 +138,26 @@ export class NetworkControl {
   // its files can still be read. Idempotent.
   close(): Promise<void> {
     if (this.closing === null) {
-      void withScripts([CLOSED_RULESET], ([path]) =>
-        runInNamespaces(this.tools, this.pid, [this.tools.nft, '-f', path as string]),
+      const closedTable = withScripts([CLOSED_RULESET], ([path]) =>
+        runInNamespaces(this.tools, this.namespaces, [this.tools.nft, '-f', path as string]),
       ).catch((error: unknown) => {
         this.failed ??= `the table that closes the network could not be installed: ${message(error)}`;
       });
       this.closing = this.pasta.stop();
+      // The namespaces stay open until no helper can enter them any more, the closing table's
+      // and an installation still running included: a descriptor closed earlier could be reused
+      // for another file meanwhile.
+      this.released = Promise.allSettled([closedTable, this.closing, this.queue]).then(() =>
+        releaseNamespaces(this.namespaces),
+      );
     }
     return this.closing;
+  }
+
+  // Closes the network, and resolves once its namespaces are released too.
+  async dispose(): Promise<void> {
+    await this.close();
+    await this.released;
   }
 
   private serial(work: () => Promise<void>): Promise<void> {
@@ -243,23 +269,28 @@ const reference = (tools: NetworkTools, paths: readonly string[]): Promise<strin
     child.stdin.end();
   });
 
-// Installs `scope`'s ruleset into `table` in the namespaces of `pid`, in its transactions, the last
+// Installs `scope`'s ruleset into `table` in the namespaces, in its transactions, the last
 // of which puts it in force in place of `previous`; then checks that the kernel holds exactly what
 // was written, as a namespace that holds nothing else does once the same transactions ran in it:
 // every table, chain, set and rule, as nft lists them.
 const install = async (
   tools: NetworkTools,
-  pid: number,
+  namespaces: Namespaces,
   scope: Scope,
   table: ScopeTable,
   previous: ScopeTable | null,
 ): Promise<void> => {
   await withScripts(rulesetFor(scope, table, previous), async (paths) => {
-    for (const path of paths) await runInNamespaces(tools, pid, [tools.nft, '-f', path]);
-    const [held, expected] = await Promise.all([
-      runInNamespaces(tools, pid, [tools.nft, '-j', 'list', 'ruleset']),
+    for (const path of paths) await runInNamespaces(tools, namespaces, [tools.nft, '-f', path]);
+    // Both settle before either fails: a helper still starting must not outlive the namespaces'
+    // descriptors, which a failure releases.
+    const [listed, made] = await Promise.allSettled([
+      runInNamespaces(tools, namespaces, [tools.nft, '-j', 'list', 'ruleset']),
       reference(tools, paths),
     ]);
+    if (listed.status === 'rejected') throw listed.reason;
+    if (made.status === 'rejected') throw made.reason;
+    const [held, expected] = [listed.value, made.value];
     if (normalizedListing(held) !== normalizedListing(expected)) {
       throw new Error('the namespace does not hold the ruleset installed');
     }

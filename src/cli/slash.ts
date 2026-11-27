@@ -4,8 +4,9 @@ import { errorMessage } from '../errors.ts';
 import type { ResolveResult } from '../providers/resolve.ts';
 import type { ProviderEffort } from '../providers/types.ts';
 import type { ApplyReport, ChangeEntry } from '../sandbox/changeset/summary.ts';
+import type { RefreshReport } from '../sandbox/security.ts';
 import { resolvePath } from '../tools/paths.ts';
-import { type ExecutionMode, isExecutionMode } from '../tools/policy.ts';
+import { type ExecutionMode, isExecutionMode, type SandboxProfile } from '../tools/policy.ts';
 import { EFFORT_LEVELS } from './args.ts';
 import { SessionFile, type SessionLink } from './session-file.ts';
 import {
@@ -16,6 +17,12 @@ import {
 } from './workspace-session.ts';
 
 export type NoticeLevel = 'info' | 'warning' | 'error';
+
+// What /scope needs of a security sandbox.
+export interface SecurityCommands {
+  scope(): string[];
+  refresh(): Promise<RefreshReport | { error: string }>;
+}
 
 export interface SlashContext {
   agent: Agent;
@@ -32,6 +39,8 @@ export interface SlashContext {
   cwd: string;
   // Set in a session of the workspace sandbox, whose changes the operator reviews and applies.
   workspace?: WorkspaceSession;
+  // Set in a session of the security sandbox: its scope, which the operator can refresh.
+  security?: SecurityCommands;
   // Asks the operator a question, answered by the next line submitted; null when it is cancelled.
   ask: (question: string) => Promise<string | null>;
   // Reads the AGENTS.md files again once no task runs: they may have changed in the project.
@@ -49,8 +58,8 @@ export interface SlashCommand {
   usage?: string;
   // Commands that change the conversation or the model cannot run while a turn is in progress.
   idleOnly?: boolean;
-  // Offered only in a session of the workspace sandbox.
-  workspace?: boolean;
+  // Offered only in a session of this sandbox profile.
+  profile?: SandboxProfile;
   run(args: string, ctx: SlashContext): Promise<void> | void;
 }
 
@@ -141,7 +150,7 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     name: 'help',
     description: 'List the available commands',
     run(_args, ctx) {
-      const commands = commandsFor(ctx.workspace !== undefined);
+      const commands = commandsFor(sessionProfile(ctx));
       const heads = commands.map((c) =>
         c.usage === undefined ? `/${c.name}` : `/${c.name} ${c.usage}`,
       );
@@ -348,7 +357,7 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     name: 'changes',
     description: 'Show what the sandbox changed in the project',
     usage: '[path]',
-    workspace: true,
+    profile: 'workspace',
     run(args, ctx) {
       const workspace = workspaceOf(ctx);
       const preview = workspace.preview();
@@ -376,7 +385,7 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
   {
     name: 'apply',
     description: "Apply the sandbox's changes to the project",
-    workspace: true,
+    profile: 'workspace',
     async run(_args, ctx) {
       const workspace = workspaceOf(ctx);
       const preview = workspace.preview();
@@ -403,7 +412,7 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
   {
     name: 'discard',
     description: "Discard the sandbox's changes and start it again",
-    workspace: true,
+    profile: 'workspace',
     async run(_args, ctx) {
       const workspace = workspaceOf(ctx);
       if (!workspace.active) {
@@ -445,6 +454,44 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     },
   },
   {
+    name: 'scope',
+    description: "Show the engagement's scope, or resolve its names again with refresh",
+    usage: '[refresh]',
+    profile: 'security',
+    async run(args, ctx) {
+      const security = ctx.security;
+      if (security === undefined)
+        throw new Error('this session does not run in the security sandbox');
+      const verb = args.trim();
+      if (verb === '') {
+        ctx.notice('info', security.scope().join('\n'));
+        return;
+      }
+      if (verb !== 'refresh') {
+        ctx.notice('error', 'Usage: /scope, or /scope refresh to resolve its names again.');
+        return;
+      }
+      const report = await security.refresh();
+      if ('error' in report) {
+        ctx.notice('error', `The scope was not refreshed: ${report.error}`);
+        return;
+      }
+      if (report.changes.length === 0) {
+        ctx.notice('info', 'The names of the scope resolve to the same addresses as before.');
+        return;
+      }
+      // Host names and addresses the host validated and resolved.
+      const changed = report.changes.map(
+        ({ host, added, removed }) =>
+          `${host}: ${[...added.map((a) => `+${a}`), ...removed.map((a) => `-${a}`)].join(', ')}`,
+      );
+      ctx.notice('info', `The scope was refreshed:\n${changed.join('\n')}`);
+      ctx.agent.notify({
+        text: `The operator resolved the names of the engagement again; its scope changed:\n${changed.join('\n')}\nThe scope in force is in the system prompt.`,
+      });
+    },
+  },
+  {
     name: 'exit',
     description: 'Exit nullrivet',
     async run(_args, ctx) {
@@ -479,23 +526,27 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
   },
 ];
 
-const commandsFor = (workspace: boolean): SlashCommand[] =>
-  SLASH_COMMANDS.filter((c) => c.workspace !== true || workspace);
+// The profile whose commands a session offers, from what it was given.
+const sessionProfile = (ctx: SlashContext): SandboxProfile | undefined =>
+  ctx.workspace !== undefined ? 'workspace' : ctx.security !== undefined ? 'security' : undefined;
 
-// `workspace`: the session runs in the workspace sandbox, which has commands of its own.
-export const findCommand = (name: string, workspace = false): SlashCommand | undefined =>
-  commandsFor(workspace).find((c) => c.name === name);
+const commandsFor = (profile: SandboxProfile | undefined): SlashCommand[] =>
+  SLASH_COMMANDS.filter((c) => c.profile === undefined || c.profile === profile);
+
+// `profile`: the sandbox the session runs in, whose commands it offers too.
+export const findCommand = (name: string, profile?: SandboxProfile): SlashCommand | undefined =>
+  commandsFor(profile).find((c) => c.name === name);
 
 // Suggestions while the user is still typing the command name.
-export const suggestCommands = (input: string, workspace = false): SlashCommand[] => {
+export const suggestCommands = (input: string, profile?: SandboxProfile): SlashCommand[] => {
   const match = /^\/([a-z]*)$/.exec(input);
   if (match === null) return [];
   const prefix = match[1] ?? '';
-  return commandsFor(workspace).filter((c) => c.name.startsWith(prefix));
+  return commandsFor(profile).filter((c) => c.name.startsWith(prefix));
 };
 
 export const runSlash = async (parsed: ParsedSlash, ctx: SlashContext): Promise<void> => {
-  const command = findCommand(parsed.name, ctx.workspace !== undefined);
+  const command = findCommand(parsed.name, sessionProfile(ctx));
   if (command === undefined) {
     ctx.notice('error', `Unknown command /${parsed.name}; type /help for the list.`);
     return;

@@ -9,9 +9,12 @@ export const isExecutionMode = (value: string): value is ExecutionMode =>
 
 // Where the tools run when not in this process. The execution mode and the profile are
 // independent, and a call must be allowed by both.
-export type SandboxProfile = 'inspect' | 'workspace';
+export type SandboxProfile = 'inspect' | 'workspace' | 'security';
 
-export const SANDBOX_PROFILES: readonly SandboxProfile[] = ['inspect', 'workspace'];
+export const SANDBOX_PROFILES: readonly SandboxProfile[] = ['inspect', 'workspace', 'security'];
+
+// The profiles as a sentence names them: inspect, workspace or security.
+export const SANDBOX_PROFILE_NAMES = `${SANDBOX_PROFILES.slice(0, -1).join(', ')} or ${SANDBOX_PROFILES.at(-1)}`;
 
 export const isSandboxProfile = (value: string): value is SandboxProfile =>
   (SANDBOX_PROFILES as readonly string[]).includes(value);

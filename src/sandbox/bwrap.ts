@@ -4,9 +4,11 @@ import { homedir, userInfo } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import type { JobSession } from '../tools/jobs.ts';
 import { isWithinDirectory } from '../tools/paths.ts';
+import type { NetworkTools } from './network/namespace.ts';
+import { inNewNamespaces } from './network/namespace.ts';
 import { HOST_TO_WORKER_FD, WORKER_TO_HOST_FD } from './protocol.ts';
 import { type SyscallArch, sandboxArch, seccompProgram } from './seccomp.ts';
-import type { WorkerLaunch } from './worker-backend.ts';
+import { gateDescriptors, type WorkerLaunch } from './worker-backend.ts';
 import { SANDBOX_WORKER_DIR, sandboxedWorker } from './worker-command.ts';
 
 type Env = Record<string, string | undefined>;
@@ -288,17 +290,58 @@ export const workspaceLaunch = (options: LaunchOptions, overlay: Overlay): Worke
     options.root,
   ]);
 
-const launch = (options: LaunchOptions, project: readonly string[]): WorkerLaunch => {
+// Where the sandbox of the `security` profile finds its hosts file, which the host replaces when
+// the scope's names are resolved again: a directory of the host bound read-only, with /etc/hosts a
+// link into it. A file bound by itself would keep the one it was bound to after a rename.
+const HOSTS_DIRECTORY = '/etc/nullrivet';
+
+export interface SecurityNetwork {
+  tools: NetworkTools;
+  // The host's directory that holds the file `hosts`.
+  hostsDirectory: string;
+}
+
+// The `security` profile: the project through an overlay whose writes stay in memory and are
+// discarded at exit, and the network of user and network namespaces the host makes and configures
+// from outside. Bubblewrap reports itself and waits on its gate until the network is in place.
+export const securityLaunch = (options: LaunchOptions, network: SecurityNetwork): WorkerLaunch =>
+  launch(options, ['--overlay-src', options.root, '--tmp-overlay', options.root], network);
+
+const launch = (
+  options: LaunchOptions,
+  project: readonly string[],
+  network?: SecurityNetwork,
+): WorkerLaunch => {
   const worker = sandboxedWorker(options.tools, options.jobs);
   const env = sandboxEnv(options.hostEnv, options.home);
   const identity = identityFiles(options.home);
-  const inputs = [identity.passwd, identity.group, HOSTS, NSSWITCH].map((text) =>
-    Buffer.from(text),
-  );
+  const files = [
+    { target: '/etc/passwd', text: identity.passwd },
+    { target: '/etc/group', text: identity.group },
+    ...(network === undefined ? [{ target: '/etc/hosts', text: HOSTS }] : []),
+    { target: '/etc/nsswitch.conf', text: NSSWITCH },
+  ];
+  const inputs = files.map((file) => Buffer.from(file.text));
   const seccompFd = FIRST_INPUT_FD + inputs.length;
   const fd = (index: number): string => String(FIRST_INPUT_FD + index);
+  // After the inputs and the seccomp program.
+  const gate = gateDescriptors(inputs.length + 1);
+  const user = userInfo();
   const args = [
     '--unshare-all',
+    ...(network === undefined
+      ? []
+      : [
+          // The network namespace the host made, which pasta connects; the user namespace
+          // Bubblewrap makes is nested in the host's, as the user's own ids, without capabilities.
+          '--share-net',
+          '--uid',
+          String(user.uid),
+          '--gid',
+          String(user.gid),
+          '--cap-drop',
+          'ALL',
+        ]),
     // Explicit: --unshare-all only tries a user namespace, and --disable-userns needs one.
     '--unshare-user',
     '--disable-userns',
@@ -311,18 +354,17 @@ const launch = (options: LaunchOptions, project: readonly string[]): WorkerLaunc
     '/usr',
     ...ROOT_LINKS.flatMap(hostEntryArgs),
     ...ETC_FILES.flatMap((path) => ['--ro-bind-try', path, path]),
-    '--ro-bind-data',
-    fd(0),
-    '/etc/passwd',
-    '--ro-bind-data',
-    fd(1),
-    '/etc/group',
-    '--ro-bind-data',
-    fd(2),
-    '/etc/hosts',
-    '--ro-bind-data',
-    fd(3),
-    '/etc/nsswitch.conf',
+    ...files.flatMap((file, index) => ['--ro-bind-data', fd(index), file.target]),
+    ...(network === undefined
+      ? []
+      : [
+          '--ro-bind',
+          network.hostsDirectory,
+          HOSTS_DIRECTORY,
+          '--symlink',
+          `${HOSTS_DIRECTORY}/hosts`,
+          '/etc/hosts',
+        ]),
     ...hostEntryArgs('/etc/localtime'),
     '--proc',
     '/proc',
@@ -342,14 +384,19 @@ const launch = (options: LaunchOptions, project: readonly string[]): WorkerLaunc
     ...options.readOnlyDirs.flatMap((path) => ['--ro-bind', path, path]),
     '--seccomp',
     String(seccompFd),
+    ...(network === undefined
+      ? []
+      : ['--json-status-fd', String(gate.status), '--block-fd', String(gate.gate)]),
     '--chdir',
     options.cwd,
     '--remount-ro',
     '/',
   ];
+  const command = [options.host.bwrap, ...args, '--', ...worker.command];
   return {
-    command: [options.host.bwrap, ...args, '--', ...worker.command],
+    command: network === undefined ? command : inNewNamespaces(network.tools, command),
     env,
     inputs: [...inputs, seccompProgram(options.host.arch)],
+    ...(network === undefined ? {} : { gate: true }),
   };
 };

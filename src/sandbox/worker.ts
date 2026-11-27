@@ -137,6 +137,7 @@ export const runWorker = (argv: readonly string[]): void => {
     return;
   }
   const available = new Map(BUILTIN_TOOLS.map((tool) => [tool.name, tool]));
+  let registry: JobRegistry | null = null;
   if (jobSession !== undefined) {
     if (jobSession !== 'interactive' && jobSession !== 'one-shot') {
       fail(`the worker has no job session named ${jobSession}`);
@@ -146,7 +147,7 @@ export const runWorker = (argv: readonly string[]): void => {
     // descriptor as the results: a job's start before the result of the call that started it,
     // and its events before whatever they let resume.
     let seq = 0;
-    const registry = new JobRegistry(jobLogs, {
+    registry = new JobRegistry(jobLogs, {
       started: (jobId) => send({ type: 'job.started', jobId }),
       occurred: (event) => {
         seq += 1;
@@ -166,6 +167,9 @@ export const runWorker = (argv: readonly string[]): void => {
     tools.set(name, tool);
   }
 
+  // The calls under way that can start a job, which a stop of the jobs waits for: the job they
+  // start is listed only once it runs.
+  const starting = new Set<Promise<void>>();
   const execute = async (
     id: string,
     name: string,
@@ -189,6 +193,15 @@ export const runWorker = (argv: readonly string[]): void => {
     if (!stopping) out.write(resultMessage(id, result));
   };
 
+  // Ends every job that runs, each within the registry's wait, and says how many did not end.
+  // Ends every job, those that calls received before the stop are still starting included, and says
+  // how many did not end.
+  const stopJobs = async (): Promise<void> => {
+    await Promise.all(starting);
+    const jobs = registry?.list().filter((job) => job.finish === null) ?? [];
+    const ended = await Promise.all(jobs.map((job) => (registry as JobRegistry).kill(job)));
+    send({ type: 'jobs.stopped', running: ended.filter((done) => !done).length });
+  };
   const splitter = new LineSplitter(
     MAX_LINE_BYTES,
     (line) => {
@@ -201,15 +214,23 @@ export const runWorker = (argv: readonly string[]): void => {
         return;
       }
       switch (message.type) {
-        case 'tool.execute':
+        case 'tool.execute': {
           if (running.has(message.id)) {
             fail(`the host reused the call id ${message.id}`);
             return;
           }
-          void execute(message.id, message.name, message.input, message.cwd);
+          const call = execute(message.id, message.name, message.input, message.cwd);
+          if (message.name === 'bash_background') {
+            starting.add(call);
+            void call.finally(() => starting.delete(call));
+          }
           return;
+        }
         case 'tool.cancel':
           running.get(message.id)?.abort();
+          return;
+        case 'jobs.stop':
+          void stopJobs();
           return;
         case 'worker.shutdown':
           stop(0);

@@ -38,6 +38,7 @@ import {
   type ParsedSlash,
   parseSlash,
   runSlash,
+  type SecurityCommands,
   type SlashContext,
   suggestCommands,
 } from './slash.ts';
@@ -69,6 +70,13 @@ export interface ReplOptions {
   sandbox?: SandboxProfile;
   // Set for the workspace sandbox: its changes, which the session reviews, applies and discards.
   workspace?: WorkspaceSession;
+  // Set for the security sandbox: its scope, which /scope shows and refreshes.
+  security?: SecurityCommands;
+  // Facts the operator is told at the start, such as the scope of an engagement.
+  notes?: readonly string[];
+  // Given the session's way to show a notice, once it can, for what happens while it runs, such as
+  // the end of an engagement's window.
+  showNotices?: (show: (level: 'info' | 'warning', text: string) => void) => void;
 }
 
 export const formatStats = (status: StatusState): string => {
@@ -126,6 +134,13 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
     let escTimer: ReturnType<typeof setTimeout> | null = null;
     let closed = false;
     const workspace = options.workspace;
+    // The sandbox whose commands the session offers.
+    const offered =
+      workspace !== undefined
+        ? 'workspace'
+        : options.security !== undefined
+          ? 'security'
+          : undefined;
     // The project's AGENTS.md files may have changed while a task ran: they are read again, as
     // /instructions reload does, as soon as neither a task nor a command runs.
     let instructionsStale = false;
@@ -273,6 +288,7 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       session,
       cwd: options.cwd,
       ...(workspace === undefined ? {} : { workspace }),
+      ...(options.security === undefined ? {} : { security: options.security }),
       reloadInstructionsWhenIdle: () => {
         instructionsStale = true;
       },
@@ -414,15 +430,12 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
     });
 
     const updateSlash = (value: string): void => {
-      const items = suggestCommands(value, workspace !== undefined).map((c) => ({
+      const items = suggestCommands(value, offered).map((c) => ({
         name: c.name,
         description: c.description,
       }));
       const typed = /^\/([a-z]+)\s*$/.exec(value);
-      const usage =
-        typed?.[1] === undefined
-          ? undefined
-          : findCommand(typed[1], workspace !== undefined)?.usage;
+      const usage = typed?.[1] === undefined ? undefined : findCommand(typed[1], offered)?.usage;
       if (items.length === 0 && usage === undefined) {
         if (state.slash !== null) dispatch({ type: 'slash', menu: null });
         return;
@@ -471,7 +484,7 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       }
       const parsed = parseSlash(raw);
       if (parsed !== null) {
-        if (findCommand(parsed.name, workspace !== undefined) === undefined) {
+        if (findCommand(parsed.name, offered) === undefined) {
           // The input is kept so the text is not lost when it was meant as a prompt.
           notice(
             'error',
@@ -661,6 +674,8 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       ),
     );
     for (const warning of options.warnings) notice('warning', warning);
+    for (const note of options.notes ?? []) notice('info', note);
+    options.showNotices?.(notice);
     if (session.path !== null) {
       notice(
         'info',

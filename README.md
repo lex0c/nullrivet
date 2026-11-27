@@ -101,7 +101,8 @@ it until end of file, so programs that start nullrivet without piping anything s
 | `-m, --model <id>` | Model as `<family>/<model>`, e.g. `openrouter/deepseek/deepseek-v4-flash`. Required unless `NULLRIVET_MODEL` is set. |
 | `-e, --effort <level>` | Reasoning effort: `low`, `medium`, `high`, `xhigh`, `max`. Ignored by models without reasoning. |
 | `-p, --permission <mode>` | `auto` (default) or `readonly`. |
-| `--sandbox <profile>` | Run the tools in a sandbox. Linux with Bubblewrap installed in a system directory; the profile is `inspect` (Bubblewrap 0.8 or later) or `workspace` (0.10 or later). See [Sandbox](#sandbox). |
+| `--sandbox <profile>` | Run the tools in a sandbox. Linux with Bubblewrap installed in a system directory; the profile is `inspect` (Bubblewrap 0.8 or later), `workspace` or `security` (0.10 or later). See [Sandbox](#sandbox). |
+| `--engagement <file>` | With `--sandbox security`, which requires it: the engagement file, which sets what the sandbox may reach and when. |
 | `--apply` | With `--sandbox workspace` and a task: apply the task's changes to the project if the task finishes. Without it, they are shown and discarded. The interactive session uses `/apply` instead. |
 | `-C, --cwd <dir>` | Starting directory for relative paths, commands and `AGENTS.md` lookup. It does not restrict file access. |
 | `--json` | Emit agent events as NDJSON on stdout. |
@@ -213,6 +214,7 @@ the tokens spent. The older part of a long conversation is summarized automatica
 | `/changes [path]` | With `--sandbox workspace`: show what the sandbox changed, or the changes at a path. |
 | `/apply` | With `--sandbox workspace`: show the changes and apply them once you type the code the question shows. |
 | `/discard` | With `--sandbox workspace`: discard the changes, after the same kind of confirmation. |
+| `/scope [refresh]` | With `--sandbox security`: show the engagement's scope, or resolve its names again and put the new addresses in force. |
 
 `/model`, `/compact`, `/clear` and `/session` cannot be used while a task runs. An unknown command
 is not sent; to send a prompt that starts with `/`, begin it with a space.
@@ -288,7 +290,20 @@ nullrivet --sandbox workspace --apply "fix the failing test"    # applies them i
 nullrivet --sandbox workspace                                   # interactive: /changes, /apply, /discard
 ```
 
-Details and the profiles planned next: [docs/SANDBOX.md](docs/SANDBOX.md).
+`--sandbox security --engagement <file>` is for authorized security work: the sandbox's network
+reaches the destinations the engagement file authorizes, networks and host names with their ports,
+within its time window, and nothing else; the kernel refuses the rest at once, and there is no DNS,
+only an `/etc/hosts` with the file's names. The session states the scope at the start, and the
+model is told it. Outside the window, commands are refused; at its end, the network closes for good,
+and the running commands and jobs are stopped. The project is writable through an overlay kept in
+memory, discarded at exit. The profile needs nftables, passt and systemd's user manager, whose
+cgroup limits it requires. `/scope refresh` resolves the names again.
+
+```sh
+nullrivet --sandbox security --engagement acme.json "scan the web server in scope"
+```
+
+Details, the engagement file and what remains planned: [docs/SANDBOX.md](docs/SANDBOX.md).
 
 ## Tools
 
@@ -345,6 +360,7 @@ nullrivet --json --permission readonly "List the TODOs in src" | jq -c 'select(.
 | `context:compact:start` | `reason` (`auto`, `manual`, `overflow`) |
 | `context:compact` | `reason`, `strategy` (`llm`, `fallback`), `before`, `after` (estimated tokens) |
 | `notice` | `text`: a runtime note added for the model, such as a background job that ended |
+| `info` | `message`: a fact the operator is told, such as the scope of an engagement at the start or the end of its window |
 | `warning` | `message` |
 | `error` | `message` |
 | `agent:end` | `reason` (`done`, `aborted`, `error`, `budget`), `message` |
@@ -402,8 +418,8 @@ as CI does. Evaluations against real models: [docs/EVALS.md](docs/EVALS.md).
 - [docs/MODELS.md](docs/MODELS.md): model resolution, the catalog, discovery and provider settings.
 - [docs/TUI.md](docs/TUI.md): the interactive interface: rendering, streaming Markdown, keys.
 - [docs/EVALS.md](docs/EVALS.md): evaluations against real models.
-- [docs/SANDBOX.md](docs/SANDBOX.md): the `inspect` and `workspace` sandboxes, the ChangeSet,
-  and the design of the profiles and the network scope planned for authorized security work.
+- [docs/SANDBOX.md](docs/SANDBOX.md): the `inspect`, `workspace` and `security` sandboxes, the
+  ChangeSet, the network scope of an engagement, and what remains planned.
 
 ## License
 

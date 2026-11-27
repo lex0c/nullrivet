@@ -125,6 +125,7 @@ export const bashTool: Tool = {
     required: ['command'],
   },
   effect: 'exec',
+  startsCommands: true,
   async execute(input, ctx): Promise<ToolResult> {
     const command = requireNonEmptyString(input, 'command');
     const cwdArg = optionalString(input, 'cwd');

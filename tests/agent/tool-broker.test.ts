@@ -7,6 +7,8 @@ import {
   type ToolExecutionContext,
 } from '../../src/agent/tool-broker.ts';
 import { InvalidArgumentError } from '../../src/tools/args.ts';
+import { BUILTIN_TOOLS } from '../../src/tools/index.ts';
+import { createJobTools } from '../../src/tools/jobs.ts';
 import type { ExecutionMode } from '../../src/tools/policy.ts';
 import type { Tool, ToolEffect, ToolResult } from '../../src/tools/types.ts';
 
@@ -240,5 +242,94 @@ describe('routing and a lost backend', () => {
     expect(result.content).toContain(
       'bash did not complete: the tool sandbox stopped (the worker exited)',
     );
+  });
+});
+
+describe('the window of an engagement', () => {
+  const window = (closed: string | null, ended = new AbortController()) => ({
+    closed: () => closed,
+    ended: ended.signal,
+  });
+  // A backend that records the signal each call gets, and runs nothing.
+  const recording = () => {
+    const seen = new Map<string, AbortSignal>();
+    const backend: ToolBackend = {
+      execute: async (tool, _input, ctx) => {
+        seen.set(tool.name, ctx.signal);
+        return { content: `${tool.name} ran`, isError: false };
+      },
+    };
+    return { seen, backend };
+  };
+  const commands = (name: string, extra: Partial<Tool> = {}): Tool => ({
+    ...ok(name, 'exec'),
+    startsCommands: true,
+    ...extra,
+  });
+
+  test('refuses the tools that start commands while it is closed, before any backend', async () => {
+    const { seen, backend } = recording();
+    // Even one that would run on the host, past the session's backend.
+    const tools = [
+      commands('bash'),
+      commands('on_host', { runsOnHost: true }),
+      ok('read_file', 'read'),
+    ];
+    const ctx = context(tools, { backend, engagement: window('the window ended at 18:00') });
+    for (const name of ['bash', 'on_host']) {
+      const result = await executeToolCall({ id: 'c', name, input: {} }, ctx);
+      expect(result.isError).toBe(true);
+      expect(result.content).toStartWith(
+        `error [engagement.window]: ${name} was not executed: the window ended at 18:00`,
+      );
+    }
+    expect(calls).not.toContain('on_host');
+    expect([...seen.keys()]).toEqual([]);
+    const read = await executeToolCall({ id: 'r', name: 'read_file', input: {} }, ctx);
+    expect(read.content).toBe('read_file ran');
+  });
+
+  test('refuses a command whose window ended while the call waited, before sending it', async () => {
+    const { seen, backend } = recording();
+    let closed: string | null = null;
+    const bash = { ...commands('bash'), targetPaths: () => ['/work/a'] };
+    const ctx = context([bash], {
+      backend,
+      engagement: { closed: () => closed, ended: new AbortController().signal },
+      // The window ends while the broker waits for the instructions of the paths.
+      newInstructions: async () => {
+        closed = 'the engagement window ended at 18:00';
+        return null;
+      },
+    });
+    const result = await executeToolCall({ id: 'b', name: 'bash', input: {} }, ctx);
+    expect(result.content).toStartWith('error [engagement.window]: bash was not executed');
+    expect([...seen.keys()]).toEqual([]);
+  });
+
+  test('ends only the calls that start commands when it ends', async () => {
+    const { seen, backend } = recording();
+    const ended = new AbortController();
+    const ctx = context([commands('bash'), ok('read_file', 'read')], {
+      backend,
+      engagement: window(null, ended),
+    });
+    await executeToolCall({ id: 'b', name: 'bash', input: {} }, ctx);
+    await executeToolCall({ id: 'r', name: 'read_file', input: {} }, ctx);
+    ended.abort();
+    expect(seen.get('bash')?.aborted).toBe(true);
+    expect(seen.get('read_file')?.aborted).toBe(false);
+  });
+
+  // glob and grep run fixed programs with fixed arguments, and git fixed subcommands with every
+  // program a repository can configure disabled: they read, outside the window as in it.
+  test('holds the built-in tools that start commands, and only those', () => {
+    const all = [...BUILTIN_TOOLS, ...createJobTools(null, 'one-shot')];
+    expect(
+      all
+        .filter((tool) => tool.startsCommands === true)
+        .map((tool) => tool.name)
+        .sort(),
+    ).toEqual(['bash', 'bash_background']);
   });
 });

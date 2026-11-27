@@ -43,12 +43,46 @@ describe('--sandbox', () => {
   });
 
   test('refuses any other profile, naming the source', () => {
-    expect(() => parseCli(['--sandbox', 'security', 'go'], {}, '/tmp')).toThrow(
-      "--sandbox must be inspect or workspace, got 'security'",
+    expect(() => parseCli(['--sandbox', 'lab', 'go'], {}, '/tmp')).toThrow(
+      "--sandbox must be inspect, workspace or security, got 'lab'",
     );
     expect(() => parseCli(['go'], { NULLRIVET_SANDBOX: 'none' }, '/tmp')).toThrow(
-      "NULLRIVET_SANDBOX must be inspect or workspace, got 'none'",
+      "NULLRIVET_SANDBOX must be inspect, workspace or security, got 'none'",
     );
+  });
+});
+
+describe('--engagement', () => {
+  test('goes with the security profile, which needs it', () => {
+    const config = parseCli(
+      ['--sandbox', 'security', '--engagement', 'scope.json', 'go'],
+      {},
+      '/tmp',
+    );
+    expect(config.sandbox).toBe('security');
+    expect(config.engagement).toBe('scope.json');
+    expect(parseCli(['go'], {}, '/tmp').engagement).toBeUndefined();
+  });
+
+  test('is required by the security profile, and refused by any other', () => {
+    expect(() => parseCli(['--sandbox', 'security', 'go'], {}, '/tmp')).toThrow(
+      '--sandbox security needs --engagement <file>, which sets its scope',
+    );
+    expect(() => parseCli(['go'], { NULLRIVET_SANDBOX: 'security' }, '/tmp')).toThrow(
+      '--sandbox security needs --engagement <file>',
+    );
+    // Printing help, the version or the models needs no engagement, whatever the environment names.
+    for (const argv of [['--help'], ['--version'], ['--list-models']]) {
+      expect(() => parseCli(argv, { NULLRIVET_SANDBOX: 'security' }, '/tmp')).not.toThrow();
+    }
+    for (const argv of [
+      ['--engagement', 'scope.json', 'go'],
+      ['--sandbox', 'inspect', '--engagement', 'scope.json', 'go'],
+    ]) {
+      expect(() => parseCli(argv, {}, '/tmp')).toThrow(
+        '--engagement needs --sandbox security, whose network it scopes',
+      );
+    }
   });
 });
 

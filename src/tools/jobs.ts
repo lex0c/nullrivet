@@ -697,6 +697,7 @@ export const createJobTools = (registry: JobRegistry | null, session: JobSession
       required: ['command'],
     },
     effect: 'exec',
+    startsCommands: true,
     async execute(input, ctx): Promise<ToolResult> {
       if (registry === null) return unavailable();
       const command = requireNonEmptyString(input, 'command');

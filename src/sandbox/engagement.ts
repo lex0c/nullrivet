@@ -179,8 +179,10 @@ const hostName = (value: unknown, at: string): string => {
   return name;
 };
 
+// Fractions of a second to the millisecond, which is what a Date keeps: more would be dropped, and
+// the window's start moved earlier.
 const TIME =
-  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(?:Z|[+-](\d{2}):(\d{2}))$/;
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?(?:Z|[+-](\d{2}):(\d{2}))$/;
 
 // A time with its offset, so it does not depend on the machine's time zone. Date takes a 30th of
 // February, or 24:00, for a time of the day after: each field is checked against the calendar.
@@ -213,6 +215,10 @@ const time = (value: unknown, at: string): Date => {
     Number.isNaN(date.getTime())
   ) {
     return fail(at, `"${value}" is not a valid time`);
+  }
+  // What the kernel's clock comparison holds.
+  if (date.getTime() < 0 || date.getTime() >= Date.UTC(2500, 0, 1)) {
+    return fail(at, `"${value}" is not between 1970 and 2500`);
   }
   return date;
 };
@@ -483,6 +489,7 @@ export const resolveEngagement = async (
         ...(engagement.newConnectionsPerSecond === undefined
           ? {}
           : { newConnectionsPerSecond: engagement.newConnectionsPerSecond }),
+        ...(engagement.window === undefined ? {} : { window: engagement.window }),
       },
       names: hosts.map((host) => ({ host, addresses: addresses.get(host) ?? [] })),
     },

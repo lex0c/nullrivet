@@ -11,7 +11,7 @@ import {
   type ExecutionMode,
   isExecutionMode,
   isSandboxProfile,
-  SANDBOX_PROFILES,
+  SANDBOX_PROFILE_NAMES,
   type SandboxProfile,
 } from '../tools/policy.ts';
 import { EFFORT_LEVELS } from './args.ts';
@@ -80,7 +80,7 @@ export const parseSessionFile = (text: string): Parsed => {
     return { ok: false, error: 'mode must be auto or readonly' };
   }
   if (sandbox !== undefined && (typeof sandbox !== 'string' || !isSandboxProfile(sandbox))) {
-    return { ok: false, error: `sandbox must be ${SANDBOX_PROFILES.join(' or ')}` };
+    return { ok: false, error: `sandbox must be ${SANDBOX_PROFILE_NAMES}` };
   }
   if (effort !== undefined && !EFFORT_LEVELS.includes(effort as ProviderEffort)) {
     return { ok: false, error: `effort must be one of ${EFFORT_LEVELS.join(', ')}` };

@@ -186,6 +186,19 @@ describe('the engagement file', () => {
         window: { from: '2028-02-29T23:59:59.5+14:00', until: '2029-01-01T00:00Z' },
       }).window?.from.toISOString(),
     ).toBe('2028-02-29T09:59:59.500Z');
+    // What the kernel's clock comparison holds: nft wraps a time out of that range in silence.
+    for (const from of ['1969-12-31T23:59:59Z', '2500-01-01T00:00:00Z']) {
+      expect(error({ ...EXAMPLE, window: { from, until: '2500-06-01T00:00:00Z' } })).toBe(
+        `window.from: "${from}" is not between 1970 and 2500`,
+      );
+    }
+    // A Date keeps milliseconds: a finer fraction would be dropped, and the start moved earlier.
+    expect(
+      error({
+        ...EXAMPLE,
+        window: { from: '2026-11-20T09:00:00.0001Z', until: '2027-01-01T00:00:00Z' },
+      }),
+    ).toContain('window.from: must be a time with its offset');
     for (const rate of [0, 2.5, '20', 2_000_000]) {
       expect(error({ ...EXAMPLE, rate: { newConnectionsPerSecond: rate } })).toBe(
         'rate.newConnectionsPerSecond: must be an integer from 1 to 1000000',
@@ -279,6 +292,10 @@ describe('resolving the engagement', () => {
       ],
       deny: [{ family: 4, address: '203.0.113.5', prefix: 32 }],
       newConnectionsPerSecond: 20,
+      window: {
+        from: new Date('2026-11-20T12:00:00.000Z'),
+        until: new Date('2026-11-20T21:00:00.000Z'),
+      },
     });
     expect(hostsFile(result.value)).toBe(
       '127.0.0.1 localhost\n::1 localhost\n198.51.100.7 app.acme.example\n2001:db8::7 app.acme.example\n',

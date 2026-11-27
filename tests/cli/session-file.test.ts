@@ -89,7 +89,9 @@ describe('SessionFile', () => {
     const inspect = parse('inspect');
     expect(inspect.ok && inspect.data.sandbox).toBe('inspect');
     const unknown = parse('none');
-    expect(unknown.ok ? 'ok' : unknown.error).toBe('sandbox must be inspect or workspace');
+    expect(unknown.ok ? 'ok' : unknown.error).toBe(
+      'sandbox must be inspect, workspace or security',
+    );
     const path = join(tempDir(), 's.json');
     const { file } = await openOk(path);
     await file.save(state());

@@ -1,19 +1,37 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, describe, expect, test } from 'bun:test';
 import { type ChildProcess, spawn } from 'node:child_process';
 import { createSocket, type Socket as UdpSocket } from 'node:dgram';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { createServer, type Server, Socket } from 'node:net';
 import { networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sandboxHost } from '../../src/sandbox/bwrap.ts';
-import { NetworkControl } from '../../src/sandbox/network/control.ts';
+import { prepareLimits } from '../../src/sandbox/limits.ts';
+import { NetworkControl, type NetworkOptions } from '../../src/sandbox/network/control.ts';
 import {
+  holdsNetwork,
   inNewNamespaces,
+  type Namespaces,
   type NetworkTools,
   networkTools,
+  pinNamespaces,
+  releaseNamespaces,
   runInNamespaces,
 } from '../../src/sandbox/network/namespace.ts';
-import { hostRelaysEcho } from '../../src/sandbox/network/pasta.ts';
+import {
+  hostRelaysEcho,
+  PASTA_LIMITS,
+  type PastaScope,
+  routedOut,
+} from '../../src/sandbox/network/pasta.ts';
 import {
   type Network,
   NOTHING,
@@ -21,7 +39,7 @@ import {
   rulesetFor,
   type Scope,
 } from '../../src/sandbox/network/ruleset.ts';
-import { networkTestsRun } from '../helpers/sandbox.ts';
+import { cgroupTestsRun, networkTestsRun } from '../helpers/sandbox.ts';
 
 // The transactions of a scope installed into one table in place of the other.
 const generate = (scope: Scope): string[] => rulesetFor(scope, 'nullrivet_b', 'nullrivet_a');
@@ -32,7 +50,60 @@ const net = (text: string): Network => {
   return parsed;
 };
 
+describe("pasta's readiness", () => {
+  const HEADER =
+    'Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n';
+  test('takes an IPv4 route out for configured, on a host without IPv6 too', () => {
+    const v4 = `${HEADER}eth0\t00000000\t0102000A\t0003\t0\t0\t0\t00000000\t0\t0\t0\n`;
+    expect(routedOut(v4, '')).toBe(true);
+    expect(
+      routedOut(`${HEADER}lo\t0000007F\t00000000\t0001\t0\t0\t0\t000000FF\t0\t0\t0\n`, ''),
+    ).toBe(false);
+    expect(routedOut('', '')).toBe(false);
+  });
+});
+
 describe('the ruleset of a scope', () => {
+  test('refuses packets outside its window, inward to the second, in both directions', () => {
+    const text = generate({
+      allow: [],
+      deny: [],
+      window: {
+        from: new Date('2026-11-20T12:00:00.250Z'),
+        until: new Date('2026-11-20T21:00:00.750Z'),
+      },
+    }).join('');
+    const lines = text.split('\n').map((line) => line.trim());
+    // After the loopback and neighbour discovery, before anything that accepts.
+    const out = lines.indexOf('oif "lo" accept');
+    expect(lines.slice(out + 2, out + 4)).toEqual([
+      'meta time < "2026-11-20 12:00:01" goto refuse',
+      'meta time >= "2026-11-20 21:00:00" goto refuse',
+    ]);
+    const into = lines.indexOf('iif "lo" accept');
+    expect(lines.slice(into + 2, into + 4)).toEqual([
+      'meta time < "2026-11-20 12:00:01" drop',
+      'meta time >= "2026-11-20 21:00:00" drop',
+    ]);
+    expect(() =>
+      generate({
+        allow: [],
+        deny: [],
+        window: {
+          from: new Date('2026-11-20T12:00:00.250Z'),
+          until: new Date('2026-11-20T12:00:00.750Z'),
+        },
+      }),
+    ).toThrow('the window must last at least a second');
+    expect(() =>
+      generate({
+        allow: [],
+        deny: [],
+        window: { from: new Date('1900-01-01T00:00:00Z'), until: new Date('2026-01-01T00:00:00Z') },
+      }),
+    ).toThrow('the window must lie between 1970 and 2500');
+  });
+
   test('parses networks into the full form it writes, host bits cleared', () => {
     expect(parseNetwork('203.0.113.7/28')).toEqual({
       family: 4,
@@ -221,6 +292,23 @@ elif mode == 'watch':
         finally: s.close()
         time.sleep(0.05)
     out('watched', True)
+elif mode == 'stream':
+    s = socket.socket(); s.settimeout(3); s.connect((host, int(tcp_ok)))
+    out('streaming', True)
+    end = time.time() + 20
+    try:
+        while time.time() < end and not os.path.exists(os.path.join(marker, 'stop')):
+            s.sendall(('%.6f\\n' % time.time()).encode()); time.sleep(0.01)
+    except OSError as e: out('stream ended', outcome(e))
+    out('streamed', True)
+elif mode == 'udp listen':
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(0.2)
+    s.sendto(b'x', (host, int(udp_ok))); out('udp listening', True)
+    end = time.time() + 20
+    while time.time() < end and not os.path.exists(os.path.join(marker, 'stop')):
+        try: out('udp got', float(s.recv(100).decode()))
+        except OSError: pass
+    out('udp listened', True)
 elif mode == 'connected':
     tcp('tcp allowed', host, tcp_ok); wait('go'); tcp('tcp allowed after', host, tcp_ok, timeout=2)
 `;
@@ -276,13 +364,15 @@ interface Sandbox {
 
 const started: Sandbox[] = [];
 const cleanups: (() => void | Promise<void>)[] = [];
+// A control releases its namespaces once its helpers have ended, which for one that hangs takes the
+// helper's timeout.
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
   for (const sandbox of started.splice(0)) {
     if (sandbox.child.exitCode === null) sandbox.child.kill('SIGKILL');
     rmSync(sandbox.marker, { recursive: true, force: true });
   }
-});
+}, 30_000);
 
 const startSandbox = (t: NetworkTools, s: Servers, mode: string): Sandbox => {
   const host = sandboxHost();
@@ -373,13 +463,29 @@ const hostScope = (s: Servers): Scope => ({
   deny: [],
 });
 
-const prepared = async (t: NetworkTools, s: Servers, mode: string, scope = hostScope(s)) => {
+const prepared = async (
+  t: NetworkTools,
+  s: Servers,
+  mode: string,
+  scope = hostScope(s),
+  options: NetworkOptions = {},
+) => {
   const sandbox = startSandbox(t, s, mode);
   // The namespaces exist once the sandbox's process runs Bubblewrap in them.
   await Bun.sleep(200);
-  const control = await NetworkControl.prepare(t, sandbox.pid, scope, { address: ADDRESS });
-  cleanups.push(() => control.close());
+  const control = await NetworkControl.prepare(t, pinNamespaces(sandbox.pid), scope, {
+    address: ADDRESS,
+    ...options,
+  });
+  cleanups.push(() => control.dispose());
   return { sandbox, control };
+};
+
+// The namespaces of `pid`, pinned for a test, released after it.
+const pinned = (pid: number): Namespaces => {
+  const namespaces = pinNamespaces(pid);
+  cleanups.push(() => releaseNamespaces(namespaces));
+  return namespaces;
 };
 
 const pastaOf = (pid: number): number | undefined =>
@@ -572,10 +678,15 @@ describe.if(networkTestsRun && process.platform === 'linux')('the network of a s
     const nft = brokenNft(behavior);
     const sandbox = startSandbox(nft.tools, s, 'watch');
     await Bun.sleep(200);
-    const control = await NetworkControl.prepare(nft.tools, sandbox.pid, (scope ?? hostScope)(s), {
-      address: ADDRESS,
-    });
-    cleanups.push(() => control.close());
+    const control = await NetworkControl.prepare(
+      nft.tools,
+      pinNamespaces(sandbox.pid),
+      (scope ?? hostScope)(s),
+      {
+        address: ADDRESS,
+      },
+    );
+    cleanups.push(() => control.dispose());
     sandbox.release();
     await sandbox.waitFor('reached');
     const reachedAfter = (seconds: number) =>
@@ -594,7 +705,7 @@ describe.if(networkTestsRun && process.platform === 'linux')('the network of a s
     await expect(control.replace(hostScope(s))).rejects.toThrow('the network was closed');
     await granting.catch(() => undefined);
     // Beside pasta's end, the table that stops everything, which the late installation left.
-    const held = await runInNamespaces(t(), sandbox.pid, [t().nft, 'list', 'ruleset']);
+    const held = await runInNamespaces(t(), pinned(sandbox.pid), [t().nft, 'list', 'ruleset']);
     expect(held).toContain('table inet nullrivet_closed');
     await Bun.sleep(1_500);
     signal(sandbox, 'stop');
@@ -686,10 +797,15 @@ describe.if(networkTestsRun && process.platform === 'linux')('the network of a s
       const nft = brokenNft(behavior);
       const sandbox = startSandbox(nft.tools, s, 'connected');
       await Bun.sleep(200);
-      const control = await NetworkControl.prepare(nft.tools, sandbox.pid, hostScope(s), {
-        address: ADDRESS,
-      });
-      cleanups.push(() => control.close());
+      const control = await NetworkControl.prepare(
+        nft.tools,
+        pinNamespaces(sandbox.pid),
+        hostScope(s),
+        {
+          address: ADDRESS,
+        },
+      );
+      cleanups.push(() => control.dispose());
       sandbox.release();
       expect(await sandbox.waitFor('tcp allowed')).toBe('reply okx');
       nft.arm();
@@ -731,7 +847,9 @@ describe.if(networkTestsRun && process.platform === 'linux')('the network of a s
       const sandbox = startSandbox(broken, s, 'probe');
       await Bun.sleep(200);
       await expect(
-        NetworkControl.prepare(broken, sandbox.pid, hostScope(s), { address: ADDRESS }),
+        NetworkControl.prepare(broken, pinNamespaces(sandbox.pid), hostScope(s), {
+          address: ADDRESS,
+        }),
       ).rejects.toThrow();
       // The caller ends the sandbox without releasing it.
       sandbox.child.kill('SIGKILL');
@@ -751,7 +869,7 @@ describe.if(networkTestsRun && process.platform === 'linux')('the network of a s
     await Bun.sleep(200);
     process.env.NULLRIVET_TEST_SECRET = 'key';
     try {
-      const seen = await runInNamespaces(t(), holder.pid as number, [
+      const seen = await runInNamespaces(t(), pinned(holder.pid as number), [
         t().sh,
         '-c',
         'echo "[$NULLRIVET_TEST_SECRET]"',
@@ -762,10 +880,28 @@ describe.if(networkTestsRun && process.platform === 'linux')('the network of a s
     }
   });
 
-  test("refuses to prepare the host's own namespaces", async () => {
-    await expect(NetworkControl.prepare(t(), process.pid, NOTHING)).rejects.toThrow(
+  test("refuses to pin the host's own namespaces", () => {
+    expect(() => pinNamespaces(process.pid)).toThrow(
       `process ${process.pid} runs in the host's user namespace`,
     );
+  });
+
+  test('enters the namespaces pinned, even once the process they were taken from has ended', async () => {
+    const holder = spawn(t().unshare, ['--user', '--map-root-user', '--net', '--', 'sleep', '30'], {
+      stdio: 'ignore',
+    });
+    await Bun.sleep(200);
+    const namespaces = pinned(holder.pid as number);
+    const net = readlinkSync(`/proc/${holder.pid}/ns/net`);
+    holder.kill('SIGKILL');
+    await new Promise((resolve) => holder.once('exit', resolve));
+    const seen = await runInNamespaces(t(), namespaces, [
+      t().sh,
+      '-c',
+      'readlink /proc/self/ns/net',
+    ]);
+    expect(seen.trim()).toBe(net);
+    expect(holdsNetwork(namespaces)).toBe(false);
   });
 
   test('does not take a pasta that ends right after configuring the namespace for ready', async () => {
@@ -790,7 +926,9 @@ describe.if(networkTestsRun && process.platform === 'linux')('the network of a s
     const sandbox = startSandbox(broken, s, 'probe');
     await Bun.sleep(200);
     await expect(
-      NetworkControl.prepare(broken, sandbox.pid, hostScope(s), { address: ADDRESS }),
+      NetworkControl.prepare(broken, pinNamespaces(sandbox.pid), hostScope(s), {
+        address: ADDRESS,
+      }),
     ).rejects.toThrow('pasta exited with code 0');
     sandbox.child.kill('SIGKILL');
     await sandbox.ended;
@@ -804,5 +942,220 @@ describe.if(networkTestsRun && process.platform === 'linux')('the network of a s
     sandbox.child.kill('SIGKILL');
     await sandbox.ended;
     expect(existsSync(join(sandbox.marker, 'ran'))).toBe(false);
+  }, 60_000);
+});
+
+describe.if(networkTestsRun && process.platform === 'linux')('the window of a scope', () => {
+  const t = (): NetworkTools => {
+    if (typeof tools === 'string') throw new Error(tools);
+    if (hostAddress === undefined) throw new Error('the host has no IPv4 address to test with');
+    return tools;
+  };
+  // A window that ends on a whole second, `seconds` from now, as the kernel holds it.
+  const endingIn = (seconds: number) => ({
+    from: new Date(Date.now() - 60_000),
+    until: new Date((Math.ceil(Date.now() / 1000) + seconds) * 1000),
+  });
+
+  test('ends in the kernel, with the host doing nothing: its event loop held across the end', async () => {
+    const s = await servers();
+    cleanups.push(s.close);
+    const window = endingIn(2);
+    const { sandbox } = await prepared(t(), s, 'watch', { ...hostScope(s), window });
+    sandbox.release();
+    await sandbox.waitFor('reached');
+    // Nothing of the host runs until well past the end, as when it is suspended or starved.
+    Bun.sleepSync(window.until.getTime() - Date.now() + 1_500);
+    signal(sandbox, 'stop');
+    await sandbox.waitFor('watched');
+    const reached = sandbox.lines
+      .filter(([name]) => name === 'reached')
+      .map(([, at]) => at as number);
+    expect(reached.length).toBeGreaterThan(0);
+    expect(reached.filter((at) => at >= window.until.getTime() / 1000)).toEqual([]);
+  }, 60_000);
+
+  test('lets no byte through that a connection wrote after the end', async () => {
+    const s = await servers();
+    cleanups.push(s.close);
+    // A server that keeps what arrives: the client sends the time it writes, every 10 ms.
+    let received = '';
+    const capture = createServer((socket) => {
+      socket.on('data', (data) => {
+        received += data.toString();
+      });
+      socket.on('error', () => undefined);
+    });
+    await new Promise<void>((resolve) => capture.listen(0, '0.0.0.0', resolve));
+    cleanups.push(() => {
+      capture.close();
+    });
+    const custom = { ...s, tcpOk: (capture.address() as { port: number }).port };
+    const window = endingIn(2);
+    const { sandbox } = await prepared(t(), custom, 'stream', { ...hostScope(custom), window });
+    sandbox.release();
+    await sandbox.waitFor('streaming');
+    await Bun.sleep(window.until.getTime() - Date.now() + 1_500);
+    signal(sandbox, 'stop');
+    await sandbox.waitFor('streamed');
+    const written = received
+      .split('\n')
+      .filter((line) => /^\d+\.\d{6}$/.test(line))
+      .map(Number);
+    expect(written.length).toBeGreaterThan(20);
+    expect(Math.max(...written)).toBeLessThan(window.until.getTime() / 1000);
+  }, 60_000);
+
+  test('lets no packet in after the end, on a flow the sandbox opened before it', async () => {
+    const s = await servers();
+    cleanups.push(s.close);
+    // A server that answers the first datagram with one every 10 ms, holding the time it is sent.
+    const sender = createSocket('udp4');
+    let timer: ReturnType<typeof setInterval> | undefined;
+    sender.on('message', (_, from) => {
+      timer ??= setInterval(
+        () => sender.send(String(Date.now() / 1000), from.port, from.address),
+        10,
+      );
+    });
+    await new Promise<void>((resolve) => sender.bind(0, '0.0.0.0', resolve));
+    cleanups.push(() => {
+      clearInterval(timer);
+      sender.close();
+    });
+    const custom = { ...s, udpOk: sender.address().port };
+    const window = endingIn(2);
+    const { sandbox } = await prepared(t(), custom, 'udp listen', { ...hostScope(custom), window });
+    sandbox.release();
+    await sandbox.waitFor('udp listening');
+    await Bun.sleep(window.until.getTime() - Date.now() + 1_500);
+    signal(sandbox, 'stop');
+    await sandbox.waitFor('udp listened');
+    const got = sandbox.lines.filter(([name]) => name === 'udp got').map(([, at]) => at as number);
+    expect(got.length).toBeGreaterThan(20);
+    expect(got.filter((at) => at >= window.until.getTime() / 1000)).toEqual([]);
+  }, 60_000);
+
+  test('refuses everything before its start', async () => {
+    const s = await servers();
+    cleanups.push(s.close);
+    const window = {
+      from: new Date(Date.now() + 3_600_000),
+      until: new Date(Date.now() + 7_200_000),
+    };
+    const { sandbox } = await prepared(t(), s, 'connected', { ...hostScope(s), window });
+    sandbox.release();
+    expect(await sandbox.waitFor('tcp allowed')).toBe('ConnectionRefusedError');
+  }, 60_000);
+});
+
+describe.if(networkTestsRun && cgroupTestsRun)('pasta in a scope of its own', () => {
+  const tools = networkTools();
+  const t = (): NetworkTools => {
+    if (typeof tools === 'string') throw new Error(tools);
+    return tools;
+  };
+  const fakes = mkdtempSync(join(tmpdir(), 'nullrivet-pasta-scope-'));
+  afterAll(() => rmSync(fakes, { recursive: true, force: true }));
+  let made = 0;
+  const script = (body: string): string => {
+    made += 1;
+    const path = join(fakes, `fake-${made}`);
+    writeFileSync(path, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+    return path;
+  };
+  // A scope for pasta, made as a session makes it; `systemdRun` in place of the real one.
+  const scope = async (systemdRun?: string): Promise<PastaScope> => {
+    const limited = await prepareLimits(process.env);
+    if (limited.scope === undefined) throw new Error(limited.warnings.join('; '));
+    made += 1;
+    const unit = `nullrivet-pasta-test-${process.pid}-${made}.scope`;
+    const prefix = limited.scope(unit, PASTA_LIMITS);
+    return {
+      prefix: systemdRun === undefined ? prefix : [systemdRun, ...prefix.slice(1)],
+      env: limited.env,
+      unit,
+      limits: PASTA_LIMITS,
+    };
+  };
+  const cgroupOf = (pid: number): string =>
+    readFileSync(`/proc/${pid}/cgroup`, 'utf8').trim().replace(/^0::/, '');
+
+  test('runs pasta in its scope, with its limits, and ends it whole', async () => {
+    const s = await servers();
+    cleanups.push(s.close);
+    const own = await scope();
+    const { sandbox, control } = await prepared(t(), s, 'probe', hostScope(s), { pasta: own });
+    const pasta = pastaOf(sandbox.pid) as number;
+    const path = cgroupOf(pasta);
+    expect(path).toEndWith(`/${own.unit}`);
+    expect(readFileSync(`/sys/fs/cgroup${path}/pids.max`, 'utf8').trim()).toBe('8');
+    expect(readFileSync(`/sys/fs/cgroup${path}/memory.max`, 'utf8').trim()).toBe(
+      String(PASTA_LIMITS.memoryBytes),
+    );
+    await control.dispose();
+    // Empty: the manager removes the scope a moment later.
+    const events = `/sys/fs/cgroup${path}/cgroup.events`;
+    expect(existsSync(events) ? readFileSync(events, 'utf8') : 'populated 0').toContain(
+      'populated 0',
+    );
+  }, 60_000);
+
+  test('does not end before every process of the scope has, one that ignores TERM included', async () => {
+    const s = await servers();
+    cleanups.push(s.close);
+    const left = `sleep 3599.${process.pid % 1000}`;
+    // A pasta that leaves a process in its scope, which ignores SIGTERM.
+    const pasta = script(`(trap '' TERM; exec ${left}) &\nexec ${t().pasta} "$@"`);
+    const own = await scope();
+    const { control } = await prepared({ ...t(), pasta }, s, 'probe', hostScope(s), {
+      pasta: own,
+    });
+    expect(Bun.spawnSync(['pgrep', '-f', left]).exitCode).toBe(0);
+    await control.dispose();
+    expect(Bun.spawnSync(['pgrep', '-f', left]).exitCode).toBe(1);
+  }, 60_000);
+
+  test('refuses a scope that does not hold its limits, and leaves nothing of it', async () => {
+    const s = await servers();
+    cleanups.push(s.close);
+    const ignoring = script(
+      'n=$#\nfor arg; do case $arg in MemoryMax=*) arg=MemoryMax=infinity;; esac; set -- "$@" "$arg"; done\nshift $n\nexec /usr/bin/systemd-run "$@"',
+    );
+    const own = await scope(ignoring);
+    await expect(prepared(t(), s, 'probe', hostScope(s), { pasta: own })).rejects.toThrow(
+      'the scope of pasta does not hold its limits: memory.max is max instead of 268435456',
+    );
+    expect(Bun.spawnSync(['pgrep', '-f', own.unit]).exitCode).toBe(1);
+    expect(
+      Bun.spawnSync(['systemctl', '--user', 'is-active', own.unit], { env: own.env })
+        .stdout.toString()
+        .trim(),
+    ).not.toBe('active');
+  }, 60_000);
+
+  test('refuses a pasta its systemd-run did not start', async () => {
+    const s = await servers();
+    cleanups.push(s.close);
+    const own = await scope(script('echo "Failed to start transient scope unit" >&2\nexit 1'));
+    await expect(prepared(t(), s, 'probe', hostScope(s), { pasta: own })).rejects.toThrow(
+      'pasta exited with code 1: Failed to start transient scope unit',
+    );
+  }, 60_000);
+
+  test('refuses a pasta it does not follow, and ends it all the same', async () => {
+    const s = await servers();
+    cleanups.push(s.close);
+    // A systemd-run that does not run pasta in place: the process followed is the wrapper.
+    const own = await scope(script('/usr/bin/systemd-run "$@"'));
+    await expect(prepared(t(), s, 'probe', hostScope(s), { pasta: own })).rejects.toThrow(
+      'not pasta',
+    );
+    await Bun.sleep(200);
+    expect(
+      Bun.spawnSync(['systemctl', '--user', 'is-active', own.unit], { env: own.env })
+        .stdout.toString()
+        .trim(),
+    ).not.toBe('active');
   }, 60_000);
 });

@@ -44,12 +44,35 @@ export const thrownToolError = (name: string, error: unknown): ToolResult =>
     ? toolError('input.invalid', error.message)
     : toolError('tool.crashed', `${name} failed unexpectedly: ${errorMessage(error)}`);
 
+const windowRefusal = (name: string, closed: string): ToolResult =>
+  toolError(
+    'engagement.window',
+    `${name} was not executed: ${closed}`,
+    'Commands run only while the engagement window is open; files can still be read and written.',
+  );
+
 const lostBackend = (name: string, reason: string, started: boolean): ToolResult =>
   toolError(
     'sandbox.lost',
     `${name} ${started ? 'did not complete' : 'was not executed'}: the tool sandbox stopped (${reason})`,
     'No tool can run for the rest of this session.',
   );
+
+// An authorized engagement, in a sandbox of the security profile: its scope as lines of facts for
+// the system prompts, and its window.
+export interface AgentEngagement {
+  // Read for each request: a refresh of the names changes it.
+  scope: () => readonly string[];
+  window: EngagementWindow;
+}
+
+// The window of an authorized engagement.
+export interface EngagementWindow {
+  // Why commands cannot run now; null while the window is open.
+  closed(): string | null;
+  // Aborted when the window ends, for good.
+  ended: AbortSignal;
+}
 
 export interface ToolExecutionContext {
   tools: ReadonlyMap<string, Tool>;
@@ -61,6 +84,7 @@ export interface ToolExecutionContext {
   // them and that it has not seen yet, or where in the current response they were attached. Null
   // when there are none.
   newInstructions?: (paths: readonly string[]) => Promise<string | null>;
+  engagement?: EngagementWindow;
 }
 
 // Every tool call passes here: it is authorized in this process, then dispatched to the backend,
@@ -88,6 +112,10 @@ export const executeToolCall = async (
       'only read tools can be used in readonly mode',
     );
   }
+  // Before the backend is chosen, so that a tool that runs on the host is held to it too.
+  const window = tool.startsCommands === true ? context.engagement : undefined;
+  const closed = window?.closed() ?? null;
+  if (closed !== null) return windowRefusal(call.name, closed);
   const backend = tool.runsOnHost === true ? IN_PROCESS_BACKEND : context.backend;
   try {
     // Inside the try: targetPaths is tool code and may reject its arguments.
@@ -106,9 +134,16 @@ export const executeToolCall = async (
     // is reported as not executed rather than as interrupted.
     const lost = context.backend.failure?.() ?? null;
     if (lost !== null) return lostBackend(call.name, lost, false);
+    // Again, after the wait above: a window that ended meanwhile refuses the command before it is
+    // sent, and the end of the window, which stops the jobs, cannot fall between this and the send.
+    const ended = window?.closed() ?? null;
+    if (ended !== null) return windowRefusal(call.name, ended);
+    // Only the calls that start commands end with the window: the others, such as reading a file
+    // or listing jobs, go on after it.
     const result = await backend.execute(tool, call.input, {
       cwd: context.cwd,
-      signal: context.signal,
+      signal:
+        window === undefined ? context.signal : AbortSignal.any([context.signal, window.ended]),
     });
     return { ...result, content: stripAnsi(result.content) };
   } catch (error) {

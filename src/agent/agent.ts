@@ -34,7 +34,7 @@ import {
   subagentDataBytes,
 } from './subagent.ts';
 import { buildSystemPrompt, localDate, renderProjectContext } from './system-prompt.ts';
-import { IN_PROCESS_BACKEND, type ToolBackend } from './tool-broker.ts';
+import { type AgentEngagement, IN_PROCESS_BACKEND, type ToolBackend } from './tool-broker.ts';
 
 export const DEFAULT_MAX_STEPS = 200;
 export const DEFAULT_STALL_MS = 120_000;
@@ -49,6 +49,9 @@ export interface AgentOptions {
   // Set when toolBackend is a sandbox: the system prompts state its limits, and delegate refuses
   // to start a subagent outside its project.
   sandbox?: SandboxScope;
+  // Set in a sandbox of the security profile: the engagement's scope, stated in the system
+  // prompts, and its window, which the broker holds the tools that start commands to.
+  engagement?: AgentEngagement;
   mode: ExecutionMode;
   cwd: string;
   // Null disables AGENTS.md loading.
@@ -233,6 +236,7 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
           tools: options.tools,
           toolBackend,
           ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
+          ...(options.engagement === undefined ? {} : { engagement: options.engagement }),
           instructions: options.instructions,
           stallMs: options.stallMs ?? DEFAULT_STALL_MS,
           maxSteps,
@@ -275,6 +279,7 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
       isGitRepo,
       ...(subagents === null ? {} : { delegation: { maxRunning: subagents.maxRunning } }),
       ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
+      ...(options.engagement === undefined ? {} : { engagement: options.engagement.scope() }),
     });
   // Rendered when the instructions are loaded, not for every request.
   let projectContextText = renderProjectContext(bootInstructions);
@@ -305,6 +310,7 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
           tools,
           toolBackend,
           mode: () => agent.mode,
+          ...(options.engagement === undefined ? {} : { engagement: options.engagement.window }),
           cwd: options.cwd,
           systemPrompt,
           projectContext,

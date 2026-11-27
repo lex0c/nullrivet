@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { lstatSync, realpathSync } from 'node:fs';
+import { closeSync, fstatSync, lstatSync, openSync, readlinkSync, realpathSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { trustedExecutable } from '../bwrap.ts';
 
@@ -85,35 +85,92 @@ export const inNewNamespaces = (tools: NetworkTools, command: readonly string[])
   ...command,
 ];
 
-// The arguments that enter the user and network namespaces of `pid` with their capabilities. The
-// user's credentials are kept, since setting groups is refused in a user namespace; they are its
-// root, which keeps every capability of the namespace across the helper's exec.
-export const enterArgs = (tools: NetworkTools, pid: number, net = true): string[] => [
+// The user and network namespaces a sandbox's network is configured in, held open by this process
+// for as long as the network lives. A helper enters them by these descriptors, which name the same
+// namespaces whatever happens to the process they were taken from and to its id. pasta refuses
+// such a path, so it is given the process's own, checked against them right before it starts.
+export interface Namespaces {
+  pid: number;
+  user: number;
+  net: number;
+}
+
+// Opens the user and network namespaces of `pid`, which must not be this process's: until the
+// process has made them, they are the host's.
+export const pinNamespaces = (pid: number): Namespaces => {
+  const opened: number[] = [];
+  try {
+    for (const kind of ['user', 'net']) {
+      const named = readlinkSync(`/proc/${pid}/ns/${kind}`);
+      if (named === readlinkSync(`/proc/self/ns/${kind}`)) {
+        throw new Error(`process ${pid} runs in the host's ${kind} namespace`);
+      }
+      const fd = openSync(`/proc/${pid}/ns/${kind}`, 'r');
+      opened.push(fd);
+      // The process can end between the two, and its id go to another.
+      if (`${kind}:[${fstatSync(fd).ino}]` !== named) {
+        throw new Error(`the ${kind} namespace of process ${pid} changed while it was opened`);
+      }
+    }
+  } catch (error) {
+    for (const fd of opened) closeSync(fd);
+    throw error;
+  }
+  const [user, net] = opened as [number, number];
+  return { pid, user, net };
+};
+
+export const releaseNamespaces = (namespaces: Namespaces): void => {
+  closeSync(namespaces.user);
+  closeSync(namespaces.net);
+};
+
+// Whether the process the namespaces were taken from still runs in the network namespace pinned.
+export const holdsNetwork = (namespaces: Namespaces): boolean => {
+  try {
+    return (
+      readlinkSync(`/proc/${namespaces.pid}/ns/net`) === `net:[${fstatSync(namespaces.net).ino}]`
+    );
+  } catch {
+    return false;
+  }
+};
+
+const pinned = (fd: number): string => `/proc/${process.pid}/fd/${fd}`;
+
+// The arguments that enter the namespaces with their capabilities. The user's credentials are
+// kept, since setting groups is refused in a user namespace; they are its root, which keeps every
+// capability of the namespace across the helper's exec.
+export const enterArgs = (tools: NetworkTools, namespaces: Namespaces, net = true): string[] => [
   tools.nsenter,
-  `--user=/proc/${pid}/ns/user`,
-  ...(net ? [`--net=/proc/${pid}/ns/net`] : []),
+  `--user=${pinned(namespaces.user)}`,
+  ...(net ? [`--net=${pinned(namespaces.net)}`] : []),
   '--preserve-credentials',
   '--',
 ];
 
-// The whole environment of a helper: the host's holds provider keys, which none of them needs.
-export const HELPER_ENV: Record<string, string> = { PATH: '/usr/bin:/usr/sbin:/bin:/sbin' };
+// The whole environment of a helper: the host's holds provider keys, which none of them needs. nft
+// reads and lists the times of a window in the zone TZ names, which the ruleset writes in UTC.
+export const HELPER_ENV: Record<string, string> = {
+  PATH: '/usr/bin:/usr/sbin:/bin:/sbin',
+  TZ: 'UTC',
+};
 
 const HELPER_TIMEOUT_MS = 10_000;
 const SHOWN_ERROR_CHARS = 500;
 // A listing of a scope of many networks runs to megabytes.
 const MAX_OUTPUT_CHARS = 64 * 1024 * 1024;
 
-// Runs a program in the namespaces of `pid`, with `input` on its stdin, and resolves with its
-// output; rejects with its error output when it fails or does not end within the timeout.
+// Runs a program in the namespaces, with `input` on its stdin, and resolves with its output; rejects
+// with its error output when it fails or does not end within the timeout.
 export const runInNamespaces = (
   tools: NetworkTools,
-  pid: number,
+  namespaces: Namespaces,
   argv: readonly string[],
   input = '',
 ): Promise<string> =>
   new Promise((resolve, reject) => {
-    const [file, ...args] = [...enterArgs(tools, pid), ...argv];
+    const [file, ...args] = [...enterArgs(tools, namespaces), ...argv];
     const child = spawn(file as string, args, { stdio: ['pipe', 'pipe', 'pipe'], env: HELPER_ENV });
     let stdout = '';
     let stderr = '';

@@ -12,8 +12,9 @@ import type { ChangesEvent } from './workspace-changes.ts';
 
 export interface OutputSink {
   event(event: AgentEvent): void;
-  // Diagnostics produced outside a turn, such as model resolution warnings.
-  notice(level: 'warning' | 'error', message: string): void;
+  // Diagnostics produced outside a turn, such as model resolution warnings, and facts the
+  // operator is told, such as the scope of an engagement.
+  notice(level: 'info' | 'warning' | 'error', message: string): void;
   // What a workspace sandbox changed, and what became of it.
   changes(event: ChangesEvent): void;
   finish(): void;
@@ -135,7 +136,13 @@ export const createPlainSink = (options: PlainSinkOptions): OutputSink => {
     },
     notice(level, message) {
       const text = terminalText(message);
-      diagnostic(level === 'error' ? red(`error: ${text}`) : yellow(`warning: ${text}`));
+      diagnostic(
+        level === 'error'
+          ? red(`error: ${text}`)
+          : level === 'warning'
+            ? yellow(`warning: ${text}`)
+            : text,
+      );
     },
     changes(event) {
       switch (event.type) {

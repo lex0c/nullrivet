@@ -28,6 +28,10 @@ export interface Tool {
   // which starts a subagent. It runs in the nullrivet process whatever backend the session uses;
   // every other tool runs on the session's backend.
   runsOnHost?: boolean;
+  // The tool starts commands the model or the project chooses, which an engagement authorizes
+  // against its targets only within its window: outside it the broker refuses the tool, and a call
+  // still running at its end is cancelled.
+  startsCommands?: boolean;
   // Paths a call will change, known before it runs. The AGENTS.md files that govern them are
   // loaded first, so instructions the model has not seen reach it before the change, not after.
   targetPaths?(input: Record<string, unknown>, cwd: string): string[];

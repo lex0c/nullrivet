@@ -28,7 +28,7 @@ import {
   type TurnResult,
 } from './loop.ts';
 import { buildSystemPrompt, localDate, renderProjectContext } from './system-prompt.ts';
-import type { ToolBackend } from './tool-broker.ts';
+import type { AgentEngagement, ToolBackend } from './tool-broker.ts';
 
 export const MAX_RUNNING_SUBAGENTS = 4;
 // Subagents waiting for a slot. Past this, delegate is refused, so the subagents waiting to run,
@@ -67,6 +67,8 @@ export interface SubagentRuntime {
   // Set when the backend is a sandbox. A subagent cannot start outside its project, where the
   // host-side checks of its directory would read files the sandbox hides.
   sandbox?: SandboxScope;
+  // The parent's engagement: a subagent's commands are held to the same window.
+  engagement?: AgentEngagement;
   // Null when AGENTS.md loading is disabled.
   instructions: InstructionsLoader | null;
   stallMs: number;
@@ -574,6 +576,7 @@ export class SubagentRegistry implements PendingEventSource<SubagentEvent> {
           tools: new Map(runtime.tools.map((tool) => [tool.name, tool])),
           toolBackend: runtime.toolBackend,
           mode: () => 'readonly',
+          ...(runtime.engagement === undefined ? {} : { engagement: runtime.engagement.window }),
           cwd: spec.cwd,
           systemPrompt: () =>
             buildSystemPrompt({
@@ -584,6 +587,9 @@ export class SubagentRegistry implements PendingEventSource<SubagentEvent> {
               isGitRepo,
               role: 'subagent',
               ...(runtime.sandbox === undefined ? {} : { sandbox: runtime.sandbox }),
+              ...(runtime.engagement === undefined
+                ? {}
+                : { engagement: runtime.engagement.scope() }),
             }),
           projectContext: () => projectContext,
           instructions,
