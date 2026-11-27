@@ -85,6 +85,30 @@ describe('buildSystemPrompt', () => {
     expect(prompt('auto')).not.toContain('# Sandbox');
   });
 
+  test('states the engagement scope as given, and that the kernel refuses the rest', () => {
+    const text = buildSystemPrompt({
+      cwd: '/work',
+      mode: 'auto',
+      platform: 'linux',
+      date: '2026-01-02',
+      isGitRepo: false,
+      engagement: ['Authorized, over TCP and UDP, and ICMP echo:', '- 203.0.113.0/28, ports 443'],
+    });
+    expect(text).toContain('# Engagement scope');
+    expect(text).toContain('- 203.0.113.0/28, ports 443');
+    expect(text).toContain('a refusal means out of scope');
+    expect(text).toContain('there is no DNS');
+    expect(
+      buildSystemPrompt({
+        cwd: '/w',
+        mode: 'auto',
+        platform: 'linux',
+        date: 'd',
+        isGitRepo: false,
+      }),
+    ).not.toContain('# Engagement scope');
+  });
+
   test('in the workspace sandbox, says the project is writable, applied by the user, .git never', () => {
     const text = buildSystemPrompt({
       cwd: '/work',

@@ -754,8 +754,32 @@ the wire belong in the virtual machine backend's laboratory profile, not in `sec
   Revoking a destination.
 - The scope reaches the model as a system prompt section stating the facts, so it can plan within
   them; nothing depends on the model reading it.
-- The file is validated like a session file: unknown fields, malformed addresses and a window
-  that ends before it starts are errors that stop the session.
+- The file is validated whole before anything starts, and an error names the item that failed, as
+  `scope.allow[2].ports[0]: must be an integer from 1 to 65535`: an unknown field at any level; a
+  key repeated in one object, of which JSON keeps the last in silence, so that a second `deny` would
+  empty the first; a list given as `null`; an address or network that does not parse, or a network
+  whose address has bits set past its prefix (`203.0.113.7/28`), never widened in silence; an entry
+  with both `cidr` and `host`, or neither; a host name that is not one, or an address given as one,
+  which includes a name whose last label is a number, as `10` or `0x7f.1`, since the resolver reads
+  it as an IPv4 address; ports out of 1 to 65535 or an empty list (left out, every port); a time
+  without its offset, so it does not depend on the machine's time zone, or one the calendar does not
+  have, as a 30th of February or 24:00, which a date parser would move to the day after; a window
+  that ends before it starts; a rate out of 1 to 1,000,000. `deny` takes networks only. `evidence`
+  is refused until the evidence log exists, rather than ignored; `name` may not hold control
+  characters. The file is opened without blocking, and a FIFO or anything else that is not a regular
+  file is refused. The file may hold 4 MiB and 1,000 host names, and the scope, once resolved,
+  20,000 destinations: each network or address once per port, or once without ports, and each denied
+  network. Twenty thousand install in about a second; the ninety thousand that 4 MiB can hold would
+  pass the time a helper has, ten seconds, and close the network.
+- Host names are compared in lower case, without a final dot, and resolved by the host's
+  resolver when the session starts, every address of both families, ten seconds at most each: a
+  name that resolves to nothing stops the session, with every such name listed, as a mistake in a
+  target would. Each address is authorized with its name's ports. The sandbox's `/etc/hosts`
+  holds the loopback and each name with its addresses.
+- At the start, and in the system prompt, the scope is stated as facts the host validated and
+  resolved: each network and name with its ports and, for a name, the addresses it authorized;
+  what is denied; the rate; the window. The system prompt adds that every other destination is
+  refused, that a refusal means out of scope, and that there is no DNS.
 
 ## Evidence log
 
@@ -860,8 +884,9 @@ limits or for the virtual machine backend.
    an adversarial review, is done.
 4. **`security`.** Only after the network isolation tests pass. Its steps:
    1. the network layer with its tests (the namespaces, the ruleset, pasta, revocation), done;
-   2. the engagement file, next;
-   3. the resource limits described under Resources, for every profile: the `security` profile
+   2. the engagement file: its validation, the resolution of its names, the sandbox's hosts file,
+      and the scope stated at the start and in the system prompt, done;
+   3. the resource limits described under Resources, for every profile, next: the `security` profile
       runs tools against targets, and a sandbox that isolates files and network still shares the
       host's CPU, memory and process table;
    4. the profile end to end: the hosts file, the window, `/scope refresh`;
