@@ -411,6 +411,50 @@ describe.if(linux && runs)('a sandbox of the security profile', () => {
     expect(activeUnits(`nullrivet-pasta-${process.pid}-`)).toEqual([]);
   }, 60_000);
 
+  test('gives up a preparation at a later step, with every process its helpers started', async () => {
+    const tools = networkTools() as NetworkTools;
+    const launch = await launchOptions();
+    const cases = [
+      // The listing, which the installation and the reference both make, the reference's from a
+      // shell that starts nft.
+      { step: 'the listing', when: '*" -j "*' },
+      // The scope's installation, once pasta configured the network, in its scope.
+      { step: "the scope's installation", when: '*nullrivet_b*' },
+    ];
+    for (const { step, when } of cases) {
+      const ok = await listening();
+      const hang = `sleep 62.${process.pid % 1000}${cases.findIndex((c) => c.step === step)}`;
+      // An nft that hangs in a process of its own, deaf to SIGTERM, not run in its place.
+      const nft = join(scratch, `deaf-nft-${cases.findIndex((c) => c.step === step)}`);
+      writeFileSync(
+        nft,
+        `#!/bin/sh\ncase " $* $(cat "$2" 2>/dev/null) " in ${when}) trap '' TERM; ${hang}; exit 1;; esac\nexec ${tools.nft} "$@"\n`,
+        { mode: 0o755 },
+      );
+      const before = sandboxDirectories();
+      const started = Date.now();
+      const result = await SecuritySession.start({
+        host: launch.host,
+        launch,
+        env: process.env,
+        notice: () => undefined,
+        address: ADDRESS,
+        engagementPath: engagementFile({
+          scope: { allow: [{ cidr: `${host()}/32`, ports: [ok] }] },
+        }),
+        tools: { ...tools, nft },
+        prepareTimeoutMs: 3_000,
+      });
+      expect(`${step}: ${'error' in result ? result.error : 'started'}`).toContain(
+        `${step}: the security sandbox did not start: the sandbox was not prepared: not prepared within 3 s`,
+      );
+      expect(Date.now() - started).toBeLessThan(8_000);
+      expect(Bun.spawnSync(['pgrep', '-f', hang]).exitCode).toBe(1);
+      expect(sandboxDirectories()).toEqual(before);
+      expect(activeUnits(`nullrivet-pasta-${process.pid}-`)).toEqual([]);
+    }
+  }, 120_000);
+
   test('does not start when its window has ended, nor leaves anything of a start that failed', async () => {
     const ok = await listening();
     const launch = await launchOptions();

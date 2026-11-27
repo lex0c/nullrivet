@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { type ChildProcess, spawn } from 'node:child_process';
 import { closeSync, fstatSync, lstatSync, openSync, readlinkSync, realpathSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { trustedExecutable } from '../bwrap.ts';
@@ -158,6 +158,17 @@ export const HELPER_ENV: Record<string, string> = {
 
 const HELPER_TIMEOUT_MS = 10_000;
 export const GIVEN_UP = 'the preparation of the network was given up';
+
+// Kills a helper with every process it started: they run in a group of their own, and one left
+// alive would hold the helper's output open, so that it would not be seen to end.
+export const killHelper = (child: ChildProcess): void => {
+  if (child.pid === undefined) return;
+  try {
+    process.kill(-child.pid, 'SIGKILL');
+  } catch {
+    // ESRCH: the group has ended.
+  }
+};
 const SHOWN_ERROR_CHARS = 500;
 // A listing of a scope of many networks runs to megabytes.
 const MAX_OUTPUT_CHARS = 64 * 1024 * 1024;
@@ -178,7 +189,11 @@ export const runInNamespaces = (
       return;
     }
     const [file, ...args] = [...enterArgs(tools, namespaces), ...argv];
-    const child = spawn(file as string, args, { stdio: ['pipe', 'pipe', 'pipe'], env: HELPER_ENV });
+    const child = spawn(file as string, args, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: HELPER_ENV,
+      detached: true,
+    });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (chunk: Buffer) => {
@@ -187,10 +202,8 @@ export const runInNamespaces = (
     child.stderr.on('data', (chunk: Buffer) => {
       if (stderr.length < SHOWN_ERROR_CHARS) stderr += chunk.toString();
     });
-    const timer = setTimeout(() => child.kill('SIGKILL'), HELPER_TIMEOUT_MS);
-    const giveUp = (): void => {
-      child.kill('SIGKILL');
-    };
+    const timer = setTimeout(() => killHelper(child), HELPER_TIMEOUT_MS);
+    const giveUp = (): void => killHelper(child);
     signal?.addEventListener('abort', giveUp, { once: true });
     child.once('error', (error) => {
       clearTimeout(timer);

@@ -6,6 +6,7 @@ import {
   GIVEN_UP,
   HELPER_ENV,
   inNewNamespaces,
+  killHelper,
   type Namespaces,
   type NetworkTools,
   releaseNamespaces,
@@ -260,9 +261,11 @@ const reference = (
       'sh',
       ...paths,
     ]);
+    // Its shell starts nft once for each transaction: the group goes whole.
     const child = spawn(file as string, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: HELPER_ENV,
+      detached: true,
     });
     let stdout = '';
     let stderr = '';
@@ -272,10 +275,8 @@ const reference = (
     child.stderr.on('data', (chunk: Buffer) => {
       if (stderr.length < 500) stderr += chunk.toString();
     });
-    const timer = setTimeout(() => child.kill('SIGKILL'), 10_000);
-    const giveUp = (): void => {
-      child.kill('SIGKILL');
-    };
+    const timer = setTimeout(() => killHelper(child), 10_000);
+    const giveUp = (): void => killHelper(child);
     signal?.addEventListener('abort', giveUp, { once: true });
     child.once('error', (error) => {
       clearTimeout(timer);

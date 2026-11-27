@@ -929,7 +929,10 @@ did not run it in place, or a scope that does not hold them, ends the start. Its
 then kills what is left of its scope with `cgroup.kill` and waits for `populated 0` in its
 `cgroup.events`, or for the scope's removal, five seconds at most: a stop that cannot confirm it
 fails, and the session says so. The network helpers, nsenter and nft, live for one command each,
-under a ten-second timeout, and run outside it.
+under a ten-second timeout, and run outside it, each in a process group of its own: at its timeout,
+or when the preparation is given up, the group is killed whole, so that nothing a helper started
+holds its output open. A start given up within its thirty seconds undoes what it made, and says
+what it could not undo.
 
 Tested: a process that forks under a limit of 64 tasks stops below it, in a cgroup and by
 RLIMIT_NPROC; a process that passes 256 MiB is killed, and the sandbox still runs a second later;

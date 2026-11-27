@@ -22,7 +22,7 @@ import {
 } from './engagement.ts';
 import { defaultLimits, type LimitedStart, limitedLaunch, prepareLimits } from './limits.ts';
 import { NetworkControl } from './network/control.ts';
-import { type NetworkTools, networkTools, pinNamespaces } from './network/namespace.ts';
+import { GIVEN_UP, type NetworkTools, networkTools, pinNamespaces } from './network/namespace.ts';
 import { PASTA_LIMITS, type PastaAddress } from './network/pasta.ts';
 import { type Launched, WorkerBackend } from './worker-backend.ts';
 import {
@@ -170,23 +170,32 @@ export class SecuritySession implements EngagementWindow {
     // Given up with the start: the preparation's helpers are killed, so the undoing that waits for
     // it does not outlast the start's time by theirs.
     const abandon = new AbortController();
-    const undo = async (): Promise<void> => {
+    // Undoes what the start made, and says what could not be undone, with why it did not start.
+    const undo = async (why: string): Promise<{ error: string }> => {
       abandon.abort();
-      // What the preparation made is ended once it has stopped.
-      await preparing.catch(() => undefined);
-      await control?.dispose().catch(() => undefined);
+      const left: string[] = [];
+      // What the preparation made is ended once it has stopped. Its failure is told unless it is
+      // the reason already, or only that it was given up: it can hold one of undoing what it made.
+      await preparing.catch((error: unknown) => {
+        const failure = errorMessage(error);
+        if (failure !== GIVEN_UP && !why.includes(failure)) left.push(failure);
+      });
+      await control?.dispose().catch((error: unknown) => {
+        left.push(`the network did not end: ${errorMessage(error)}`);
+      });
       try {
         removeWorkspaceDirectory(directory);
-      } catch {
-        // Still listed as live: the exit handler and the next session remove it.
+      } catch (error) {
+        // Still listed as live: the exit handler and the next session try again.
+        left.push(`the sandbox directory was not removed: ${errorMessage(error)}`);
       }
+      return { error: [why, ...left].join('; ') };
     };
     try {
       mkdirSync(etc, { mode: 0o700 });
       writeFileSync(join(etc, 'hosts'), hostsFile(resolved.value), { mode: 0o644 });
     } catch (error) {
-      await undo();
-      return { error: `the hosts file of the sandbox cannot be written: ${errorMessage(error)}` };
+      return undo(`the hosts file of the sandbox cannot be written: ${errorMessage(error)}`);
     }
     units += 1;
     const unit = `nullrivet-pasta-${process.pid}-${units}.scope`;
@@ -233,8 +242,7 @@ export class SecuritySession implements EngagementWindow {
           : { prepareTimeoutMs: options.prepareTimeoutMs }),
       });
     } catch (error) {
-      await undo();
-      return { error: `the security sandbox did not start: ${errorMessage(error)}` };
+      return undo(`the security sandbox did not start: ${errorMessage(error)}`);
     }
     return new SecuritySession(
       backend,
