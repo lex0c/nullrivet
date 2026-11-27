@@ -107,6 +107,26 @@ describe.if(process.platform === 'linux')('the workspace directory', () => {
     expect(readdirSync(runtime)).toEqual([]);
   }, 30_000);
 
+  test("removes the network's script folders a gone process left, and no other", () => {
+    const runtime = runtimeDir();
+    const old = new Date(Date.now() - 120_000);
+    const folder = (name: string, at?: Date) => {
+      mkdirSync(join(runtime, name));
+      writeFileSync(join(runtime, name, '0.nft'), 'add table inet nullrivet_a\n');
+      if (at !== undefined) utimesSync(join(runtime, name), at, at);
+      return name;
+    };
+    const gone = folder('nullrivet-nft-999999999-1-AbC123', old);
+    const recent = folder('nullrivet-nft-999999998-1-AbC124');
+    const live = folder(`nullrivet-nft-${process.pid}-${processStart(process.pid)}-AbC125`, old);
+    const created = createWorkspaceDirectory({ XDG_RUNTIME_DIR: runtime });
+    if ('error' in created) throw new Error(created.error);
+    const left = readdirSync(runtime);
+    expect(left).not.toContain(gone);
+    expect(left).toContain(recent);
+    expect(left).toContain(live);
+  });
+
   test('removes the directories of sessions whose process is gone, and only those', () => {
     const runtime = runtimeDir();
     const ownStart = processStart(process.pid);

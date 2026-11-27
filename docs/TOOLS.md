@@ -24,8 +24,14 @@ Common behavior:
   operating system permissions, or, with a sandbox, by what it exposes: with `--sandbox inspect`,
   the project read-only, a temporary home and `/tmp`, no network; with `--sandbox workspace`, the
   same with the project writable through an overlay, whose changes reach the project only when
-  the user applies them ([SANDBOX.md](SANDBOX.md)). Background jobs then run in the sandbox, with
-  their logs in its `/tmp`.
+  the user applies them; with `--sandbox security`, the project writable in memory and discarded
+  at exit, and the network of an engagement's scope ([SANDBOX.md](SANDBOX.md)). Background jobs
+  then run in the sandbox, with their logs in its `/tmp`.
+- **Engagement window.** With `--sandbox security`, outside the engagement's window the tool broker
+  refuses the tools that start commands, `bash` and `bash_background`, with
+  `engagement.window`, before they reach the sandbox; at its end, the calls of these tools still
+  running are cancelled and the background jobs stopped. The others, `git`, `glob` and `grep`
+  included, which run fixed programs, stay available; so do `bash_jobs` and `bash_kill`.
 - **Sandbox restarts.** In an interactive session with `--sandbox workspace`, applying or
   discarding the changes stops the sandbox and starts a new one on the project as it is then. A
   call running at that moment ends with `sandbox.restarted`; calls made meanwhile wait for the new

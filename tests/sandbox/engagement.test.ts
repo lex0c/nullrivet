@@ -346,7 +346,7 @@ describe('resolving the engagement', () => {
     const hosts = Object.keys(answers).map((host) => ({ host, ports: [443] }));
     const refused = await resolveEngagement(parsed({ scope: { allow: hosts } }), resolver(answers));
     expect(refused.ok ? 'resolved' : refused.error).toBe(
-      'names of the engagement resolve to addresses that are not on the public internet, which a cidr of the file must hold to be authorized: ' +
+      "names of the engagement resolve to addresses that are not on the public internet, which a cidr of the file must hold, on the name's ports, to be authorized: " +
         'cloud6.example resolves to fd00:ec2::254 (private); ' +
         'inside.example resolves to 10.1.2.3 (private); ' +
         'loopback.example resolves to 127.0.0.1 (loopback); ' +
@@ -358,9 +358,9 @@ describe('resolving the engagement', () => {
       parsed({
         scope: {
           allow: [
-            { host: 'inside.example' },
+            { host: 'inside.example', ports: [22] },
             { host: 'metadata.example' },
-            { cidr: '10.0.0.0/8', ports: [22] },
+            { cidr: '10.0.0.0/8', ports: [22, 443] },
           ],
           deny: [{ cidr: '169.254.0.0/16' }],
         },
@@ -371,6 +371,57 @@ describe('resolving the engagement', () => {
       ['198.51.100.8', '10.1.2.3'],
       ['169.254.169.254'],
     ]);
+  });
+
+  test('stops at a name whose ports a cidr holding its internal address does not allow', async () => {
+    // The cidr allows 443; the name, every port: the answer would open the rest on 10.0.0.1.
+    for (const ports of [undefined, [443, 8080]]) {
+      const result = await resolveEngagement(
+        parsed({
+          scope: {
+            allow: [
+              { cidr: '10.0.0.0/8', ports: [443] },
+              { host: 'app.example', ...(ports === undefined ? {} : { ports }) },
+            ],
+          },
+        }),
+        resolver({ 'app.example': ['10.0.0.1'] }),
+      );
+      expect(result.ok ? 'resolved' : result.error).toEndWith(
+        'app.example resolves to 10.0.0.1 (private)',
+      );
+    }
+  });
+
+  test('stops at a name that resolves to an address of this host, or to IPv4 within IPv6', async () => {
+    const result = await resolveEngagement(
+      parsed({
+        scope: {
+          allow: ['own', 'nat64', 'local', 'sixtofour', 'compatible'].map((name) => ({
+            host: `${name}.example`,
+          })),
+        },
+      }),
+      resolver({
+        'own.example': ['198.51.100.50'],
+        'nat64.example': ['64:ff9b::a9fe:a9fe'],
+        'local.example': ['64:ff9b:1::a9fe:a9fe'],
+        'sixtofour.example': ['2002:a00:1::1'],
+        'compatible.example': ['::a9fe:a9fe'],
+      }),
+      undefined,
+      ['198.51.100.50'],
+    );
+    const error = result.ok ? 'resolved' : result.error;
+    for (const expected of [
+      'own.example resolves to 198.51.100.50 (an address of this host)',
+      'nat64.example resolves to 64:ff9b::a9fe:a9fe (NAT64)',
+      'local.example resolves to 64:ff9b:1::a9fe:a9fe (local NAT64)',
+      'sixtofour.example resolves to 2002:a00:1::1 (6to4)',
+      'compatible.example resolves to ::a9fe:a9fe (IPv4-compatible)',
+    ]) {
+      expect(error).toContain(expected);
+    }
   });
 
   test('stops at names not resolved in time, all of them within the time the whole has', async () => {

@@ -59,6 +59,9 @@ const LOCKLESS_AGE_MS = 60_000;
 // The count is optional: a directory left by a version that named it without one is removed too.
 const SESSION_NAME = /^nullrivet-(\d+)-(\d+)(-\d+)?(\.new)?$/;
 const LOCK = Buffer.from('lock');
+// The folders the network's scripts are written to, named by their process the same way: they hold
+// the targets of an engagement, and one left by a process that was killed is removed with the rest.
+const SCRIPTS_NAME = /^nullrivet-nft-(\d+)-(\d+)-[A-Za-z0-9]+$/;
 
 // Filesystems whose change times or behaviour under an overlay are not local to this machine:
 // another client can change a file without this kernel setting its change time, so conflicts
@@ -230,6 +233,24 @@ const lockDirectory = (path: string, create: boolean): number | null => {
 const sweep = (runtime: string): string[] => {
   const failures: string[] = [];
   for (const name of readdirSync(runtime)) {
+    const scripts = SCRIPTS_NAME.exec(name);
+    if (scripts !== null) {
+      const path = join(runtime, name);
+      const info = lstatSync(path, { throwIfNoEntry: false });
+      if (info === undefined || !info.isDirectory() || info.uid !== process.getuid?.()) continue;
+      // Its process runs, or one of another PID namespace may be writing it: a folder lives for
+      // an installation, seconds.
+      if (processStart(Number(scripts[1])) === scripts[2]) continue;
+      if (Date.now() - info.mtimeMs < LOCKLESS_AGE_MS) continue;
+      try {
+        removeDirectory(path);
+      } catch (error) {
+        failures.push(
+          `the scripts of an earlier session, ${path}, could not be removed: ${errorMessage(error)}`,
+        );
+      }
+      continue;
+    }
     const match = SESSION_NAME.exec(name);
     if (match === null) continue;
     const path = join(runtime, name);

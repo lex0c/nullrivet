@@ -18,8 +18,9 @@ file.
 - **Policy enforced in code.** The execution mode is checked by the tool broker before every tool
   call, not only by choosing which tools the model sees.
 - **Not a sandbox by default.** The working directory is a starting point, not a boundary.
-  Isolation, when needed, comes from the operating system: `--sandbox inspect` and
-  `--sandbox workspace` run the tools in Bubblewrap ([SANDBOX.md](SANDBOX.md)).
+  Isolation, when needed, comes from the operating system: `--sandbox inspect`,
+  `--sandbox workspace` and `--sandbox security` run the tools in Bubblewrap
+  ([SANDBOX.md](SANDBOX.md)).
 
 ## Module map
 
@@ -78,7 +79,11 @@ src/
   sandbox/
     start.ts               starts the session's sandbox, or says why it cannot
     bwrap.ts               the profiles' launch: project root, mounts, overlay, environment
-    workspace.ts           the directories of workspace sandboxes: runtime directory, lock, sweep
+    limits.ts              the resource limits: a systemd scope, checked, or RLIMIT_NPROC
+    security.ts            the security profile: start, window, refresh and end, one owner
+    engagement.ts          the engagement file: validation, resolution of its names, its scope
+    network/               the security profile's network: namespaces, ruleset, pasta, control
+    workspace.ts           the directories of sandboxes on the host: runtime directory, lock, sweep
     session.ts             the backend of an interactive workspace session, restarted on apply
     changeset/             the workspace's changes: reading the upper layer, classifying,
                            checking, describing and applying them by descriptor

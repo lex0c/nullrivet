@@ -10,8 +10,10 @@ import {
   securityLaunch,
 } from './bwrap.ts';
 import {
+  authorizedAmong,
   describeScope,
   type Engagement,
+  hostAddresses,
   hostsFile,
   type LookupAll,
   lookupAll,
@@ -24,6 +26,7 @@ import { defaultLimits, type LimitedStart, limitedLaunch, prepareLimits } from '
 import { NetworkControl } from './network/control.ts';
 import { GIVEN_UP, type NetworkTools, networkTools, pinNamespaces } from './network/namespace.ts';
 import { PASTA_LIMITS, type PastaAddress } from './network/pasta.ts';
+import type { Scope } from './network/ruleset.ts';
 import { type Launched, WorkerBackend } from './worker-backend.ts';
 import {
   createSandboxDirectory,
@@ -103,6 +106,17 @@ export const verifyLauncher = (pid: number, status: string): void => {
 
 const iso = (date: Date): string => date.toISOString();
 
+// pasta reaches an address of this host as the host itself, its services listening there
+// included: a scope that authorizes one, as a laboratory on this machine does, is told.
+const ownAddressesWarning = (scope: Scope): string[] => {
+  const own = authorizedAmong(scope, hostAddresses());
+  return own.length === 0
+    ? []
+    : [
+        `the scope authorizes addresses of this host, ${own.join(', ')}: the sandbox reaches the services of this host listening there`,
+      ];
+};
+
 export class SecuritySession implements EngagementWindow {
   readonly ended: AbortSignal;
   private readonly ending = new AbortController();
@@ -149,12 +163,9 @@ export class SecuritySession implements EngagementWindow {
     if (ended() !== null) return { error: ended() as string };
     const resolved = await resolveEngagement(engagement, options.resolve ?? lookupAll);
     if (!resolved.ok) return { error: resolved.error };
-    // pasta's memory comes out of the sandbox's: the session's budget stays three quarters.
-    const base = defaultLimits();
-    const limits = await prepareLimits(options.env, {
-      ...base,
-      memoryBytes: base.memoryBytes - PASTA_LIMITS.memoryBytes,
-    });
+    // pasta's memory comes out of the sandbox's, whatever limits it: the session's budget stays
+    // three quarters.
+    const limits = await prepareLimits(options.env, defaultLimits(), PASTA_LIMITS.memoryBytes);
     if (limits.how !== 'cgroup' || limits.scope === undefined) {
       return {
         error: `the security sandbox needs the limits of a cgroup: ${limits.warnings.join('; ')}`,
@@ -252,13 +263,23 @@ export class SecuritySession implements EngagementWindow {
       engagement,
       resolved.value,
       options,
-      [...limits.warnings, ...created.warnings],
+      [...limits.warnings, ...created.warnings, ...ownAddressesWarning(resolved.value.scope)],
     );
   }
 
-  // The scope as lines of facts, for the operator and the system prompts.
+  // The scope as lines of facts, for the operator and the system prompts, and what is in force of
+  // it: nothing, once the window ended or the network stopped.
   scope(): string[] {
-    return describeScope(this.resolved);
+    const failure = this.control.failure();
+    const stopped = this.ending.signal.aborted
+      ? this.closed()
+      : failure === null
+        ? null
+        : `the sandbox's network stopped: ${failure}`;
+    return [
+      ...describeScope(this.resolved),
+      ...(stopped === null ? [] : [`None of it is in force: ${stopped}.`]),
+    ];
   }
 
   // Why commands cannot run now; null while the window is open.
@@ -316,10 +337,9 @@ export class SecuritySession implements EngagementWindow {
       renameSync(join(etc, 'hosts.new'), join(etc, 'hosts'));
     } catch (error) {
       // The scope in force and the names the sandbox reads would disagree: the network closes.
-      void this.control.close();
-      return {
-        error: `the network was closed: the hosts file cannot be replaced: ${errorMessage(error)}`,
-      };
+      const reason = `the hosts file cannot be replaced: ${errorMessage(error)}`;
+      void this.control.close(reason);
+      return { error: `the network was closed: ${reason}` };
     }
     stop = stopped();
     if (stop !== null) return stop;

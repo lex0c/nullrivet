@@ -235,6 +235,16 @@ describe.if(cgroupTestsRun)('a scope of the service manager', () => {
         memoryBytes: 4 * 1024 ** 3,
       });
       expect(prefix).toContain(`MemoryMax=${0.75 * 1024 ** 3}`);
+      // A helper's memory in a scope of its own comes out of it all the same.
+      const reserved = await scopeStart(
+        fake(`set -- --slice=${slice} "$@"`),
+        { ...TEST_LIMITS, memoryBytes: 4 * 1024 ** 3 },
+        bus,
+        256 * 1024 ** 2,
+      );
+      expect('prefix' in reserved ? reserved.prefix : reserved.problem).toContain(
+        `MemoryMax=${0.75 * 1024 ** 3 - 256 * 1024 ** 2}`,
+      );
     } finally {
       systemctl('revert', slice);
       systemctl('stop', slice);
@@ -250,6 +260,15 @@ describe.if(cgroupTestsRun)('a sandbox in a scope of its own', () => {
     // The worker's threads, the shell and python take their part of the 64.
     expect(children).toBeGreaterThan(10);
     expect(children).toBeLessThan(64);
+  }, 30_000);
+
+  test("starts the sandbox with its own environment alone, not the manager's", async () => {
+    const sh = await start(scoped as LimitedStart);
+    // The first process of the sandbox keeps the environment it was started with.
+    const output = await sh(
+      `tr '\\0' '\\n' < /proc/1/environ | grep -c -E '^(XDG_RUNTIME_DIR|DBUS_SESSION_BUS_ADDRESS|INVOCATION_ID)=' || true`,
+    );
+    expect(output.split('\n')[0]).toBe('0');
   }, 30_000);
 
   test('kills a process that passes the memory, alone: the sandbox goes on', async () => {

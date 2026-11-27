@@ -281,32 +281,44 @@ export const rulesetFor = (
     }
   }
   const first = new Map((chunks[0] ?? []).map((part) => [part.set, part.elements]));
+  // With a rate, what the scope authorizes goes through the meter first, and only that: a
+  // destination out of scope never takes a place in its sets, which a flood of them would fill.
+  const pass = rate === undefined ? 'accept' : 'goto admit';
   const output = [
     'oif "lo" accept',
-    NDP_OUT,
     ...times.map((time) => `${time} goto refuse`),
+    NDP_OUT,
+    // A routing header sends the packet on to addresses past the one the rules match.
+    'meta nfproto ipv6 exthdr rt exists goto refuse',
     'ip daddr @deny4 goto refuse',
     'ip6 daddr @deny6 goto refuse',
-    ...(rate === undefined
-      ? []
-      : [
-          `ct state new meta nfproto ipv4 update @new4 { ip daddr limit rate over ${rate}/second } goto refuse`,
-          `ct state new meta nfproto ipv6 update @new6 { ip6 daddr limit rate over ${rate}/second } goto refuse`,
-        ]),
-    'ip daddr . tcp dport @tcp4 accept',
-    'ip daddr . udp dport @udp4 accept',
-    'ip6 daddr . tcp dport @tcp6 accept',
-    'ip6 daddr . udp dport @udp6 accept',
-    'ip daddr @any4 meta l4proto { tcp, udp } accept',
-    'ip6 daddr @any6 meta l4proto { tcp, udp } accept',
-    'ip daddr @echo4 icmp type echo-request accept',
-    'ip6 daddr @echo6 icmpv6 type echo-request accept',
+    `ip daddr . tcp dport @tcp4 ${pass}`,
+    `ip daddr . udp dport @udp4 ${pass}`,
+    `ip6 daddr . tcp dport @tcp6 ${pass}`,
+    `ip6 daddr . udp dport @udp6 ${pass}`,
+    `ip daddr @any4 meta l4proto { tcp, udp } ${pass}`,
+    `ip6 daddr @any6 meta l4proto { tcp, udp } ${pass}`,
+    `ip daddr @echo4 icmp type echo-request ${pass}`,
+    `ip6 daddr @echo6 icmpv6 type echo-request ${pass}`,
     'goto refuse',
   ];
+  // The rate of new connections to each destination address, as many at once and as many in each
+  // second after. A meter that could not take the address, its set full, refuses: with the set's
+  // size reached, the update does nothing and the rule would not match.
+  const admit =
+    rate === undefined
+      ? []
+      : [
+          `ct state new meta nfproto ipv4 update @new4 { ip daddr limit rate over ${rate}/second burst ${rate} packets } goto refuse`,
+          'ct state new meta nfproto ipv4 ip daddr != @new4 goto refuse',
+          `ct state new meta nfproto ipv6 update @new6 { ip6 daddr limit rate over ${rate}/second burst ${rate} packets } goto refuse`,
+          'ct state new meta nfproto ipv6 ip6 daddr != @new6 goto refuse',
+          'accept',
+        ];
   const input = [
     'iif "lo" accept',
-    NDP_IN,
     ...times.map((time) => `${time} drop`),
+    NDP_IN,
     'ip saddr @deny4 drop',
     'ip6 saddr @deny6 drop',
     'ct state established ip saddr . tcp sport @tcp4 accept',
@@ -348,6 +360,9 @@ export const rulesetFor = (
     '  chain refuse {',
     ...REFUSE_RULES.map((rule) => `    ${rule}`),
     '  }',
+    ...(admit.length === 0
+      ? []
+      : ['  chain admit {', ...admit.map((rule) => `    ${rule}`), '  }']),
     '  chain output {',
     '    type filter hook output priority filter; policy drop;',
     ...output.map((rule) => `    ${rule}`),

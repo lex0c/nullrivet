@@ -54,6 +54,10 @@ export interface LimitedStart {
   // With the cgroup way only: what starts a helper in a scope of its own, named `unit`, with
   // `limits`, made with what the manager accepted.
   scope?: (unit: string, limits: Limits) => string[];
+  // With the cgroup way only: the env program that starts the sandbox with its own environment
+  // alone. systemd-run runs it with the variables that reach the manager, and its own, which the
+  // sandbox's first process would otherwise keep, readable in /proc/1/environ.
+  clean?: string;
 }
 
 const SYSTEMD_RUN_LOCATIONS = [
@@ -67,6 +71,7 @@ const PRLIMIT_LOCATIONS = [
   '/run/current-system/sw/bin/prlimit',
 ];
 const SHELL = '/bin/sh';
+const ENV_LOCATIONS = ['/usr/bin/env', '/bin/env', '/run/current-system/sw/bin/env'];
 const PROBE_TIMEOUT_MS = 5_000;
 // What systemd-run needs to reach the user's service manager.
 const BUS_VARIABLES = ['XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS'];
@@ -204,6 +209,9 @@ export const scopeStart = async (
   systemdRun: string,
   limits: Limits,
   env: Record<string, string>,
+  // Taken from the memory, whatever limits it: what a helper of the session gets in a scope of
+  // its own.
+  reserveBytes = 0,
 ): Promise<ScopeStart> => {
   const attempt = async (wanted: Limits) => {
     let optional: readonly Optional[] = OPTIONAL;
@@ -217,11 +225,12 @@ export const scopeStart = async (
       optional = optional.filter((option) => option !== refused);
     }
   };
-  const first = await attempt(limits);
+  const wanted = { ...limits, memoryBytes: limits.memoryBytes - reserveBytes };
+  const first = await attempt(wanted);
   if ('problem' in first) return first;
   const parents = Math.min(...first.parents);
-  const fitted = aligned(parents * MEMORY_SHARE);
-  if (fitted >= limits.memoryBytes) return first;
+  const fitted = aligned(parents * MEMORY_SHARE - reserveBytes);
+  if (fitted >= wanted.memoryBytes) return first;
   return attempt({ ...limits, memoryBytes: fitted });
 };
 
@@ -290,6 +299,8 @@ const taskLimit = (): number => {
 export const prepareLimits = async (
   hostEnv: Record<string, string | undefined>,
   limits: Limits = defaultLimits(),
+  // Memory kept for a helper in a scope of its own, out of the sandbox's.
+  reserveBytes = 0,
 ): Promise<LimitedStart> => {
   const env: Record<string, string> = {};
   for (const name of BUS_VARIABLES) {
@@ -297,10 +308,13 @@ export const prepareLimits = async (
     if (value !== undefined) env[name] = value;
   }
   const systemdRun = found(SYSTEMD_RUN_LOCATIONS);
+  const clean = found(ENV_LOCATIONS);
   const scope =
     systemdRun === null
       ? { problem: 'systemd-run is not installed in a system directory' }
-      : await scopeStart(systemdRun, limits, env);
+      : clean === null
+        ? { problem: 'env is not installed in a system directory' }
+        : await scopeStart(systemdRun, limits, env, reserveBytes);
   if ('prefix' in scope) {
     const { prefix, optional } = scope;
     const run = systemdRun as string;
@@ -310,6 +324,7 @@ export const prepareLimits = async (
       env,
       warnings: scope.warnings,
       scope: (unit, helperLimits) => scopeArgs(run, helperLimits, optional, unit),
+      clean: clean as string,
     };
   }
   const prlimit = found(PRLIMIT_LOCATIONS);
@@ -341,6 +356,16 @@ export const prepareLimits = async (
 // `launch` started under `limited`.
 export const limitedLaunch = (launch: WorkerLaunch, limited: LimitedStart): WorkerLaunch => ({
   ...launch,
-  command: [...limited.prefix(), ...launch.command],
+  command: [
+    ...limited.prefix(),
+    ...(limited.clean === undefined
+      ? []
+      : [
+          limited.clean,
+          '-i',
+          ...Object.entries(launch.env).map(([name, value]) => `${name}=${value}`),
+        ]),
+    ...launch.command,
+  ],
   env: { ...launch.env, ...limited.env },
 });

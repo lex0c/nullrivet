@@ -74,14 +74,14 @@ describe('the ruleset of a scope', () => {
       },
     }).join('');
     const lines = text.split('\n').map((line) => line.trim());
-    // After the loopback and neighbour discovery, before anything that accepts.
+    // Right after the loopback, before neighbour discovery and anything else that accepts.
     const out = lines.indexOf('oif "lo" accept');
-    expect(lines.slice(out + 2, out + 4)).toEqual([
+    expect(lines.slice(out + 1, out + 3)).toEqual([
       'meta time < "2026-11-20 12:00:01" goto refuse',
       'meta time >= "2026-11-20 21:00:00" goto refuse',
     ]);
     const into = lines.indexOf('iif "lo" accept');
-    expect(lines.slice(into + 2, into + 4)).toEqual([
+    expect(lines.slice(into + 1, into + 3)).toEqual([
       'meta time < "2026-11-20 12:00:01" drop',
       'meta time >= "2026-11-20 21:00:00" drop',
     ]);
@@ -160,9 +160,25 @@ describe('the ruleset of a scope', () => {
     const text = transactions.join('');
     const lines = text.split('\n').map((line) => line.trim());
     const at = (start: string) => lines.findIndex((line) => line.startsWith(start));
-    expect(at('ip daddr @deny4 goto refuse')).toBeLessThan(at('ip daddr . tcp dport @tcp4 accept'));
-    expect(at('ct state new meta nfproto ipv4 update @new4')).toBeLessThan(
-      at('ip daddr . tcp dport @tcp4 accept'),
+    expect(at('ip daddr @deny4 goto refuse')).toBeLessThan(
+      at('ip daddr . tcp dport @tcp4 goto admit'),
+    );
+    expect(at('meta nfproto ipv6 exthdr rt exists goto refuse')).toBeLessThan(
+      at('ip6 daddr . tcp dport @tcp6 goto admit'),
+    );
+    // With a rate, what the scope authorizes is metered, and only that; a meter that could not
+    // take the address refuses, and the next of it accepts.
+    expect(lines.slice(at('chain admit {') + 1, at('chain admit {') + 6)).toEqual([
+      'ct state new meta nfproto ipv4 update @new4 { ip daddr limit rate over 20/second burst 20 packets } goto refuse',
+      'ct state new meta nfproto ipv4 ip daddr != @new4 goto refuse',
+      'ct state new meta nfproto ipv6 update @new6 { ip6 daddr limit rate over 20/second burst 20 packets } goto refuse',
+      'ct state new meta nfproto ipv6 ip6 daddr != @new6 goto refuse',
+      'accept',
+    ]);
+    expect(lines.filter((line) => line.includes('update @new4'))).toHaveLength(1);
+    // Without a rate, what the scope authorizes is accepted at once.
+    expect(generate({ allow: [], deny: [] }).join('')).toContain(
+      'ip daddr . tcp dport @tcp4 accept',
     );
     expect(lines).toContain(
       'set tcp4 { type ipv4_addr . inet_service; flags interval; elements = { 203.0.113.0/28 . 80, 203.0.113.0/28 . 443 }; }',
@@ -226,7 +242,7 @@ const ADDRESS = { address: '10.0.2.15', prefix: 24, gateway: '10.0.2.2' };
 // The client the sandbox runs: each check prints one JSON line, [name, outcome].
 const CLIENT = `
 import json, os, socket, struct, subprocess, sys, time
-host, gw, marker, tcp_ok, tcp_other, udp_ok, udp_other, loop_port = sys.argv[1:9]
+host, gw, marker, tcp_ok, tcp_other, udp_ok, udp_other, loop_port, udp_loop = sys.argv[1:10]
 open(os.path.join(marker, 'ran'), 'w').close()
 def out(name, value): print(json.dumps([name, value]), flush=True)
 def outcome(e): return type(e).__name__
@@ -249,7 +265,7 @@ def run(name, argv):
     except OSError as e: out(name, outcome(e))
 def wait(name):
     while not os.path.exists(os.path.join(marker, name)): time.sleep(0.05)
-mode = sys.argv[9]
+mode = sys.argv[10]
 if mode == 'probe':
     tcp('tcp allowed', host, tcp_ok)
     tcp('tcp other port', host, tcp_other)
@@ -260,6 +276,7 @@ if mode == 'probe':
     tcp('tcp ipv6', '2001:db8::1', 80, socket.AF_INET6)
     udp('udp allowed', host, udp_ok)
     udp('udp other port', host, udp_other)
+    udp('udp own loopback to host service', '127.0.0.1', udp_loop)
     ping('icmp allowed', host)
     ping('icmp other', '192.0.2.1')
     run('nft flush', ['nft', 'flush', 'ruleset'])
@@ -309,6 +326,20 @@ elif mode == 'udp listen':
         try: out('udp got', float(s.recv(100).decode()))
         except OSError: pass
     out('udp listened', True)
+elif mode == 'flood':
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    refused = 0
+    for i in range(70000):
+        try: s.sendto(b'x', ('10.%d.%d.%d' % (200 + i // 65536, (i // 256) % 256, i % 256), 9))
+        except OSError: refused += 1
+    out('flooded', refused)
+    made = 0
+    for _ in range(10):
+        c = socket.socket(); c.settimeout(3)
+        try: c.connect((host, int(tcp_ok))); made += 1
+        except OSError: pass
+        finally: c.close()
+    out('rate made', made)
 elif mode == 'connected':
     tcp('tcp allowed', host, tcp_ok); wait('go'); tcp('tcp allowed after', host, tcp_ok, timeout=2)
 `;
@@ -319,6 +350,7 @@ interface Servers {
   udpOk: number;
   udpOther: number;
   loopback: number;
+  udpLoopback: number;
   close: () => void;
 }
 
@@ -333,11 +365,11 @@ const servers = async (): Promise<Servers> => {
     await new Promise<void>((resolve) => server.listen(0, host, resolve));
     return (server.address() as { port: number }).port;
   };
-  const udpServer = async (): Promise<number> => {
+  const udpServer = async (host = '0.0.0.0'): Promise<number> => {
     const socket = createSocket('udp4');
     opened.push(socket);
     socket.on('message', (data, from) => socket.send(`udp${data}`, from.port, from.address));
-    await new Promise<void>((resolve) => socket.bind(0, '0.0.0.0', resolve));
+    await new Promise<void>((resolve) => socket.bind(0, host, resolve));
     return socket.address().port;
   };
   return {
@@ -346,6 +378,7 @@ const servers = async (): Promise<Servers> => {
     udpOk: await udpServer(),
     udpOther: await udpServer(),
     loopback: await tcpServer('127.0.0.1', 'loopback'),
+    udpLoopback: await udpServer('127.0.0.1'),
     close: () => {
       for (const server of opened) server.close();
     },
@@ -419,6 +452,7 @@ const startSandbox = (t: NetworkTools, s: Servers, mode: string): Sandbox => {
     String(s.udpOk),
     String(s.udpOther),
     String(s.loopback),
+    String(s.udpLoopback),
     mode,
   ]);
   const child = spawn(file as string, args, { stdio: ['ignore', 'pipe', 'pipe', 'pipe'] });
@@ -553,6 +587,8 @@ describe.if(networkTestsRun && process.platform === 'linux')('the network of a s
       'tcp ipv6': expect.stringMatching(/Error$/),
       'udp allowed': 'reply udpx',
       'udp other port': 'PermissionError',
+      // No answer: the sandbox's own loopback holds nothing pasta would forward to the host's.
+      'udp own loopback to host service': 'TimeoutError',
       // pasta relays echo with the host's ICMP echo sockets, which the host's ping group range
       // may refuse the user.
       'icmp allowed': hostRelaysEcho() ? 'reply type 0' : 'TimeoutError',
@@ -587,14 +623,30 @@ describe.if(networkTestsRun && process.platform === 'linux')('the network of a s
       sandbox.release();
       const made = (await sandbox.waitFor('rate made')) as number;
       if (expected === 'limited') {
-        // Ten at once, for two a second: the burst the limit allows passes, the rest is refused.
+        // Ten at once, for two a second: two pass, three if a second turned meanwhile.
         expect(made).toBeGreaterThanOrEqual(1);
-        expect(made).toBeLessThan(10);
+        expect(made).toBeLessThanOrEqual(3);
       } else {
         expect(made).toBe(expected);
       }
       await sandbox.ended;
     }
+  }, 60_000);
+
+  test('keeps its rate when a flood of destinations out of scope would fill its meter', async () => {
+    const s = await servers();
+    cleanups.push(s.close);
+    const { sandbox } = await prepared(t(), s, 'flood', {
+      ...hostScope(s),
+      newConnectionsPerSecond: 2,
+    });
+    sandbox.release();
+    // Every one refused, and none of them takes a place in the meter.
+    expect(await sandbox.waitFor('flooded')).toBe(70_000);
+    const made = (await sandbox.waitFor('rate made')) as number;
+    expect(made).toBeGreaterThanOrEqual(1);
+    expect(made).toBeLessThanOrEqual(3);
+    await sandbox.ended;
   }, 60_000);
 
   test('cuts an open connection at its next packet once its destination is revoked', async () => {

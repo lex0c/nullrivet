@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync, statfsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
+import { processStart } from '../workspace.ts';
 import {
   GIVEN_UP,
   HELPER_ENV,
@@ -147,7 +148,9 @@ export class NetworkControl {
   // the table that stops everything goes in, ahead of the scope's. Resolves once pasta has ended: a
   // helper that hangs installing the table holds nothing open meanwhile. The sandbox stays, and
   // its files can still be read. Idempotent.
-  close(): Promise<void> {
+  close(reason?: string): Promise<void> {
+    // A close for a failure is one: the session tells it, as when pasta ends.
+    if (reason !== undefined) this.failed ??= reason;
     if (this.closing === null) {
       const closedTable = withScripts([CLOSED_RULESET], ([path]) =>
         runInNamespaces(this.tools, this.namespaces, [this.tools.nft, '-f', path as string]),
@@ -200,7 +203,10 @@ const withScripts = async <T>(
   texts: readonly string[],
   run: (paths: string[]) => Promise<T>,
 ): Promise<T> => {
-  const dir = mkdtempSync(join(scriptRoot(), 'nullrivet-nft-'));
+  // Named by this process, so that the next session removes a folder it left when killed.
+  const dir = mkdtempSync(
+    join(scriptRoot(), `nullrivet-nft-${process.pid}-${processStart(process.pid) ?? 0}-`),
+  );
   try {
     const paths = texts.map((text, index) => {
       const path = join(dir, `${index}.nft`);

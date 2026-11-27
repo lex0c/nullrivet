@@ -2,6 +2,7 @@ import { lookup } from 'node:dns/promises';
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { isIP } from 'node:net';
+import { networkInterfaces } from 'node:os';
 import { errorMessage } from '../errors.ts';
 import {
   type AllowedDestination,
@@ -69,13 +70,38 @@ const INTERNAL: readonly { network: Network; what: string }[] = (
     ['240.0.0.0/4', 'reserved'],
     ['::/128', 'unspecified'],
     ['::1/128', 'loopback'],
+    ['::/96', 'IPv4-compatible'],
     ['::ffff:0:0/96', 'IPv4-mapped'],
+    // An IPv4 address within an IPv6 one, which a translator on the way can reach: a private one
+    // as well as a public one.
+    ['64:ff9b::/96', 'NAT64'],
+    ['64:ff9b:1::/48', 'local NAT64'],
+    ['2002::/16', '6to4'],
     ['fc00::/7', 'private'],
     ['fec0::/10', 'site-local'],
     ['fe80::/10', 'link-local'],
     ['ff00::/8', 'multicast'],
   ] as const
 ).map(([text, what]) => ({ network: parseNetwork(text) as Network, what }));
+
+// The addresses of this host's interfaces, the loopback's excepted.
+export const hostAddresses = (): string[] =>
+  Object.values(networkInterfaces())
+    .flat()
+    .flatMap((entry) =>
+      entry === undefined || entry.internal ? [] : [entry.address.replace(/%.*$/, '')],
+    );
+
+// The addresses among `addresses` the scope authorizes and does not deny.
+export const authorizedAmong = (scope: Scope, addresses: readonly string[]): string[] =>
+  addresses.filter((address) => {
+    const network = parseNetwork(address);
+    return (
+      network !== null &&
+      scope.allow.some((destination) => holds(destination.network, network)) &&
+      !scope.deny.some((denied) => holds(denied, network))
+    );
+  });
 
 // Whether `network` holds `address`.
 const holds = (network: Network, address: Network): boolean =>
@@ -406,6 +432,7 @@ export const resolveEngagement = async (
   engagement: Engagement,
   resolve: LookupAll = lookupAll,
   limits: { lookupMs: number; totalMs: number } = RESOLUTION_LIMITS,
+  ownAddresses: readonly string[] = hostAddresses(),
 ): Promise<Result<ResolvedEngagement>> => {
   const hosts = [
     ...new Set(engagement.allow.flatMap((entry) => (entry.kind === 'host' ? [entry.host] : []))),
@@ -444,23 +471,39 @@ export const resolveEngagement = async (
   if (failures.length > 0) {
     return { ok: false, error: `names of the engagement do not resolve: ${listed(failures)}` };
   }
-  const named = [
-    ...engagement.allow.flatMap((entry) => (entry.kind === 'network' ? [entry.network] : [])),
-    ...engagement.deny,
-  ];
+  // An address of this host is reached through pasta as the host itself, its own services
+  // included: it is held to the same rule as one off the public internet.
+  const own = ownAddresses.flatMap((address) => {
+    const network = parseNetwork(address);
+    return network === null ? [] : [{ network, what: 'an address of this host' }];
+  });
+  const portsOf = new Map<string, readonly number[] | undefined>();
+  for (const entry of engagement.allow) {
+    if (entry.kind === 'host') portsOf.set(entry.host, entry.ports);
+  }
+  // A cidr allows the name's ports when it has no ports, or all of them; a denied one makes the
+  // address unreachable whatever the ports.
+  const covers = (cidrPorts: readonly number[] | undefined, ports: readonly number[] | undefined) =>
+    cidrPorts === undefined || ports?.every((port) => cidrPorts.includes(port)) === true;
   for (const [host, found] of addresses) {
+    const ports = portsOf.get(host);
     for (const address of found) {
       const network = parseNetwork(address) as Network;
-      const internal = INTERNAL.find((range) => holds(range.network, network));
-      if (internal !== undefined && !named.some((cidr) => holds(cidr, network))) {
-        failures.push(`${host} resolves to ${address} (${internal.what})`);
-      }
+      const internal = [...own, ...INTERNAL].find((range) => holds(range.network, network));
+      if (internal === undefined) continue;
+      const named =
+        engagement.deny.some((cidr) => holds(cidr, network)) ||
+        engagement.allow.some(
+          (entry) =>
+            entry.kind === 'network' && holds(entry.network, network) && covers(entry.ports, ports),
+        );
+      if (!named) failures.push(`${host} resolves to ${address} (${internal.what})`);
     }
   }
   if (failures.length > 0) {
     return {
       ok: false,
-      error: `names of the engagement resolve to addresses that are not on the public internet, which a cidr of the file must hold to be authorized: ${listed(failures)}`,
+      error: `names of the engagement resolve to addresses that are not on the public internet, which a cidr of the file must hold, on the name's ports, to be authorized: ${listed(failures)}`,
     };
   }
   const allow: AllowedDestination[] = engagement.allow.flatMap((entry) => {

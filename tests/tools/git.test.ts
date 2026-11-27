@@ -3,7 +3,7 @@ import { chmod, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { listFiles } from '../../src/tools/file-walk.ts';
-import { gitTool } from '../../src/tools/git.ts';
+import { configArgs, gitEnv, gitTool, HARDENING_CONFIG } from '../../src/tools/git.ts';
 import { removeOutputFiles } from '../../src/tools/output-files.ts';
 import type { ToolContext } from '../../src/tools/types.ts';
 import { readParts, savedOutputs } from '../helpers/saved-output.ts';
@@ -187,6 +187,27 @@ describe('git tool', () => {
         ].join('\n'),
       );
       await chmod(hook, 0o755);
+      // A signed commit, made before the repository is set against the tool, by a program that
+      // signs nothing; then a format that verifies signatures with the repository's programs.
+      const signer = join(dir, '.signer');
+      await writeFile(
+        signer,
+        [
+          '#!/bin/sh',
+          'cat >/dev/null',
+          'echo "[GNUPG:] SIG_CREATED D 1 8 00 0 X" >&2',
+          'printf -- "-----BEGIN PGP SIGNATURE-----\\n\\nZmFrZQ==\\n-----END PGP SIGNATURE-----\\n"',
+          '',
+        ].join('\n'),
+      );
+      await chmod(signer, 0o755);
+      // git runs a signature program by its path, not through a shell.
+      const verifier = join(dir, '.verifier');
+      await writeFile(verifier, `#!/bin/sh\nexec "${hook}" gpg "$@"\n`);
+      await chmod(verifier, 0o755);
+      sh(
+        `git -c gpg.format=openpgp -c gpg.program="${signer}" -c user.signingkey=X commit -q --allow-empty -S -m signed`,
+      );
       sh(
         [
           `git config core.fsmonitor "${hook} fsmonitor"`,
@@ -198,6 +219,11 @@ describe('git tool', () => {
           `git config diff.external "${hook} ext_diff"`,
           `git config core.pager "${hook} pager"`,
           `git config core.hooksPath "${dir}/.hooks"`,
+          `git config gpg.program "${verifier}"`,
+          `git config gpg.openpgp.program "${verifier}"`,
+          `git config gpg.ssh.program "${verifier}"`,
+          `git config gpg.x509.program "${verifier}"`,
+          `git config format.pretty 'format:%H %G?'`,
           `mkdir .hooks && printf '#!/bin/sh\\ntouch ${sentinels}/post_index_change\\n' > .hooks/post-index-change && chmod +x .hooks/post-index-change`,
           `printf '*.txt filter=evil diff=evil\\n' > .gitattributes`,
           'echo four >> a.txt',
@@ -216,11 +242,30 @@ describe('git tool', () => {
         stderr: 'ignore',
       });
       expect((await fired()).length).toBeGreaterThan(0);
+      // The signature's verification, which a log runs for the format.
+      Bun.spawnSync(['git', 'log', '-1'], {
+        cwd: dir,
+        stdin: 'ignore',
+        stdout: 'ignore',
+        stderr: 'ignore',
+      });
+      expect((await fired()).filter((name) => name.startsWith('gpg'))).not.toEqual([]);
     });
 
     test('listing files for glob and grep executes nothing either', async () => {
       const { files } = await listFiles(dir, new AbortController().signal);
       expect(files).toContain('a.txt');
+      expect(await fired()).toEqual([]);
+    });
+
+    test('the signature programs are disabled, even for a format that asks for verification', async () => {
+      Bun.spawnSync(['git', ...configArgs(HARDENING_CONFIG), 'log', '-1', '--pretty=format:%G?'], {
+        cwd: dir,
+        env: gitEnv(),
+        stdin: 'ignore',
+        stdout: 'ignore',
+        stderr: 'ignore',
+      });
       expect(await fired()).toEqual([]);
     });
 

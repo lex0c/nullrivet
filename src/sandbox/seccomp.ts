@@ -3,7 +3,8 @@
 // - the key management calls, because the kernel keyrings are shared with the host and can hold
 //   credentials such as Kerberos tickets;
 // - socket() of any family but IPv4, IPv6 and netlink routing, which the network namespace
-//   isolates. The others are not all isolated by it: AF_UNIX reaches a host socket inside the
+//   isolates, and of IPv4 or IPv6 with the type SOCK_PACKET, under which the kernel makes a
+//   packet socket, as AF_PACKET does. The others are not all isolated by it: AF_UNIX reaches a host socket inside the
 //   project, since a read-only bind does not stop a connection, including to a socket created
 //   after the sandbox started; AF_VSOCK can reach the hypervisor or other machines when vsock
 //   namespaces are global, which is the default. A family is allowed by name, so one added to
@@ -37,6 +38,7 @@ export const sandboxArch = (arch: string = process.arch): SyscallArch | null =>
   arch === 'x64' || arch === 'arm64' ? arch : null;
 
 const BPF_LD_W_ABS = 0x20;
+const BPF_ALU_AND_K = 0x54;
 const BPF_JEQ_K = 0x15;
 const BPF_JSET_K = 0x45;
 const BPF_RET_K = 0x06;
@@ -53,18 +55,25 @@ const AF_INET = 2;
 const AF_INET6 = 10;
 const AF_NETLINK = 16;
 const NETLINK_ROUTE = 0;
+const SOCK_PACKET = 10;
+// The type without SOCK_NONBLOCK and SOCK_CLOEXEC, which the same argument carries.
+const SOCK_TYPE_MASK = 0xf;
 // Offsets in struct seccomp_data: nr, arch, then the arguments from byte 16. The low half of a
 // 64-bit argument comes first on these little-endian architectures.
 const NR = 0;
 const ARCH = 4;
 const ARG0 = 16;
+const ARG1 = 24;
 const ARG2 = 32;
 
-type Label = 'allow' | 'deny' | 'foreign';
-type Instruction =
+type Label = 'allow' | 'deny' | 'foreign' | 'inet' | 'type';
+// A label names the instruction a jump goes to; jumps only go forward.
+type Instruction = { label?: Label } & (
   | { op: 'load'; offset: number }
+  | { op: 'and'; k: number }
   | { op: 'jeq' | 'jset'; k: number; match: Label | 'next'; miss: Label | 'next' }
-  | { op: 'ret'; label: Label; k: number };
+  | { op: 'ret'; label: Label; k: number }
+);
 
 export const seccompProgram = (arch: SyscallArch): Uint8Array => {
   const table = ARCHES[arch];
@@ -83,17 +92,20 @@ export const seccompProgram = (arch: SyscallArch): Uint8Array => {
     { op: 'jeq', k: IO_URING_REGISTER, match: 'deny', miss: 'next' },
     { op: 'jeq', k: table.socket, match: 'next', miss: 'allow' },
     { op: 'load', offset: ARG0 },
-    { op: 'jeq', k: AF_INET, match: 'allow', miss: 'next' },
-    { op: 'jeq', k: AF_INET6, match: 'allow', miss: 'next' },
-    { op: 'jeq', k: AF_NETLINK, match: 'next', miss: 'deny' },
+    { op: 'jeq', k: AF_NETLINK, match: 'next', miss: 'inet' },
     { op: 'load', offset: ARG2 },
     { op: 'jeq', k: NETLINK_ROUTE, match: 'allow', miss: 'deny' },
+    { op: 'jeq', label: 'inet', k: AF_INET, match: 'type', miss: 'next' },
+    { op: 'jeq', k: AF_INET6, match: 'type', miss: 'deny' },
+    { op: 'load', label: 'type', offset: ARG1 },
+    { op: 'and', k: SOCK_TYPE_MASK },
+    { op: 'jeq', k: SOCK_PACKET, match: 'deny', miss: 'allow' },
     { op: 'ret', label: 'allow', k: SECCOMP_RET_ALLOW },
     { op: 'ret', label: 'deny', k: SECCOMP_RET_ERRNO | EPERM },
     { op: 'ret', label: 'foreign', k: SECCOMP_RET_ERRNO | ENOSYS },
   ];
   const at = (label: Label): number =>
-    program.findIndex((instruction) => instruction.op === 'ret' && instruction.label === label);
+    program.findIndex((instruction) => instruction.label === label);
   const offset = (index: number, target: Label | 'next'): number =>
     target === 'next' ? 0 : at(target) - index - 1;
   const bytes = Buffer.alloc(program.length * 8);
@@ -103,6 +115,10 @@ export const seccompProgram = (arch: SyscallArch): Uint8Array => {
       case 'load':
         bytes.writeUInt16LE(BPF_LD_W_ABS, base);
         bytes.writeUInt32LE(instruction.offset, base + 4);
+        return;
+      case 'and':
+        bytes.writeUInt16LE(BPF_ALU_AND_K, base);
+        bytes.writeUInt32LE(instruction.k >>> 0, base + 4);
         return;
       case 'jeq':
       case 'jset':

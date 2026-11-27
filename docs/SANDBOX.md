@@ -1,8 +1,11 @@
 # Sandbox and engagement scope
 
-Status: phases 1 and 2 are implemented: the ToolBroker, and the worker with the `inspect` profile
-(`--sandbox inspect`), background jobs included. The later phases are not. The document records the
-design, the facts checked on a Linux host while preparing it, and the decisions taken on it.
+Status: phases 1 to 4 are implemented: the ToolBroker; the worker with the `inspect` profile,
+background jobs included; the `workspace` profile with its ChangeSet; and the `security` profile,
+with the network of an engagement's scope within its window and the resource limits of every
+profile. The allowlisting HTTP proxy (4b), the evidence log (phase 5) and the virtual machine
+backend (phase 6) are not. The document records the design, the facts checked on a Linux host
+while building it, and the decisions taken on it.
 
 ## Purpose
 
@@ -282,12 +285,14 @@ every command inherits it. It denies with EPERM:
 
 - `keyctl`, `add_key` and `request_key`: the kernel keyrings are shared with the host, and can
   hold credentials such as Kerberos tickets;
-- `socket` of any family but `AF_INET`, `AF_INET6` and `AF_NETLINK` with `NETLINK_ROUTE`, which
-  the network namespace isolates. Others are not all isolated by it: with `AF_UNIX`, a read-only
-  bind does not stop a connection to a host socket inside the project, including one created
-  after the start; `AF_VSOCK` can reach the hypervisor or other machines when vsock namespaces are
-  global, the kernel's default. Families are allowed by name, so one the kernel adds later is
-  denied. `socketpair` stays allowed, since it only makes a pair connected to itself.
+- `socket` of any family but `AF_INET`, `AF_INET6` and `AF_NETLINK` with `NETLINK_ROUTE`, which the
+  network namespace isolates, and of `AF_INET` or `AF_INET6` with the type `SOCK_PACKET`, under
+  which the kernel makes a packet socket, as `AF_PACKET` does; the type is read without its flags.
+  Others are not all isolated by it: with `AF_UNIX`, a read-only bind does not stop a connection to
+  a host socket inside the project, including one created after the start; `AF_VSOCK` can reach the
+  hypervisor or other machines when vsock namespaces are global, the kernel's default. Families are
+  allowed by name, so one the kernel adds later is denied. `socketpair` stays allowed, since it only
+  makes a pair connected to itself.
 - `io_uring_setup`, `io_uring_enter` and `io_uring_register`: an io_uring operation creates a
   socket without the `socket` call, so the rule above would not hold. Checked: a command in the
   sandbox created a Unix socket through io_uring and connected to a host socket in the project
@@ -611,7 +616,9 @@ process never joins them, so the agent loop and the providers keep the host's ne
    the rate limit's sets aside. The text goes to nft in files of a directory only the user can
    read, in memory (the user's runtime directory or `/dev/shm`) when one is a tmpfs, since they
    name the targets: an argument is limited to 128 KiB, and nftables 1.0.9 cannot read a script
-   from a pipe.
+   from a pipe. The folder is named by the process and its start, and removed after the
+   transactions; one that a process killed meanwhile left in the runtime directory is removed by
+   the next session that starts, a minute later at the earliest.
 3. Only then is the worker released, by writing to the block descriptor, after the window was
    checked once more. A step that fails, or that takes more than thirty seconds, ends the sandbox
    unreleased. Bubblewrap goes on at the end of the block descriptor as on data, so closing it is
@@ -648,8 +655,16 @@ sidecar container sharing the locked namespace could not download nftables to ap
 - Out-of-scope packets are rejected (TCP reset, ICMP administratively prohibited) rather than
   dropped, so a tool reports the refusal at once instead of waiting for its own timeout.
 - The rate limit counts new connections per destination: `ct state new` matched against a meter
-  keyed by destination address. A plain `limit rate` counts packets, which is not what the
-  engagement file promises.
+  keyed by destination address, `limit rate over N/second burst N packets`, so that N pass at once
+  and N in each second after. A plain `limit rate` counts packets, which is not what the
+  engagement file promises. Only what the scope authorizes reaches the meter, in a chain of its
+  own: a destination out of scope never takes a place in its sets, which hold 65,536 addresses. A
+  set full makes nft's update do nothing, and the rule would not match: the next rule refuses a new
+  connection to an address the meter does not hold. Tested: 70,000 datagrams to destinations out
+  of scope, then ten connections to one in scope at two a second: two or three passed. Without
+  this, the refused flood filled the meter and the limit held no more, as a review measured.
+- A packet with an IPv6 routing header is refused: it goes on to addresses past the one the rules
+  match.
 
 ### Revoking a destination
 
@@ -687,8 +702,10 @@ would under a rule that accepts established connections.
   process is killed for it, and the boundary does not depend on removing conntrack entries.
 - The window is in the ruleset: `meta time < "<from>"` and `meta time >= "<until>"`, written in
   UTC with nft and the reference listed under `TZ=UTC`, rounded inward to the second nft keeps,
-  refuse every packet outside it, in both directions, after the loopback and before anything
-  that accepts. The kernel holds the end, whatever the host's process is doing: tested with the
+  refuse every packet outside it, in both directions, right after the loopback and before
+  anything else, neighbour discovery included. The kernel compares with its wall clock, which the
+  host's check reads too: a clock set back moves the end for both, though a session that saw the
+  end stays ended. The kernel holds the end, whatever the host's process is doing: tested with the
   host's event loop held across the end, as when it is suspended or starved, nothing passed
   after it. No packet the sandbox sends after the end crosses the policy; bytes it wrote before,
   which pasta or the host's buffers hold, may still reach the target. Tested: every byte a
@@ -720,8 +737,19 @@ In `security`, passt's `pasta` connects the namespace to the host network once t
 place. Without it the profile does not start. It runs in the namespaces' user namespace, by the
 name `pasta`, which chooses its mode, with nothing forwarded in either direction or protocol
 (`-t none -u none -T none -U none`), without DHCP, and without mapping the gateway's address to
-the host's loopback (`--no-map-gw`). A pasta that ends leaves the namespace without a way out, and
-is not started again, nor taken for ready when it ends right after configuring the namespace.
+the host's loopback (`--no-map-gw`). What else pasta offers stays off by default and is not
+turned on: forwarding DNS (`--dns-forward`), mapping a guest address to the host's
+(`--map-guest-addr`), and a control socket (`-c`); DHCPv6 is off as well. What stays on: answering
+neighbour discovery and router solicitations itself, and relaying ICMP echo. With `--netns`,
+pasta joins the given namespace and makes no user namespace of its own to isolate itself in. A
+pasta that ends leaves the namespace without a way out, and is not started again, nor taken for
+ready when it ends right after configuring the namespace.
+
+pasta reaches every address of the host but the one it copies into the namespace as the host
+itself, the services listening there included: through docker0, a VPN or a second address. A
+scope that authorizes such an address, as a laboratory on this machine does, reaches them, and the
+session says so at the start with the addresses; a name that resolves to one is held to the rule
+of internal addresses, below.
 It relays ICMP echo with echo sockets of the host, which the host's ping group range must allow
 the user: without it, TCP and UDP pass and echo requests get no reply. Tests with real
 namespaces, and servers on the host's own address
@@ -829,11 +857,14 @@ refused.
   the error lists ten such names and counts the rest. Each address is authorized with its name's
   ports. The sandbox's `/etc/hosts` holds the loopback and each name with its addresses.
 - A name that resolves to an address off the public internet stops the session too, unless a `cidr`
-  of the file, in `allow` or in `deny`, holds that address: an authorization by name must not reach
-  the inside by an answer of DNS, as a cloud's metadata service at `169.254.169.254`. These are the
-  unspecified, private, shared, loopback, link-local, multicast and reserved ranges of IPv4, and of
-  IPv6 the unspecified and loopback addresses, the IPv4-mapped, unique local, site-local, link-local
-  and multicast ranges. A private network is a common target: it is authorized by naming it.
+  of the file holds that address: in `deny`, or in `allow` with every port of the name, so that an
+  answer cannot open ports the `cidr` does not. An authorization by name must not reach the inside
+  by an answer of DNS, as a cloud's metadata service at `169.254.169.254`. These are the
+  unspecified, private, shared, loopback, link-local, multicast and reserved ranges of IPv4; of
+  IPv6 the unspecified and loopback addresses, the IPv4-compatible, IPv4-mapped, NAT64
+  (`64:ff9b::/96`, `64:ff9b:1::/48`), 6to4, unique local, site-local, link-local and multicast
+  ranges, the ones that hold an IPv4 address included; and the addresses of this host. A private
+  network is a common target: it is authorized by naming it.
 - At the start, and in the system prompt, the scope is stated as facts the host validated and
   resolved: each network and name with its ports and, for a name, the addresses it authorized;
   what is denied; the rate; the window. The system prompt adds that every other destination is
@@ -903,8 +934,11 @@ cgroup above has less memory than the host, a second scope reads back the lowere
 that does not account swap to cgroups has no `memory.swap.max`: no swap limit is possible there,
 and the session says so when the host has swap. The check takes about fifty milliseconds, and the
 manager's answer is awaited five seconds at most. systemd-run reaches the manager by
-`XDG_RUNTIME_DIR` or `DBUS_SESSION_BUS_ADDRESS`, given to it alone: Bubblewrap clears the
-environment for the sandbox.
+`XDG_RUNTIME_DIR` or `DBUS_SESSION_BUS_ADDRESS`, given to it alone: it runs the sandbox through
+`env -i` with the sandbox's own environment, since Bubblewrap's first process keeps the
+environment it was started with, readable in `/proc/1/environ`, and systemd-run adds
+`INVOCATION_ID` besides. Tested: none of the three is there. A helper's memory in a scope of its
+own, as pasta's, comes out of the sandbox's whatever limits it, a cgroup above included.
 
 Without the manager, as over SSH without lingering or in a container, only the processes are
 limited, by `prlimit --nproc` around Bubblewrap. RLIMIT_NPROC counts every task of the user, the
@@ -1016,7 +1050,11 @@ hard alike.
    4. the profile end to end, done: `--sandbox security --engagement`, the hosts file, the window
       in the kernel, `/scope refresh`, pasta in a scope of its own, and the cgroup limits
       required;
-   5. the documentation and an adversarial review, next.
+   5. the documentation and an adversarial review, done: four reviews, of the network's guarantees,
+      of the host's orchestration and of what a command inside can do, found the rate limit
+      failing open once its meter was full, ports an answer of DNS could open, the git tool
+      running a program the repository named for signatures, and the gaps listed in this
+      document, all fixed and tested.
 
    4b: the allowlisting HTTP proxy.
 5. **Evidence log**, written by the host, with credentials removed from the arguments: the tool

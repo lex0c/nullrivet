@@ -210,6 +210,10 @@ describe.if(linux && runs)('a sandbox of the security profile', () => {
     expect(output).toContain('Connection refused');
     expect(await ruleset(session)).toContain(`${host()} . ${ok}`);
     expect(activeUnits(`nullrivet-pasta-${process.pid}-`)).toHaveLength(1);
+    // The test authorizes this host's own address, as a laboratory on this machine does: told.
+    expect(session.warnings).toContain(
+      `the scope authorizes addresses of this host, ${host()}: the sandbox reaches the services of this host listening there`,
+    );
     // Its directory holds the hosts file and the lock, no overlay.
     const own = sandboxDirectories().filter((name) => name.startsWith(`nullrivet-${process.pid}-`));
     expect(own).toHaveLength(1);
@@ -218,34 +222,69 @@ describe.if(linux && runs)('a sandbox of the security profile', () => {
     ).toEqual(['etc', 'lock']);
   }, 60_000);
 
+  test('cannot widen, turn off or go around its network from inside', async () => {
+    const ok = await listening();
+    const { session, run } = await start({
+      scope: { allow: [{ cidr: `${host()}/32`, ports: [ok] }] },
+    });
+    const tries = [
+      ['nft', 'nft flush ruleset'],
+      ['sysctl', 'echo "0 0" > /proc/sys/net/ipv4/ping_group_range'],
+      ['route', 'echo 1 > /proc/sys/net/ipv4/ip_forward'],
+      ['user namespace', 'unshare --user --map-root-user true'],
+      ['hosts', 'echo "198.51.100.1 svc.test" >> /etc/hosts'],
+      ['hosts directory', 'touch /etc/nullrivet/added'],
+      ['name', 'getent hosts example.com'],
+      [
+        'raw socket',
+        `python3 -c "import socket; socket.socket(socket.AF_INET, socket.SOCK_RAW, 1)"`,
+      ],
+      [
+        'packet socket',
+        `python3 -c "import socket; socket.socket(socket.AF_PACKET, socket.SOCK_RAW)"`,
+      ],
+      [
+        'unix socket',
+        `python3 -c "import socket; socket.socket(socket.AF_UNIX).connect('\\0/tmp/.X11-unix/X0')"`,
+      ],
+    ];
+    const output = await run('bash', {
+      command: tries
+        .map(([name, command]) => `(${command}) >/dev/null 2>&1; echo "${name}: $?"`)
+        .join('\n'),
+    });
+    // Each ran and failed: a program missing from the sandbox would prove nothing.
+    for (const [name] of tries) {
+      const code = new RegExp(`^${name}: (\\d+)$`, 'm').exec(output)?.[1];
+      expect(
+        `${name}: ${code === '0' ? 'succeeded' : code === undefined ? 'not run' : code === '127' ? 'not found' : 'refused'}`,
+      ).toBe(`${name}: refused`);
+    }
+    // And the ruleset is the one installed.
+    expect(await ruleset(session)).toContain(`${host()} . ${ok}`);
+  }, 60_000);
+
   test('takes new addresses of its names on a refresh, in its hosts file and its scope', async () => {
-    const [ok, other] = [await listening(), await listening()];
-    let answer = [host()];
+    const ok = await listening();
+    let answer = ['198.51.100.20'];
     const { session, run } = await start(
-      {
-        scope: {
-          // The host's address is a private one, authorized by naming it, on another port.
-          allow: [
-            { cidr: `${host()}/32`, ports: [other] },
-            { host: 'svc.test', ports: [ok] },
-          ],
-        },
-      },
+      { scope: { allow: [{ host: 'svc.test', ports: [ok] }] } },
       { resolve: async () => answer },
     );
     answer = ['192.0.2.10'];
     expect(await session.refresh()).toEqual({
-      changes: [{ host: 'svc.test', added: ['192.0.2.10'], removed: [host()] }],
+      changes: [{ host: 'svc.test', added: ['192.0.2.10'], removed: ['198.51.100.20'] }],
     });
     expect(await run('bash', { command: 'grep svc.test /etc/hosts' })).toContain(
       '192.0.2.10 svc.test',
     );
     const rules = await ruleset(session);
     expect(rules).toContain(`192.0.2.10 . ${ok}`);
-    expect(rules).not.toContain(`${host()} . ${ok}`);
+    expect(rules).not.toContain(`198.51.100.20 . ${ok}`);
+    // The address the name no longer resolves to is refused at once.
     expect(
       await run('bash', {
-        command: `(exec 3<>/dev/tcp/${host()}/${ok}) 2>&1 | grep -o 'Connection refused'`,
+        command: `(exec 3<>/dev/tcp/198.51.100.20/${ok}) 2>&1 | grep -o 'Connection refused'`,
       }),
     ).toContain('Connection refused');
   }, 60_000);
@@ -275,6 +314,10 @@ describe.if(linux && runs)('a sandbox of the security profile', () => {
       await Bun.sleep(50);
     }
     expect(notices.join('\n')).toContain(`info: The engagement window ended at ${window.until}`);
+    // What the operator and the model read of the scope says none of it is in force.
+    expect(session.scope().at(-1)).toBe(
+      `None of it is in force: the engagement window ended at ${window.until}.`,
+    );
     expect(await ruleset(session)).toContain('table inet nullrivet_closed');
     expect(
       Bun.spawnSync(['pgrep', '-u', String(process.getuid?.()), '-x', 'pasta'])
@@ -301,7 +344,7 @@ describe.if(linux && runs)('a sandbox of the security profile', () => {
         {
           scope: {
             allow: [
-              { cidr: `${host()}/32`, ports: [other] },
+              { cidr: `${host()}/32`, ports: [ok, other] },
               { host: 'svc.test', ports: [ok] },
             ],
           },
