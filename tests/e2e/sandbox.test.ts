@@ -125,9 +125,11 @@ describe.if(sandboxTestsRun)('--sandbox inspect', () => {
       const cgroup = readFileSync(`/proc/${pid}/cgroup`, 'utf8').trim().replace(/^0::/, '');
       expect(cgroup).toMatch(/\.scope$/);
       expect(readFileSync(`/sys/fs/cgroup${cgroup}/pids.max`, 'utf8').trim()).toBe('4096');
-      expect(readFileSync(`/sys/fs/cgroup${cgroup}/memory.max`, 'utf8').trim()).toBe(
-        String(defaultLimits().memoryBytes),
-      );
+      // Three quarters of the memory, or less under a cgroup with a smaller limit.
+      const memory = Number(readFileSync(`/sys/fs/cgroup${cgroup}/memory.max`, 'utf8').trim());
+      expect(memory).toBeGreaterThan(0);
+      expect(memory).toBeLessThanOrEqual(defaultLimits().memoryBytes);
+      expect(readFileSync(`/sys/fs/cgroup${cgroup}/memory.swap.max`, 'utf8').trim()).toBe('0');
       process.kill(pid);
       const { code } = await cli.finished;
       expect(code).toBe(0);

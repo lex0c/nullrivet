@@ -776,7 +776,8 @@ refused.
   seconds, and close the network.
 - Host names are compared in lower case, without a final dot, and resolved by the host's resolver
   when the session starts, every address of both families, sixteen at a time, ten seconds at most
-  each and thirty for all of them, so that no lookup is still running once the session starts. A
+  each and thirty for all of them: the session waits no longer. A lookup cannot be cancelled, so
+  one the resolver has not answered goes on in its thread after that, and its answer is dropped. A
   name that resolves to nothing, or not in time, stops the session, as a mistake in a target would;
   the error lists ten such names and counts the rest. Each address is authorized with its name's
   ports. The sandbox's `/etc/hosts` holds the loopback and each name with its addresses.
@@ -821,48 +822,64 @@ the end of the session, or a signature.
 The sandbox's resources are limited, for every profile, so that a command that exhausts them, by
 design or by mistake, leaves the host usable. The limits protect the host's stability, not the
 boundary: unlike the file and network isolation, which stop the session when unavailable, a limit
-that cannot be put in force is a warning.
+that cannot be put in force is a warning. The `security` profile is to require the cgroup limits;
+see Phases.
 
 With the user's service manager, the sandbox runs in a scope of its own, made by
 `systemd-run --user --scope`: a cgroup that holds the whole sandbox, whatever namespaces it makes.
 
 - `TasksMax=4096`: processes and threads together.
-- `MemoryMax`: three quarters of the host's memory, rounded down to 64 KiB so that the kernel holds
-  it as given, with `MemorySwapMax=0`, so that the sandbox cannot push the host into swap.
-- `CPUWeight=20`, against a default of 100: the sandbox slows down only when the host needs the
-  processors, and keeps them all otherwise.
+- `MemoryMax`: three quarters of the host's memory, or of the smallest memory limit of the cgroups
+  above the scope when that is less, so that the rest is left to what shares that limit; rounded
+  down to 64 KiB so that the kernel holds it as given.
+- `MemorySwapMax=0`, so that the sandbox cannot push the host into swap.
+- `CPUWeight=20`, against a default of 100. It is not a cap: the sandbox slows down only when the
+  host needs the processors, and takes them all otherwise.
 - `OOMPolicy=continue`: when the sandbox passes its memory, the kernel kills its largest process,
   usually the command that took the memory, and the manager leaves the rest running. With `stop`,
   the default of `DefaultOOMPolicy=`, the manager ends the whole scope a moment after the kill.
-  Scopes took the setting in systemd 253; an older manager refuses it, and does not end a scope
-  after a kill either, so the scope is made without it there. When the largest process is the
-  worker, the session reports its sandbox lost, as for any end of the worker.
+  When the largest process is the worker, the session reports its sandbox lost, as for any end of
+  the worker.
+- `--expand-environment=no`: otherwise systemd-run replaces `${...}` in the sandbox's command line
+  with values of its own environment, before the sandbox exists, in paths and in the values of the
+  sandbox's environment alike.
+
+Scopes took `OOMPolicy=` in systemd 253, and systemd-run `--expand-environment` in 254. An older
+manager refuses them, and does neither of what they prevent, so the scope is made without what the
+manager refuses, and with the rest.
 
 Before the first sandbox of a session, a scope made the same way reads its limits back from its
-cgroup, `memory.max`, `pids.max` and `cpu.weight`: a manager that does not delegate a controller
-accepts the property and holds nothing, and only the values as the kernel holds them show it, or
-the file's absence. The check takes about
-fifty milliseconds, and the manager's answer is awaited five seconds at most. systemd-run reaches
-the manager by `XDG_RUNTIME_DIR` or `DBUS_SESSION_BUS_ADDRESS`, given to it alone: Bubblewrap
-clears the environment for the sandbox.
+cgroup, `memory.max`, `memory.swap.max`, `pids.max` and `cpu.weight`, with the memory limit of each
+cgroup above it: a manager that does not delegate a controller accepts the property and holds
+nothing, and only the values as the kernel holds them show it, or the file's absence. When a
+cgroup above has less memory than the host, a second scope reads back the lowered limit. A kernel
+that does not account swap to cgroups has no `memory.swap.max`: no swap limit is possible there,
+and the session says so when the host has swap. The check takes about fifty milliseconds, and the
+manager's answer is awaited five seconds at most. systemd-run reaches the manager by
+`XDG_RUNTIME_DIR` or `DBUS_SESSION_BUS_ADDRESS`, given to it alone: Bubblewrap clears the
+environment for the sandbox.
 
 Without the manager, as over SSH without lingering or in a container, only the processes are
 limited, by `prlimit --nproc` around Bubblewrap. RLIMIT_NPROC counts every task of the user, the
 host's included, whatever user namespace they run in: a limit of 64 with 700 tasks running lets the
 sandbox start nothing. Each sandbox's is therefore the user's count when it starts plus 4096,
 counted again for the sandbox that follows an `/apply`, never above the user's own limit, and soft
-and hard alike so that nothing inside can raise it; other processes of the user that start
-meanwhile take from the same budget. Memory and CPU are not limited then, and
-the session says so when it starts.
+and hard alike so that nothing inside can raise it. It is a partial protection: other processes of
+the user that start meanwhile take from the same budget, and memory and CPU are not limited. The
+session says so when it starts.
 
 systemd-run and prlimit are taken from system directories only, as Bubblewrap is, and run the
 sandbox in place of themselves, with the descriptors the worker's protocol uses. The limits apply
-to the sandbox; pasta and the network helpers of the `security` profile run outside it.
+to the sandbox; pasta and the network helpers of the `security` profile run outside it until
+step 4 of phase 4.
 
 Tested: a process that forks under a limit of 64 tasks stops below it, in a cgroup and by
 RLIMIT_NPROC; a process that passes 256 MiB is killed, and the sandbox still runs a second later;
-a command of a session's sandbox, seen from the host, is in a scope with the limits, or has
-RLIMIT_NPROC soft and hard alike.
+managers that refuse `--expand-environment` or `OOMPolicy=`, that refuse a limit, or that accept
+the memory or swap limit without holding it; a slice of one gigabyte above the scope, which lowers
+its memory to three quarters of it; `${...}` passed through as written; a command of a session's
+sandbox, seen from the host, is in a scope with the limits and no swap, or has RLIMIT_NPROC soft and
+hard alike.
 
 ## Lifecycle
 
@@ -934,7 +951,10 @@ RLIMIT_NPROC soft and hard alike.
    3. the resource limits described under Resources, for every profile, done: the `security`
       profile runs tools against targets, and a sandbox that isolates files and network would
       otherwise share the host's CPU, memory and process table;
-   4. the profile end to end, next: the hosts file, the window, `/scope refresh`;
+   4. the profile end to end, next: the hosts file, the window, `/scope refresh`; pasta and the
+      network helpers in a scope of their own, within the session's limits, since traffic to and
+      from the targets costs pasta CPU and memory outside the sandbox's; and the cgroup limits
+      required, not a warning: the profile does not start with RLIMIT_NPROC alone;
    5. the documentation and an adversarial review.
 
    4b: the allowlisting HTTP proxy.

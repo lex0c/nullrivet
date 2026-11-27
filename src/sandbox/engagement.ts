@@ -406,8 +406,9 @@ export const resolveEngagement = async (
   ];
   const addresses = new Map<string, string[]>();
   const failures: string[] = [];
-  // Each lookup ends by its own limit or by what is left of the whole, so that none is still
-  // running once this returns.
+  // Each wait ends by its own limit or by what is left of the whole, so that none outlasts the
+  // whole. The lookup itself cannot be cancelled: one the resolver has not answered goes on in its
+  // thread, and its answer is dropped.
   const deadline = Date.now() + limits.totalMs;
   const queue = [...hosts];
   const lookUp = async (): Promise<void> => {

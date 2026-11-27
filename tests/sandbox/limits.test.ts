@@ -1,5 +1,13 @@
 import { afterAll, afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { inspectLaunch, sandboxHost, sandboxProject } from '../../src/sandbox/bwrap.ts';
@@ -148,45 +156,89 @@ describe.if(cgroupTestsRun)('a scope of the service manager', () => {
   );
   const fakes = mkdtempSync(join(tmpdir(), 'nullrivet-systemd-run-'));
   afterAll(() => rmSync(fakes, { recursive: true, force: true }));
-  // A systemd-run that refuses one property, as an older one refuses OOMPolicy= or a misconfigured
-  // one anything, and passes the rest to the real one.
-  const refusing = (property: string): string => {
-    const path = join(fakes, property);
-    writeFileSync(
-      path,
-      `#!/bin/sh\nfor arg; do case $arg in ${property}=*) echo "Unknown assignment: $arg" >&2; exit 1;; esac; done\nexec /usr/bin/systemd-run "$@"\n`,
-      { mode: 0o755 },
-    );
+  let made = 0;
+  // A systemd-run that runs `body` on its arguments, then passes them to the real one.
+  const fake = (body: string): string => {
+    made += 1;
+    const path = join(fakes, `systemd-run-${made}`);
+    writeFileSync(path, `#!/bin/sh\n${body}\nexec /usr/bin/systemd-run "$@"\n`, { mode: 0o755 });
     return path;
   };
+  // One that refuses the arguments `pattern` matches, as an older one refuses what came after it.
+  const refusing = (pattern: string): string =>
+    fake(
+      `for arg; do case $arg in ${pattern}) echo "unrecognized option: $arg" >&2; exit 1;; esac; done`,
+    );
+  // One that replaces an argument, as a manager that accepts a limit and holds another.
+  const replacing = (from: string, to: string): string =>
+    fake(
+      `n=$#\nfor arg; do case $arg in ${from}) arg=${to};; esac; set -- "$@" "$arg"; done\nshift $n`,
+    );
+  const started = async (systemdRun: string, limits: Limits = TEST_LIMITS) => {
+    const result = await scopeStart(systemdRun, limits, bus);
+    if (!('prefix' in result)) throw new Error(result.problem);
+    return result.prefix;
+  };
+  const problem = async (systemdRun: string): Promise<string> => {
+    const result = await scopeStart(systemdRun, TEST_LIMITS, bus);
+    return 'problem' in result ? result.problem : `started: ${result.prefix.join(' ')}`;
+  };
 
-  test('is started without OOMPolicy= by a manager older than systemd 253, which refuses it', async () => {
-    const started = await scopeStart(refusing('OOMPolicy'), TEST_LIMITS, bus);
-    if (!('prefix' in started)) throw new Error(started.problem);
-    expect(started.prefix.slice(-3)).toEqual(['-p', 'CPUWeight=20', '--']);
-    expect(started.prefix.filter((arg) => arg.startsWith('OOMPolicy='))).toEqual([]);
+  test("runs the sandbox's command as given: systemd-run expands nothing in it", async () => {
+    const prefix = await started('/usr/bin/systemd-run');
+    expect(prefix).toContain('--expand-environment=no');
+    const echoed = Bun.spawnSync([...prefix, '/bin/echo', '${HOME} ${p%/*} $HOME'], { env: bus });
+    expect(echoed.stdout.toString()).toBe('${HOME} ${p%/*} $HOME\n');
+  });
+
+  test('is started without what an older manager refuses, and with the rest', async () => {
+    const before254 = await started(refusing('--expand-environment=*'));
+    expect(before254).not.toContain('--expand-environment=no');
+    expect(before254).toContain('OOMPolicy=continue');
+    const before253 = await started(refusing('--expand-environment=* | OOMPolicy=*'));
+    expect(before253.filter((arg) => /OOMPolicy|expand-environment/.test(arg))).toEqual([]);
+    expect(before253.slice(-3)).toEqual(['-p', 'CPUWeight=20', '--']);
+  });
+
+  test('is not used when the manager refuses one of its limits', async () => {
+    expect(await problem(refusing('MemoryMax=*'))).toBe(
+      "the user's service manager did not start a scope: unrecognized option: MemoryMax=268435456",
+    );
   });
 
   test('is not used when the manager takes a limit and does not hold it', async () => {
     // As a manager that does not delegate the memory controller: the property is accepted, and
     // the cgroup has no limit.
-    const path = join(fakes, 'ignoring');
-    writeFileSync(
-      path,
-      '#!/bin/sh\nn=$#\nfor arg; do case $arg in MemoryMax=*) arg=MemoryMax=infinity;; esac; set -- "$@" "$arg"; done\nshift $n\nexec /usr/bin/systemd-run "$@"\n',
-      { mode: 0o755 },
-    );
-    const started = await scopeStart(path, TEST_LIMITS, bus);
-    expect('problem' in started ? started.problem : 'started').toBe(
-      "a scope of the user's service manager does not hold the limits: memory.max, pids.max and cpu.weight are max, 64, 20 instead of 268435456, 64, 20",
+    expect(await problem(replacing('MemoryMax=*', 'MemoryMax=infinity'))).toBe(
+      "a scope of the user's service manager does not hold the limits: memory.max is max instead of 268435456",
     );
   });
 
-  test('is not used when the manager refuses another of its limits', async () => {
-    const started = await scopeStart(refusing('MemoryMax'), TEST_LIMITS, bus);
-    expect('problem' in started ? started.problem : 'started').toBe(
-      "the user's service manager did not start a scope: Unknown assignment: MemoryMax=268435456",
-    );
+  test.if(existsSync('/sys/fs/cgroup/user.slice/memory.swap.max'))(
+    'is not used when the manager leaves the swap unlimited',
+    async () => {
+      expect(await problem(replacing('MemorySwapMax=*', 'MemorySwapMax=infinity'))).toBe(
+        "a scope of the user's service manager does not hold the limits: memory.swap.max is max instead of 0",
+      );
+    },
+  );
+
+  test('takes three quarters of the smallest memory limit above it, when that is less', async () => {
+    // A slice of its own with a gigabyte, above the scope.
+    const slice = `nullrivettest${process.pid}.slice`;
+    const systemctl = (...args: string[]) =>
+      Bun.spawnSync(['/usr/bin/systemctl', '--user', ...args], { env: bus });
+    expect(systemctl('set-property', '--runtime', slice, 'MemoryMax=1G').exitCode).toBe(0);
+    try {
+      const prefix = await started(fake(`set -- --slice=${slice} "$@"`), {
+        ...TEST_LIMITS,
+        memoryBytes: 4 * 1024 ** 3,
+      });
+      expect(prefix).toContain(`MemoryMax=${0.75 * 1024 ** 3}`);
+    } finally {
+      systemctl('revert', slice);
+      systemctl('stop', slice);
+    }
   });
 });
 

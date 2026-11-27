@@ -31,11 +31,13 @@ const MEMORY_SHARE = 0.75;
 // A multiple of every page size, so the kernel holds the value as given.
 const MEMORY_ALIGN = 64 * 1024;
 
+const aligned = (bytes: number): number => Math.floor(bytes / MEMORY_ALIGN) * MEMORY_ALIGN;
+
 // The limits of a sandbox on a host with `memory` bytes: three quarters of its memory, which
 // leaves the rest to the host.
 export const defaultLimits = (memory: number = totalmem()): Limits => ({
   tasks: 4096,
-  memoryBytes: Math.floor((memory * MEMORY_SHARE) / MEMORY_ALIGN) * MEMORY_ALIGN,
+  memoryBytes: aligned(memory * MEMORY_SHARE),
   cpuWeight: 20,
 });
 
@@ -66,13 +68,19 @@ const PROBE_TIMEOUT_MS = 5_000;
 // What systemd-run needs to reach the user's service manager.
 const BUS_VARIABLES = ['XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS'];
 
-// Prints the limits of the cgroup it runs in, one per line, with the shell's builtins only: absent
-// for a controller the manager does not delegate.
+// Prints the limits of the cgroup it runs in, as name=value, with the shell's builtins only:
+// absent for a controller the manager does not delegate, or swap the kernel does not account. Then
+// the memory limit of each cgroup above it, which bounds its own.
 const CGROUP_VALUES = [
   'while IFS= read -r line; do case $line in 0::*) path=${line#0::};; esac; done < /proc/self/cgroup',
   'cd "/sys/fs/cgroup$path" || exit 1',
-  'for file in memory.max pids.max cpu.weight; do',
-  '  if IFS= read -r value 2>/dev/null < "$file"; then echo "$value"; else echo absent; fi',
+  'for file in memory.max memory.swap.max pids.max cpu.weight; do',
+  '  if IFS= read -r value 2>/dev/null < "$file"; then echo "$file=$value"; else echo "$file=absent"; fi',
+  'done',
+  'parent=$path',
+  'while [ -n "$parent" ]; do',
+  '  parent=${parent%/*}',
+  '  if IFS= read -r value 2>/dev/null < "/sys/fs/cgroup$parent/memory.max"; then echo "parent=$value"; fi',
   'done',
 ].join('\n');
 
@@ -84,7 +92,19 @@ const found = (locations: readonly string[]): string | null => {
   return null;
 };
 
-const scopeArgs = (systemdRun: string, limits: Limits, oomPolicy: boolean): string[] => [
+// What a newer manager has, each left out for an older one that refuses it: scopes took
+// OOMPolicy= in systemd 253, and systemd-run --expand-environment came in 254. Without the first,
+// a manager ends the whole scope after the kernel kills one of its processes; without the second,
+// systemd-run replaces ${...} in the sandbox's command line with its own environment, paths and
+// values of the sandbox's environment included. An older manager does neither.
+const OPTIONAL = [
+  { name: 'OOMPolicy', args: ['-p', 'OOMPolicy=continue'] },
+  { name: 'expand-environment', args: ['--expand-environment=no'] },
+] as const;
+
+type Optional = (typeof OPTIONAL)[number];
+
+const scopeArgs = (systemdRun: string, limits: Limits, optional: readonly Optional[]): string[] => [
   systemdRun,
   '--user',
   '--scope',
@@ -98,7 +118,7 @@ const scopeArgs = (systemdRun: string, limits: Limits, oomPolicy: boolean): stri
   'MemorySwapMax=0',
   '-p',
   `CPUWeight=${limits.cpuWeight}`,
-  ...(oomPolicy ? ['-p', 'OOMPolicy=continue'] : []),
+  ...optional.flatMap((option) => option.args),
   '--',
 ];
 
@@ -133,35 +153,77 @@ const run = (
 
 const firstLine = (text: string): string => (text.trim().split('\n')[0] ?? '').slice(0, 300);
 
+const hostHasSwap = (): boolean =>
+  Number(/^SwapTotal:\s+(\d+)/m.exec(readFileSync('/proc/meminfo', 'utf8'))?.[1] ?? 0) > 0;
+
+type ScopeStart = { prefix: string[]; warnings: string[] } | { problem: string };
+
 // Starts a scope of `systemdRun` with `limits` and reads them back from its cgroup: the command
-// that starts a sandbox in such a scope when they hold, why not otherwise.
+// that starts a sandbox in such a scope when they hold, why not otherwise. The memory is lowered to
+// three quarters of the smallest limit above the scope, when that is less, and read back again.
 export const scopeStart = async (
   systemdRun: string,
   limits: Limits,
   env: Record<string, string>,
-): Promise<{ prefix: string[] } | { problem: string }> => {
-  const probe = async (oomPolicy: boolean) => {
-    const prefix = scopeArgs(systemdRun, limits, oomPolicy);
-    return { prefix, result: await run([...prefix, SHELL, '-c', CGROUP_VALUES], env) };
+): Promise<ScopeStart> => {
+  const attempt = async (wanted: Limits) => {
+    let optional: readonly Optional[] = OPTIONAL;
+    for (;;) {
+      const prefix = scopeArgs(systemdRun, wanted, optional);
+      const result = await run([...prefix, SHELL, '-c', CGROUP_VALUES], env);
+      const refused = optional.find(
+        (option) => result.code !== 0 && result.stderr.includes(option.name),
+      );
+      if (refused === undefined) return checked(wanted, prefix, result);
+      optional = optional.filter((option) => option !== refused);
+    }
   };
-  let { prefix, result } = await probe(true);
-  // Scopes took OOMPolicy= in systemd 253. An older manager refuses it, and does not stop a scope
-  // whose process the kernel killed either.
-  if (result.code !== 0 && result.stderr.includes('OOMPolicy'))
-    ({ prefix, result } = await probe(false));
+  const first = await attempt(limits);
+  if ('problem' in first) return first;
+  const parents = Math.min(...first.parents);
+  const fitted = aligned(parents * MEMORY_SHARE);
+  if (fitted >= limits.memoryBytes) return first;
+  return attempt({ ...limits, memoryBytes: fitted });
+};
+
+const checked = (
+  limits: Limits,
+  prefix: string[],
+  result: { code: number | null; stdout: string; stderr: string },
+): (ScopeStart & { prefix: string[]; parents: number[] }) | { problem: string } => {
   if (result.code !== 0) {
     return {
       problem: `the user's service manager did not start a scope: ${firstLine(result.stderr) || `exit code ${result.code}`}`,
     };
   }
-  const expected = [limits.memoryBytes, limits.tasks, limits.cpuWeight].map(String);
-  const held = result.stdout.trim().split('\n');
-  if (held.join(' ') !== expected.join(' ')) {
+  const held = new Map<string, string>();
+  const parents: number[] = [];
+  for (const line of result.stdout.trim().split('\n')) {
+    const at = line.indexOf('=');
+    const [name, value] = [line.slice(0, at), line.slice(at + 1)];
+    if (name !== 'parent') held.set(name, value);
+    else if (/^\d+$/.test(value)) parents.push(Number(value));
+  }
+  const expected: [string, string][] = [
+    ['memory.max', String(limits.memoryBytes)],
+    ['pids.max', String(limits.tasks)],
+    ['cpu.weight', String(limits.cpuWeight)],
+  ];
+  const swap = held.get('memory.swap.max');
+  // A kernel that does not account swap to cgroups has no such file: no limit is possible there,
+  // and none is needed on a host without swap.
+  if (swap !== 'absent') expected.push(['memory.swap.max', '0']);
+  const wrong = expected.filter(([name, value]) => held.get(name) !== value);
+  if (wrong.length > 0) {
     return {
-      problem: `a scope of the user's service manager does not hold the limits: memory.max, pids.max and cpu.weight are ${held.join(', ')} instead of ${expected.join(', ')}`,
+      problem: `a scope of the user's service manager does not hold the limits: ${wrong.map(([name, value]) => `${name} is ${held.get(name) ?? 'not read'} instead of ${value}`).join('; ')}`,
     };
   }
-  return { prefix };
+  const warnings =
+    swap === 'absent' && hostHasSwap()
+      ? ["the sandbox's swap is not limited: the kernel does not account swap to cgroups"]
+      : [];
+  return { prefix, warnings, parents };
 };
 
 // The tasks, processes and threads, whose real user is `uid`, as RLIMIT_NPROC counts them.
@@ -209,7 +271,7 @@ export const prepareLimits = async (
       : await scopeStart(systemdRun, limits, env);
   if ('prefix' in scope) {
     const { prefix } = scope;
-    return { how: 'cgroup', prefix: () => prefix, env, warnings: [] };
+    return { how: 'cgroup', prefix: () => prefix, env, warnings: scope.warnings };
   }
   const prlimit = found(PRLIMIT_LOCATIONS);
   const uid = process.getuid?.();
