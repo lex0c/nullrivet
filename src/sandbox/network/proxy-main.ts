@@ -2,8 +2,14 @@ import { connect } from 'node:net';
 import { errorMessage } from '../../errors.ts';
 import { hostAddresses, lookupAll } from '../engagement.ts';
 import { LineSplitter } from '../lines.ts';
-import { ScopeProxy } from './proxy.ts';
-import { encodeLine, MAX_PROXY_LINE_BYTES, type ProxyToHost, parseHostLine } from './proxy-wire.ts';
+import { PROXY_LIMITS, ScopeProxy } from './proxy.ts';
+import {
+  encodeLine,
+  MAX_PROXY_LINE_BYTES,
+  PROXY_LISTEN_FD,
+  type ProxyToHost,
+  parseHostLine,
+} from './proxy-wire.ts';
 
 // The proxy's process: it takes its policy from the host on standard input, says where it listens,
 // and reports each connection it opens or refuses. An end of its input ends it, every connection
@@ -26,13 +32,18 @@ export const runProxy = (): void => {
       if (message.type === 'policy') {
         if (starting) return fail('the host sent a second policy');
         starting = true;
-        ScopeProxy.listen(message.policy, {
-          resolve: lookupAll,
-          connect: (address, port) => connect({ host: address, port, allowHalfOpen: true }),
-          now: Date.now,
-          ownAddresses: hostAddresses,
-          report: send,
-        }).then(
+        ScopeProxy.listen(
+          message.policy,
+          {
+            resolve: lookupAll,
+            connect: (address, port) => connect({ host: address, port, allowHalfOpen: true }),
+            now: Date.now,
+            ownAddresses: hostAddresses,
+            report: send,
+          },
+          PROXY_LIMITS,
+          PROXY_LISTEN_FD,
+        ).then(
           (listening) => {
             proxy = listening;
             send({ type: 'listening', port: listening.port });

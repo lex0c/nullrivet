@@ -42,7 +42,9 @@ export interface ProxyPolicy {
 }
 
 export type ProxyEvent =
-  | { type: 'connected'; host: string; port: number; address: string }
+  // A connection the proxy let through: a tunnel once its ClientHello named the host, a plain
+  // request once it was checked. A connection to the target alone authorizes nothing.
+  | { type: 'authorized'; host: string; port: number; address: string }
   // `direct` when the name resolved to an address the scope authorizes directly: the sandbox
   // reaches the name there without the proxy, which the operator is told.
   | { type: 'refused'; reason: string; direct?: boolean };
@@ -151,16 +153,19 @@ export class ScopeProxy {
     this.sweep.unref();
   }
 
-  // Listens on the loopback, on a port the system chooses.
+  // Listens on the socket at descriptor `fd`, one its starter holds, or else on the loopback, on a
+  // port the system chooses.
   static listen(
     policy: ProxyPolicy,
     deps: ProxyDependencies,
     limits: ProxyLimits = PROXY_LIMITS,
+    fd?: number,
   ): Promise<ScopeProxy> {
     const server = createServer({ allowHalfOpen: true });
     return new Promise((resolve, reject) => {
       server.once('error', reject);
-      server.listen(0, '127.0.0.1', () => {
+      const where = fd === undefined ? { port: 0, host: '127.0.0.1' } : { fd };
+      server.listen(where, () => {
         server.off('error', reject);
         // An error accepting a connection, as when descriptors run out, costs that connection
         // only: told, it does not end the proxy and with it the sandbox's network.
@@ -405,7 +410,10 @@ export class ScopeProxy {
   // Resolves the name, checks every address it gave, and connects to the first that answers, all
   // within the connection's time. A lookup counts against the connections until the resolver
   // answers, the client gone or not, past the time the proxy waits for it: it cannot be cancelled.
-  private async open(pair: Pair, target: Authority): Promise<Socket> {
+  private async open(
+    pair: Pair,
+    target: Authority,
+  ): Promise<{ upstream: Socket; address: string }> {
     const { host, port } = target;
     let found: string[];
     this.lookups += 1;
@@ -464,8 +472,7 @@ export class ScopeProxy {
       if (connected) {
         upstream.on('error', () => this.end(pair));
         upstream.on('close', () => this.end(pair));
-        this.deps.report({ type: 'connected', host, port, address });
-        return upstream;
+        return { upstream, address };
       }
       upstream.destroy();
       delete pair.upstream;
@@ -477,7 +484,7 @@ export class ScopeProxy {
     const target = connectTarget(head.target);
     if (typeof target === 'string') throw new Refused(400, target);
     this.authorize(target);
-    const upstream = await this.open(pair, target);
+    const { upstream, address } = await this.open(pair, target);
     pair.client.write('HTTP/1.1 200 Connection established\r\n\r\n');
     // Past the 200, a refusal closes the tunnel: the client speaks TLS now.
     const { value: hello, bytes } = await this.collect<Extract<ClientHello, { kind: 'hello' }>>(
@@ -504,6 +511,7 @@ export class ScopeProxy {
       this.end(pair);
       return;
     }
+    this.deps.report({ type: 'authorized', host: target.host, port: target.port, address });
     this.relay(pair, pair.client, upstream, bytes);
     this.relay(pair, upstream, pair.client);
   }
@@ -512,7 +520,9 @@ export class ScopeProxy {
     const request = plainRequest(head);
     if (!('head' in request)) throw new Refused(request.status, request.reason);
     this.authorize(request.authority);
-    const upstream = await this.open(pair, request.authority);
+    const { upstream, address } = await this.open(pair, request.authority);
+    const { host, port } = request.authority;
+    this.deps.report({ type: 'authorized', host, port, address });
     if (this.pass(pair, upstream, request.head) === 'ended') return;
     // The answer is relayed from now on, so that a 100 Continue reaches the client.
     this.relay(pair, upstream, pair.client);

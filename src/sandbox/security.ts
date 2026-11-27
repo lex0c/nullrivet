@@ -227,6 +227,8 @@ export class SecuritySession implements EngagementWindow {
     // What the operator is told at the start: what the limits or the directory could not do.
     readonly warnings: string[],
     private readonly proxy: RunningProxy | null,
+    // The proxy's credential, which the variables of the worker's commands carry.
+    private readonly token: string | null,
   ) {
     this.ended = this.ending.signal;
     // A proxy that ends by itself frees its port of the host, where pasta still forwards the
@@ -362,6 +364,10 @@ export class SecuritySession implements EngagementWindow {
             signal: abandon.signal,
           });
         }
+        let proxyEnd: string | null = null;
+        void proxy?.ended.then((reason) => {
+          proxyEnd = reason;
+        });
         const forward = proxy === null ? {} : { forward: { port: PROXY_PORT, to: proxy.port } };
         control = await NetworkControl.prepare(
           tools,
@@ -379,9 +385,11 @@ export class SecuritySession implements EngagementWindow {
             signal: abandon.signal,
           },
         );
-        // Checked again right before the release: the start can take longer than the window.
+        // Checked again right before the release: the start can take longer than the window, and
+        // the proxy can end while the network is prepared.
         const gone = ended();
         if (gone !== null) throw new Error(gone);
+        if (proxyEnd !== null) throw new Error(`the proxy stopped: ${proxyEnd}`);
       })();
       return preparing;
     };
@@ -419,6 +427,7 @@ export class SecuritySession implements EngagementWindow {
         ...(environment?.warnings ?? []),
       ],
       proxy,
+      token,
     );
   }
 
@@ -523,6 +532,15 @@ export class SecuritySession implements EngagementWindow {
     }
     stop = stopped();
     if (stop !== null) return stop;
+    // NO_PROXY follows what is reached directly now, for the commands started from here on.
+    if (this.token !== null) {
+      const previous = proxyEnvironment(this.token, this.resolved).warnings;
+      const next = proxyEnvironment(this.token, resolved.value);
+      this.backend.setEnvironment(next.variables);
+      for (const warning of next.warnings) {
+        if (!previous.includes(warning)) this.options.notice('warning', warning);
+      }
+    }
     // The names of the proxy too, whose addresses it resolves again for each connection anyway.
     const named = (value: ResolvedEngagement) => [
       ...value.names,

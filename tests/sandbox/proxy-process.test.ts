@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { connect, type Socket } from 'node:net';
+import { connect, createServer, type Socket } from 'node:net';
 import { homedir } from 'node:os';
 import { findBwrap } from '../../src/sandbox/bwrap.ts';
 import { prepareLimits } from '../../src/sandbox/limits.ts';
@@ -118,6 +118,32 @@ describe.if(cgroupTestsRun)('the proxy as a process of its own', () => {
     expect(existsSync(`/proc/${inner}/root/usr/bin`)).toBe(true);
     expect(existsSync(`/proc/${inner}/root${homedir()}`)).toBe(false);
     expect(existsSync(`/proc/${inner}/root${process.cwd()}`)).toBe(false);
+  }, 30_000);
+
+  test('keeps its port bound when it dies, until it is stopped: nothing else can take it', async () => {
+    const { proxy, unit } = await start();
+    for (const pid of pidsOf(unit)) process.kill(pid, 'SIGKILL');
+    expect(await proxy.ended).toMatch(/^the proxy exited on SIGKILL/);
+    const take = () =>
+      new Promise<string>((resolve) => {
+        const squatter = createServer();
+        squatter.once('error', (error: NodeJS.ErrnoException) => resolve(error.code ?? 'error'));
+        squatter.listen(proxy.port, '127.0.0.1', () => squatter.close(() => resolve('taken')));
+      });
+    expect(await take()).toBe('EADDRINUSE');
+    // A connection meanwhile, as pasta would forward one, waits unanswered.
+    const answer = await new Promise<string>((resolve) => {
+      const socket = connect({ host: '127.0.0.1', port: proxy.port });
+      socket.on('data', () => resolve('answered'));
+      socket.on('error', (error: NodeJS.ErrnoException) => resolve(error.code ?? 'error'));
+      setTimeout(() => {
+        socket.destroy();
+        resolve('unanswered');
+      }, 500);
+    });
+    expect(answer).toBe('unanswered');
+    await proxy.stop();
+    expect(await take()).toBe('taken');
   }, 30_000);
 
   test('gives up a start whose signal was aborted already, leaving no scope', async () => {

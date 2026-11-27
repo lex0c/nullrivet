@@ -5,9 +5,10 @@ import { proxyBwrapArgs } from '../bwrap.ts';
 import { LineSplitter } from '../lines.ts';
 import { type SyscallArch, seccompProgram } from '../seccomp.ts';
 import { sandboxedProxy } from '../worker-command.ts';
+import { type ProxyEndpoint, proxyEndpoint } from './endpoint.ts';
 import { GIVEN_UP } from './namespace.ts';
 import type { ProxyEvent, ProxyPolicy } from './proxy.ts';
-import { encodeLine, MAX_PROXY_LINE_BYTES, parseProxyLine } from './proxy-wire.ts';
+import { encodeLine, MAX_PROXY_LINE_BYTES, PROXY_LISTEN_FD, parseProxyLine } from './proxy-wire.ts';
 import type { Scope } from './ruleset.ts';
 import { confirmScope, emptied, type HelperScope, unitCgroup } from './scoped.ts';
 
@@ -61,7 +62,7 @@ export interface ProxyProcessOptions {
 
 class ProxyProcess implements RunningProxy {
   readonly ended: Promise<string>;
-  port = 0;
+  readonly port: number;
   private stopping = false;
   private cgroup: string | null = null;
   private failure: string | null = null;
@@ -71,8 +72,11 @@ class ProxyProcess implements RunningProxy {
   constructor(
     private readonly child: ChildProcess,
     private readonly scope: HelperScope,
+    // Held until the proxy is stopped, which the session does once the network is closed.
+    private readonly endpoint: ProxyEndpoint,
     report: (event: ProxyEvent) => void,
   ) {
+    this.port = endpoint.port;
     let output = '';
     child.stderr?.on('data', (chunk: Buffer) => {
       if (output.length < OUTPUT_KEPT_CHARS) output += chunk.toString();
@@ -132,10 +136,14 @@ class ProxyProcess implements RunningProxy {
       this.onListening = resolve;
     });
     this.child.stdin?.write(encodeLine({ type: 'policy', policy }));
+    let port: number;
     try {
-      this.port = await listening;
+      port = await listening;
     } finally {
       settle();
+    }
+    if (port !== this.port) {
+      throw new Error(`the proxy listens on port ${port}, not on the socket it was given`);
     }
     // Bubblewrap, run in place by systemd-run and env, is the process followed.
     this.cgroup = confirmScope(this.child.pid as number, this.scope, 'the proxy', /^bwrap$/);
@@ -167,8 +175,12 @@ class ProxyProcess implements RunningProxy {
     const timer = setTimeout(() => this.kill(), STOP_GRACE_MS);
     await this.ended;
     clearTimeout(timer);
-    const path = this.cgroup ?? unitCgroup(this.scope.unit);
-    if (path !== null) await emptied(path, 'the proxy');
+    try {
+      const path = this.cgroup ?? unitCgroup(this.scope.unit);
+      if (path !== null) await emptied(path, 'the proxy');
+    } finally {
+      this.endpoint.close();
+    }
   }
 
   // Ends a proxy that did not start as it must, and rejects with why.
@@ -177,12 +189,12 @@ class ProxyProcess implements RunningProxy {
     this.kill();
     await this.ended;
     const path = this.cgroup ?? unitCgroup(this.scope.unit);
-    if (path !== null) {
-      try {
-        await emptied(path, 'the proxy');
-      } catch (left) {
-        throw new Error(`${errorMessage(error)}; ${errorMessage(left)}`);
-      }
+    try {
+      if (path !== null) await emptied(path, 'the proxy');
+    } catch (left) {
+      throw new Error(`${errorMessage(error)}; ${errorMessage(left)}`);
+    } finally {
+      this.endpoint.close();
     }
     throw error;
   }
@@ -208,6 +220,7 @@ class ProxyProcess implements RunningProxy {
 export const proxyProcess =
   (options: ProxyProcessOptions): ProxyFactory =>
   async ({ policy, report, signal }) => {
+    const endpoint = proxyEndpoint();
     const [file, ...args] = [
       ...options.scope.prefix,
       options.clean,
@@ -217,8 +230,11 @@ export const proxyProcess =
       options.bwrap,
       ...proxyBwrapArgs(sandboxedProxy(), SECCOMP_FD),
     ];
+    // The standard streams, the seccomp program, and the listening socket where the proxy takes it.
+    const stdio: (number | 'pipe')[] = ['pipe', 'pipe', 'pipe', 'pipe'];
+    stdio[PROXY_LISTEN_FD] = endpoint.fd;
     const child = spawn(file as string, args, {
-      stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
+      stdio,
       env: options.scope.env,
       // Out of the terminal's process group: an interrupt there is the host's to handle.
       detached: true,
@@ -226,7 +242,7 @@ export const proxyProcess =
     const program = child.stdio[SECCOMP_FD] as Writable;
     program.on('error', () => undefined);
     program.end(seccompProgram(options.arch));
-    const proxy = new ProxyProcess(child, options.scope, report);
+    const proxy = new ProxyProcess(child, options.scope, endpoint, report);
     try {
       await proxy.ready(policy, signal);
     } catch (error) {

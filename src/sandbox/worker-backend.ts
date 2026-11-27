@@ -444,6 +444,14 @@ export class WorkerBackend implements ToolBackend {
     await this.exited;
   }
 
+  // Sets variables the worker's commands started from now on inherit; those running keep theirs.
+  // Sent ahead of any later call on the same descriptor, so that call sees them.
+  setEnvironment(variables: Record<string, string>): void {
+    const problem = environmentProblem(variables);
+    if (problem !== null) throw new Error(`the worker would refuse its environment: ${problem}`);
+    this.send({ type: 'worker.environment', variables });
+  }
+
   private send(message: HostToWorker): void {
     if (this.lost === null) this.toWorker.write(encodeMessage(message));
   }

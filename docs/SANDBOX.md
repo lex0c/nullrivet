@@ -176,7 +176,8 @@ type WorkerToHost =
   host without stopping it.
 - **Readiness.** The host sends nothing before `worker.ready`, whose tool list must match what the
   profile allows, within 10 s of the start.
-- **Environment.** `worker.environment`, sent once the worker is ready and before any call, sets
+- **Environment.** `worker.environment`, sent once the worker is ready and before any call, and
+  again after a `/scope refresh` for the commands started from then on, sets
   variables its commands inherit: those of the proxy of the `security` profile alone, which carry
   its credential. A launcher's arguments are readable by every user of the host, and Bubblewrap
   takes the sandbox's environment as arguments (`--setenv`), held for the whole session: the
@@ -880,8 +881,9 @@ directly, up to 16 KiB, past which the session warns of what it leaves out: an H
 those to the proxy, which refuses them, unless told not to use it. Clients match a `NO_PROXY` name
 against every name that ends with it, Python's requests with no dot between: a name reached directly
 that a name of the proxy ends with, as `acme.example` for `api.acme.example`, is left out, its
-addresses kept, and the session says so. The names of the proxy are in neither the ruleset nor
-`/etc/hosts`, so the proxy is their only way.
+addresses kept, and the session says so. A refresh gives the worker `NO_PROXY` anew, for the
+commands started after it; those running keep the one they started with. The names of the proxy are
+in neither the ruleset nor `/etc/hosts`, so the proxy is their only way.
 
 **Its credential.** Every process of every user of the host reaches the host's loopback, so the
 proxy takes only the credential the sandbox was given: 32 random bytes in hexadecimal, compared in
@@ -913,12 +915,18 @@ out of its reach, and its root holds neither the home directory nor the project.
 memory comes out of the sandbox's three quarters, as pasta's does. The host checks that the process
 it follows is Bubblewrap, in that scope, holding those limits, as for pasta; its stop ends its
 input, which closes every connection, kills it after two seconds, and waits for the scope to be
-empty. A proxy that ends by itself closes the network, as pasta's end does, and the session says so:
-its port of the host is free then, while pasta still forwards the sandbox's there, and whatever took
-it would receive what the sandbox sends the proxy, its credential included. Tested: with the proxy
-killed and its port taken by another server, nothing of the sandbox reached that server. For the
-same reason, a close, the end of the window and a start given up close the network, pasta included,
-before they stop the proxy.
+empty. The host makes the proxy's listening socket and holds it, close-on-exec, for the whole
+session; the proxy listens on a copy it is given. Owned by the proxy, the port would be freed by its
+end while pasta still forwards the sandbox's connections there, and any program could take it, with
+what the sandbox sends the proxy, its credential included. Held by the host, the port stays bound
+until the proxy is stopped, which the session does only once the network is closed, pasta ended; a
+connection meanwhile waits unanswered. Tested: with the proxy killed, another program could not bind
+its port until the stop, and a connection got no answer. A proxy that ends by itself closes the
+network, as pasta's end does, and the session says so; one that ends while the network is prepared
+is seen right before the worker's release, which does not happen. A close, the end of the window and
+a start given up close the network before they stop the proxy. The proxy reports each connection it
+authorizes, once the ClientHello or the request was checked, and each it refuses, for the evidence
+log of phase 5.
 
 **Its window.** The kernel refuses the proxy's port outside the window, as any destination. The
 connections the proxy opens leave from the host's network, which the sandbox's ruleset does not

@@ -193,7 +193,7 @@ describe('the proxy of the scope', () => {
       Buffer.concat([hello, Buffer.from('GET / HTTP/1.1\r\nHost: other.test\r\n\r\n')]),
     ]);
     expect(events).toEqual([
-      { type: 'connected', host: 'app.test', port: 443, address: '198.51.100.7' },
+      { type: 'authorized', host: 'app.test', port: 443, address: '198.51.100.7' },
     ]);
     socket.destroy();
   });
@@ -211,7 +211,8 @@ describe('the proxy of the scope', () => {
     }
     await settle();
     expect(upstream.received.every((bytes) => bytes.length === 0)).toBe(true);
-    expect(events.filter((event) => event.type === 'refused')).toEqual([
+    // Refused, and never reported as authorized: the connection to the target authorized nothing.
+    expect(events).toEqual([
       { type: 'refused', reason: 'the tunnel to app.test names another server in its ClientHello' },
       {
         type: 'refused',

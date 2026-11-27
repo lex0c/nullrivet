@@ -777,7 +777,7 @@ describe.if(linux && runs)('names reached through the proxy', () => {
       'direct.test': ['198.51.100.30'],
     };
     const proxy = inProcessProxy(target.port, answers);
-    const { session } = await start(
+    const { session, run } = await start(
       {
         scope: {
           allow: [
@@ -788,6 +788,7 @@ describe.if(linux && runs)('names reached through the proxy', () => {
       },
       { resolve: async (name) => answers[name] ?? [], proxy: proxy.factory },
     );
+    expect(await run('bash', { command: 'echo "$NO_PROXY"' })).toContain('198.51.100.30');
     answers['direct.test'] = ['198.51.100.31'];
     answers['svc.test'] = ['198.51.100.21'];
     expect(await session.refresh()).toEqual({
@@ -797,6 +798,10 @@ describe.if(linux && runs)('names reached through the proxy', () => {
       ],
     });
     expect(proxy.scopes).toEqual([['198.51.100.30', '198.51.100.31'], ['198.51.100.31']]);
+    // The commands started after the refresh find what is reached directly now.
+    const noProxy = await run('bash', { command: 'echo "$NO_PROXY"' });
+    expect(noProxy).toContain('198.51.100.31');
+    expect(noProxy).not.toContain('198.51.100.30');
   }, 60_000);
 
   test('stop a refresh that would authorize the address of one directly', async () => {
@@ -862,7 +867,30 @@ describe.if(linux && runs)('names reached through the proxy', () => {
     await session.close();
 
     const directories = sandboxDirectories().length;
+    // A proxy that ends while the network is prepared: the worker is not released.
+    const dying = inProcessProxy(target.port, answers);
     const launch = await launchOptions();
+    const died = await SecuritySession.start({
+      host: launch.host,
+      launch,
+      env: process.env,
+      engagementPath: engagementFile({
+        scope: { allow: [{ host: 'svc.test', ports: [443], via: 'proxy' }] },
+      }),
+      notice: () => undefined,
+      address: ADDRESS,
+      resolve: async (name) => answers[name as keyof typeof answers] ?? [],
+      proxy: async (started) => {
+        const running = await dying.factory(started);
+        setTimeout(() => void dying.handles[0]?.die('the proxy exited on SIGKILL'), 10);
+        return running;
+      },
+    });
+    expect('error' in died ? died.error : 'started').toContain(
+      'the proxy stopped: the proxy exited on SIGKILL',
+    );
+    expect(sandboxDirectories().length).toBe(directories);
+    expect(activeUnits(`nullrivet-pasta-${process.pid}-`)).toEqual([]);
     const failed = await SecuritySession.start({
       host: launch.host,
       launch,

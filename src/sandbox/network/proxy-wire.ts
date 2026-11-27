@@ -12,6 +12,8 @@ import {
 // standard streams. The credential goes only this way: a command line and an environment are
 // readable by every user of the host.
 export const MAX_PROXY_LINE_BYTES = 8 * 1024 * 1024;
+// Where the proxy's process finds the listening socket the host made and holds.
+export const PROXY_LISTEN_FD = 4;
 
 export type HostToProxy =
   | { type: 'policy'; policy: ProxyPolicy }
@@ -130,14 +132,14 @@ export const parseProxyLine = (line: string): ProxyToHost | null => {
       return value.direct === true
         ? { type: 'refused', reason: value.reason, direct: true }
         : { type: 'refused', reason: value.reason };
-    case 'connected':
+    case 'authorized':
       return text(value.host) &&
         text(value.address) &&
         Number.isInteger(value.port) &&
         (value.port as number) > 0 &&
         (value.port as number) < 65_536
         ? {
-            type: 'connected',
+            type: 'authorized',
             host: value.host,
             port: value.port as number,
             address: value.address,
