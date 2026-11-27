@@ -764,6 +764,12 @@ by pattern `Authorization` headers, passwords in URLs and the values of password
 The pattern part is best effort, so the evidence directory is still to be handled as sensitive.
 Output copies are kept as produced, since they are the findings.
 
+The network's events go in the same file, from the host, which decides them: the scope installed
+at the start, with the addresses each name authorized; each `/scope refresh`, with what it added
+and removed; an installation that failed, and the revocation it caused; the end of the window;
+pasta ending. A session can then show what the sandbox could reach at each moment, not only what
+its commands did.
+
 Each entry holds the hash of the previous one, which detects an entry removed or edited by
 accident. It does not prove integrity against someone who rewrites the whole file and recomputes
 the chain; that needs an anchor kept elsewhere, such as the final hash shown to the operator at
@@ -776,7 +782,8 @@ CPU, memory and process limits use cgroups when the user's systemd manager can c
 which stop the session when unavailable, a missing limit is a warning: limits protect stability,
 not the boundary.
 
-Not implemented yet. In phase 2a only the sizes of the sandbox's `/tmp` and home are limited:
+Not implemented yet; they come in phase 4, before the `security` profile runs, for every
+profile. Until then only the sizes of the sandbox's `/tmp` and home are limited:
 `inspect` isolates files, network, processes and credentials, and gives no protection against a
 command that exhausts CPU, memory or the process table. Code meant to do that waits for these
 limits or for the virtual machine backend.
@@ -844,11 +851,18 @@ limits or for the virtual machine backend.
    3a, the ChangeSet on its own, is done; 3b, the one-shot task with `--apply`, is done; 3c, the
    interactive session, with its commands to review and apply, is done; 3d, the documentation and
    an adversarial review, is done.
-4. **`security`.** Only after the network isolation tests pass: the engagement file, the ruleset,
-   revocation, pasta, the hosts file, `/scope refresh` and the window. Its first step, the
-   network layer with its tests (the namespaces, the ruleset, pasta, revocation), is done; the
-   engagement file is next. 4b: the allowlisting HTTP proxy.
-5. **Evidence log**, written by the host, with credentials removed from the arguments.
+4. **`security`.** Only after the network isolation tests pass. Its steps:
+   1. the network layer with its tests (the namespaces, the ruleset, pasta, revocation), done;
+   2. the engagement file, next;
+   3. the resource limits described under Resources, for every profile: the `security` profile
+      runs tools against targets, and a sandbox that isolates files and network still shares the
+      host's CPU, memory and process table;
+   4. the profile end to end: the hosts file, the window, `/scope refresh`;
+   5. the documentation and an adversarial review.
+
+   4b: the allowlisting HTTP proxy.
+5. **Evidence log**, written by the host, with credentials removed from the arguments: the tool
+   calls, and the network's events, as described under Evidence log.
 6. **Virtual machine backend** for macOS and for raw-socket laboratories.
 
 Each phase ends with tests that try to cross the boundary: read `~/.ssh` and the host's processes
