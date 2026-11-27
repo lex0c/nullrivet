@@ -21,7 +21,16 @@ import {
 
 export type Allowed =
   | { kind: 'network'; network: Network; ports?: readonly number[] }
-  | { kind: 'host'; host: string; ports?: readonly number[] };
+  // A name reached through the proxy has no rule of its own: the proxy checks the name each
+  // connection opens with.
+  | { kind: 'host'; host: string; ports?: readonly number[]; via?: 'proxy' };
+
+// A name the proxy reaches, with the addresses it resolved to when they were last checked.
+export interface ProxiedName {
+  host: string;
+  ports?: readonly number[];
+  addresses: string[];
+}
 
 export interface Engagement {
   name?: string;
@@ -35,8 +44,10 @@ export interface Engagement {
 export interface ResolvedEngagement {
   engagement: Engagement;
   scope: Scope;
-  // The addresses each name resolved to, which /etc/hosts gives the sandbox.
+  // The addresses each name reached directly resolved to, which /etc/hosts gives the sandbox.
   names: { host: string; addresses: string[] }[];
+  // Each entry reached through the proxy, which resolves its name again for each connection.
+  proxied: ProxiedName[];
 }
 
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
@@ -77,6 +88,8 @@ const INTERNAL: readonly { network: Network; what: string }[] = (
     ['64:ff9b::/96', 'NAT64'],
     ['64:ff9b:1::/48', 'local NAT64'],
     ['2002::/16', '6to4'],
+    ['2001::/32', 'Teredo'],
+    ['::ffff:0:0:0/96', 'IPv4-translated'],
     ['fc00::/7', 'private'],
     ['fec0::/10', 'site-local'],
     ['fe80::/10', 'link-local'],
@@ -103,10 +116,109 @@ export const authorizedAmong = (scope: Scope, addresses: readonly string[]): str
     );
   });
 
+// An address in full form as a number, from its dotted decimal or its eight groups of hex digits,
+// worked out once for each: the proxy checks every address of a connection against a scope that
+// can hold twenty thousand networks.
+const values = new WeakMap<Network, bigint>();
+const bits = (network: Network): bigint => {
+  let value = values.get(network);
+  if (value === undefined) {
+    value =
+      network.family === 4
+        ? network.address.split('.').reduce((sum, part) => (sum << 8n) | BigInt(part), 0n)
+        : network.address.split(':').reduce((sum, part) => (sum << 16n) | BigInt(`0x${part}`), 0n);
+    values.set(network, value);
+  }
+  return value;
+};
+
+// A network's prefix bits, likewise.
+const prefixes = new WeakMap<Network, bigint>();
+const prefixOf = (network: Network): bigint => {
+  let prefix = prefixes.get(network);
+  if (prefix === undefined) {
+    prefix = bits(network) >> BigInt((network.family === 4 ? 32 : 128) - network.prefix);
+    prefixes.set(network, prefix);
+  }
+  return prefix;
+};
+
 // Whether `network` holds `address`.
 const holds = (network: Network, address: Network): boolean =>
   network.family === address.family &&
-  parseNetwork(`${address.address}/${network.prefix}`)?.address === network.address;
+  bits(address) >> BigInt((network.family === 4 ? 32 : 128) - network.prefix) === prefixOf(network);
+
+// The range off the public internet that holds `network`, this host's addresses included.
+const internalRange = (
+  network: Network,
+  ownAddresses: readonly string[],
+): { network: Network; what: string } | undefined => {
+  const own = ownAddresses.flatMap((text) => {
+    const held = parseNetwork(text);
+    return held === null ? [] : [{ network: held, what: 'an address of this host' }];
+  });
+  return [...own, ...INTERNAL].find((range) => holds(range.network, network));
+};
+
+// Why an address a name of the proxy resolves to may not be reached through it, or null. The
+// proxy reaches only the public internet: a cidr that authorized an internal address would also
+// open the direct way to it. An address the scope authorizes directly on the port is refused too,
+// since the name would then be reached without the proxy as well. The host's addresses are read
+// again for each connection, as a VPN can add one.
+export const proxyRefusal = (
+  direct: Scope,
+  address: string,
+  port: number,
+  ownAddresses: readonly string[],
+): { why: string; direct: boolean } | null => {
+  const network = parseNetwork(address);
+  if (network === null) return { why: 'not an address the proxy connects to', direct: false };
+  const problem = unreachable(network, direct.deny, ownAddresses);
+  if (problem !== null) return { why: problem, direct: false };
+  const reached = direct.allow.some(
+    (destination) =>
+      holds(destination.network, network) &&
+      (destination.ports === undefined || destination.ports.includes(port)),
+  );
+  return reached
+    ? { why: `authorized directly on port ${port}, so reached without the proxy`, direct: true }
+    : null;
+};
+
+// Why the proxy never reaches an address, whatever the port: off the public internet, or denied.
+const unreachable = (
+  network: Network,
+  deny: readonly Network[],
+  ownAddresses: readonly string[],
+): string | null => {
+  const internal = internalRange(network, ownAddresses);
+  if (internal !== undefined) return `not on the public internet (${internal.what})`;
+  return deny.some((denied) => holds(denied, network)) ? 'denied by the scope' : null;
+};
+
+// Each address of a name of the proxy that the direct scope authorizes on one of the name's ports,
+// by a cidr or by a name reached directly that resolves to it: the sandbox would reach the name
+// there without the proxy. The start and every refresh refuse a scope that has one. A denied address
+// never reaches here: a name of the proxy that resolves to one is refused before.
+const proxyConflicts = (direct: Scope, proxied: readonly ProxiedName[]): string[] => {
+  const meet = (a: readonly number[] | undefined, b: readonly number[] | undefined): boolean =>
+    a === undefined || b === undefined || a.some((port) => b.includes(port));
+  const conflicts = new Set<string>();
+  for (const { host, ports, addresses } of proxied) {
+    for (const address of addresses) {
+      const network = parseNetwork(address) as Network;
+      const through = direct.allow.find(
+        (destination) => holds(destination.network, network) && meet(destination.ports, ports),
+      );
+      if (through !== undefined) {
+        conflicts.add(
+          `${host} resolves to ${address}, which ${shown(through.network)}, ${portsText(through.ports)}, authorizes directly`,
+        );
+      }
+    }
+  }
+  return [...conflicts];
+};
 
 const listed = (failures: string[]): string =>
   [
@@ -189,20 +301,30 @@ const compressed = (address: string): string => {
 
 const LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
-// A host name, in lower case, without a final dot.
-const hostName = (value: unknown, at: string): string => {
-  if (typeof value !== 'string') return fail(at, 'must be a string such as "app.example.com"');
+// A host name in lower case and without a final dot, or why it is not one. A name whose last label
+// is a number, as 10, 1.2.3 or 0x7f.1, is read by the resolver as an IPv4 address.
+export const normalizedHost = (
+  value: string,
+): { name: string } | { problem: 'address' | 'name' } => {
   const name = value.toLowerCase().replace(/\.$/, '');
   const labels = name.split('.');
-  // A name whose last label is a number, as 10, 1.2.3 or 0x7f.1, is read by the resolver as an
-  // IPv4 address.
   if (isIP(name) !== 0 || /^(?:\d+|0x[0-9a-f]*)$/.test(labels.at(-1) ?? '')) {
-    fail(at, `"${value}" reads as an address: give it as a cidr`);
+    return { problem: 'address' };
   }
   if (name.length === 0 || name.length > 253 || !labels.every((label) => LABEL.test(label))) {
-    fail(at, `"${value}" is not a host name`);
+    return { problem: 'name' };
   }
-  return name;
+  return { name };
+};
+
+// The host name an item of the file gives, normalized, or the item's failure.
+const hostName = (value: unknown, at: string): string => {
+  if (typeof value !== 'string') return fail(at, 'must be a string such as "app.example.com"');
+  const normal = normalizedHost(value);
+  if ('name' in normal) return normal.name;
+  return normal.problem === 'address'
+    ? fail(at, `"${value}" reads as an address: give it as a cidr`)
+    : fail(at, `"${value}" is not a host name`);
 };
 
 // Fractions of a second to the millisecond, which is what a Date keeps: more would be dropped, and
@@ -316,10 +438,14 @@ export const parseEngagement = (text: string): Result<Engagement> => {
     const scope = object(root.scope ?? fail('scope', 'is missing'), 'scope', ['allow', 'deny']);
     (scope.allow === undefined ? [] : array(scope.allow, 'scope.allow')).forEach((entry, index) => {
       const at = `scope.allow[${index}]`;
-      const item = object(entry, at, ['cidr', 'host', 'ports']);
+      const item = object(entry, at, ['cidr', 'host', 'ports', 'via']);
       const entryPorts = ports(item.ports, `${at}.ports`);
       if ((item.cidr === undefined) === (item.host === undefined)) {
         fail(at, 'must have either "cidr" or "host"');
+      }
+      if (item.via !== undefined && item.via !== 'proxy') fail(`${at}.via`, 'must be "proxy"');
+      if (item.via !== undefined && item.cidr !== undefined) {
+        fail(`${at}.via`, 'only a host is reached through the proxy: a cidr is reached directly');
       }
       engagement.allow.push(
         item.cidr !== undefined
@@ -332,6 +458,7 @@ export const parseEngagement = (text: string): Result<Engagement> => {
               kind: 'host',
               host: hostName(item.host, `${at}.host`),
               ...(entryPorts === undefined ? {} : { ports: entryPorts }),
+              ...(item.via === 'proxy' ? { via: 'proxy' as const } : {}),
             },
       );
     });
@@ -339,6 +466,20 @@ export const parseEngagement = (text: string): Result<Engagement> => {
       const at = `scope.deny[${index}]`;
       const item = object(entry, at, ['cidr']);
       engagement.deny.push(network(item.cidr ?? fail(at, 'must have "cidr"'), `${at}.cidr`));
+    });
+    // A name reached both ways would have a direct way around the proxy.
+    const ways = new Map<string, { proxied: boolean; at: string }>();
+    engagement.allow.forEach((entry, index) => {
+      if (entry.kind !== 'host') return;
+      const proxied = entry.via === 'proxy';
+      const seen = ways.get(entry.host);
+      if (seen === undefined) ways.set(entry.host, { proxied, at: `scope.allow[${index}]` });
+      else if (seen.proxied !== proxied) {
+        fail(
+          `scope.allow[${index}]`,
+          `${entry.host} is reached ${seen.proxied ? 'through the proxy' : 'directly'} in ${seen.at}: a name is reached one way`,
+        );
+      }
     });
     if (engagement.allow.filter((entry) => entry.kind === 'host').length > MAX_HOSTS) {
       fail('scope.allow', `names more than ${MAX_HOSTS} hosts`);
@@ -409,7 +550,7 @@ export type LookupAll = (host: string) => Promise<string[]>;
 export const lookupAll: LookupAll = async (host) =>
   (await lookup(host, { all: true, verbatim: true })).map((entry) => entry.address);
 
-const withTimeout = <T>(promise: Promise<T>, ms: number, message: string): Promise<T> =>
+export const withTimeout = <T>(promise: Promise<T>, ms: number, message: string): Promise<T> =>
   new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(message)), ms);
     promise.then(
@@ -473,10 +614,6 @@ export const resolveEngagement = async (
   }
   // An address of this host is reached through pasta as the host itself, its own services
   // included: it is held to the same rule as one off the public internet.
-  const own = ownAddresses.flatMap((address) => {
-    const network = parseNetwork(address);
-    return network === null ? [] : [{ network, what: 'an address of this host' }];
-  });
   // A cidr allows the name's ports when it has no ports, or all of them; a denied one makes the
   // address unreachable whatever the ports.
   const covers = (cidrPorts: readonly number[] | undefined, ports: readonly number[] | undefined) =>
@@ -485,10 +622,10 @@ export const resolveEngagement = async (
   // scope authorizes every one of its entries.
   const refused = new Set<string>();
   for (const entry of engagement.allow) {
-    if (entry.kind !== 'host') continue;
+    if (entry.kind !== 'host' || entry.via === 'proxy') continue;
     for (const address of addresses.get(entry.host) ?? []) {
       const network = parseNetwork(address) as Network;
-      const internal = [...own, ...INTERNAL].find((range) => holds(range.network, network));
+      const internal = internalRange(network, ownAddresses);
       if (internal === undefined) continue;
       const named =
         engagement.deny.some((cidr) => holds(cidr, network)) ||
@@ -508,10 +645,34 @@ export const resolveEngagement = async (
       error: `names of the engagement resolve to addresses that are not on the public internet, which a cidr of the file must hold, on the name's ports, to be authorized: ${listed(failures)}`,
     };
   }
+  const proxied: ProxiedName[] = engagement.allow.flatMap((entry) =>
+    entry.kind === 'host' && entry.via === 'proxy'
+      ? [
+          {
+            host: entry.host,
+            ...(entry.ports === undefined ? {} : { ports: entry.ports }),
+            addresses: addresses.get(entry.host) ?? [],
+          },
+        ]
+      : [],
+  );
+  const beyond = proxied.flatMap(({ host, addresses: found }) =>
+    found.flatMap((address) => {
+      const problem = unreachable(parseNetwork(address) as Network, engagement.deny, ownAddresses);
+      return problem === null ? [] : [`${host} resolves to ${address}, ${problem}`];
+    }),
+  );
+  if (beyond.length > 0) {
+    return {
+      ok: false,
+      error: `names reached through the proxy must resolve to public addresses the scope does not deny: ${listed([...new Set(beyond)])}`,
+    };
+  }
   const allow: AllowedDestination[] = engagement.allow.flatMap((entry) => {
     const withPorts = (network: Network): AllowedDestination =>
       entry.ports === undefined ? { network } : { network, ports: entry.ports };
     if (entry.kind === 'network') return [withPorts(entry.network)];
+    if (entry.via === 'proxy') return [];
     return (addresses.get(entry.host) ?? []).map((address) =>
       withPorts(parseNetwork(address) as Network),
     );
@@ -524,19 +685,31 @@ export const resolveEngagement = async (
       error: `the scope holds ${destinations} destinations, more than ${MAX_DESTINATIONS}: each network or address counts once per port, and each denied network once`,
     };
   }
+  const scope: Scope = {
+    allow,
+    deny: engagement.deny,
+    ...(engagement.newConnectionsPerSecond === undefined
+      ? {}
+      : { newConnectionsPerSecond: engagement.newConnectionsPerSecond }),
+    ...(engagement.window === undefined ? {} : { window: engagement.window }),
+  };
+  const conflicts = proxyConflicts(scope, proxied);
+  if (conflicts.length > 0) {
+    return {
+      ok: false,
+      error: `names reached through the proxy resolve to addresses the scope authorizes directly, where the sandbox would reach them without it: ${listed(conflicts)}`,
+    };
+  }
+  const throughProxy = new Set(proxied.map(({ host }) => host));
   return {
     ok: true,
     value: {
       engagement,
-      scope: {
-        allow,
-        deny: engagement.deny,
-        ...(engagement.newConnectionsPerSecond === undefined
-          ? {}
-          : { newConnectionsPerSecond: engagement.newConnectionsPerSecond }),
-        ...(engagement.window === undefined ? {} : { window: engagement.window }),
-      },
-      names: hosts.map((host) => ({ host, addresses: addresses.get(host) ?? [] })),
+      scope,
+      names: hosts
+        .filter((host) => !throughProxy.has(host))
+        .map((host) => ({ host, addresses: addresses.get(host) ?? [] })),
+      proxied,
     },
   };
 };
@@ -570,11 +743,15 @@ export const describeScope = (resolved: ResolvedEngagement): string[] => {
   const { engagement } = resolved;
   const addressesOf = new Map(resolved.names.map(({ host, addresses }) => [host, addresses]));
   const lines: string[] = [];
+  const direct = engagement.allow.filter(
+    (entry) => entry.kind === 'network' || entry.via !== 'proxy',
+  );
   if (engagement.allow.length === 0) {
     lines.push('Nothing is authorized: the sandbox has no network.');
-  } else {
+  }
+  if (direct.length > 0) {
     lines.push('Authorized, over TCP and UDP, and ICMP echo:');
-    for (const entry of engagement.allow) {
+    for (const entry of direct) {
       lines.push(
         entry.kind === 'network'
           ? `- ${shown(entry.network)}, ${portsText(entry.ports)}`
@@ -582,12 +759,20 @@ export const describeScope = (resolved: ResolvedEngagement): string[] => {
       );
     }
   }
+  if (resolved.proxied.length > 0) {
+    lines.push(
+      'Authorized by name, through the proxy only, which HTTP_PROXY and HTTPS_PROXY name: HTTPS with the name in TLS, or plain HTTP with it in Host. There is no direct route to these names. The proxy resolves each name again for every connection, and checks the name a connection opens with, not each request inside TLS:',
+    );
+    for (const { host, ports, addresses } of resolved.proxied) {
+      lines.push(`- ${host}, ${portsText(ports)}, last checked at ${addresses.join(', ')}`);
+    }
+  }
   if (engagement.deny.length > 0) {
     lines.push(`Denied, even where authorized: ${engagement.deny.map(shown).join(', ')}`);
   }
   if (engagement.newConnectionsPerSecond !== undefined) {
     lines.push(
-      `At most ${engagement.newConnectionsPerSecond} new connections per second to each address.`,
+      `At most ${engagement.newConnectionsPerSecond} new connections per second to each address${resolved.proxied.length > 0 ? ', directly and through the proxy each' : ''}.`,
     );
   }
   if (engagement.window !== undefined) {

@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, readlinkSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { EngagementWindow } from '../agent/tool-broker.ts';
@@ -26,6 +27,13 @@ import { defaultLimits, type LimitedStart, limitedLaunch, prepareLimits } from '
 import { NetworkControl } from './network/control.ts';
 import { GIVEN_UP, type NetworkTools, networkTools, pinNamespaces } from './network/namespace.ts';
 import { PASTA_LIMITS, type PastaAddress } from './network/pasta.ts';
+import { PROXY_PORT, PROXY_USER, type ProxyEvent, type ProxyPolicy } from './network/proxy.ts';
+import {
+  PROXY_PROCESS_LIMITS,
+  type ProxyFactory,
+  proxyProcess,
+  type RunningProxy,
+} from './network/proxy-process.ts';
 import type { Scope } from './network/ruleset.ts';
 import { type Launched, WorkerBackend } from './worker-backend.ts';
 import {
@@ -36,7 +44,8 @@ import {
 
 // A sandbox of the `security` profile: the network of the engagement's scope, within its window,
 // and nothing else. One owner for all it holds, the worker, the network with pasta's scope, the
-// directory of the hosts file and the watch over the window, so that one close ends them in order.
+// proxy of the names reached through it, the directory of the hosts file and the watch over the
+// window, so that one close ends them in order.
 //
 // The window is held by the kernel, which compares each packet's time with it, whatever this
 // process is doing. The watch here does the rest, as soon as it can: at the end it closes the
@@ -64,6 +73,9 @@ export interface SecurityOptions {
   signal?: AbortSignal;
   // For tests: how long the network's preparation may take, thirty seconds otherwise.
   prepareTimeoutMs?: number;
+  // For tests: how the proxy of the names reached through it is started, a process of its own in
+  // a sandbox and a scope of its own otherwise.
+  proxy?: ProxyFactory;
 }
 
 export interface RefreshReport {
@@ -106,6 +118,84 @@ export const verifyLauncher = (pid: number, status: string): void => {
 
 const iso = (date: Date): string => date.toISOString();
 
+// What the sandbox's HTTP clients are given to reach the names of the proxy: its address, with the
+// session's credential, and what they reach without it. These reach the worker on the protocol's
+// descriptors, never on a command line.
+// NO_PROXY is held to what an environment takes at ease: a scope of twenty thousand destinations
+// would not fit in one variable of a command's environment.
+const MAX_NO_PROXY_CHARS = 16 * 1024;
+
+const proxyEnvironment = (
+  token: string,
+  resolved: ResolvedEngagement,
+): { variables: Record<string, string>; warnings: string[] } => {
+  const proxy = `http://${PROXY_USER}:${token}@127.0.0.1:${PROXY_PORT}`;
+  // Clients match a NO_PROXY name against every name that ends with it, Python's requests with no
+  // dot between: a name reached directly that ends a name of the proxy would take that one away
+  // from the proxy, its only way. It is left out, and reached directly by its addresses.
+  const proxiedHosts = resolved.proxied.map(({ host }) => host);
+  const shadowing = resolved.names
+    .map(({ host }) => host)
+    .filter((host) => proxiedHosts.some((proxied) => proxied.endsWith(host)));
+  const destinations = [
+    ...resolved.names.flatMap(({ host, addresses }) =>
+      shadowing.includes(host) ? addresses : [host, ...addresses],
+    ),
+    ...resolved.engagement.allow.flatMap((entry) =>
+      entry.kind === 'network' ? [`${entry.network.address}/${entry.network.prefix}`] : [],
+    ),
+  ];
+  const listed = ['localhost', '127.0.0.1', '::1'];
+  let length = listed.join(',').length;
+  let left = 0;
+  for (const destination of destinations) {
+    if (length + 1 + destination.length > MAX_NO_PROXY_CHARS) {
+      left += 1;
+      continue;
+    }
+    listed.push(destination);
+    length += 1 + destination.length;
+  }
+  const direct = listed.join(',');
+  return {
+    variables: {
+      HTTP_PROXY: proxy,
+      HTTPS_PROXY: proxy,
+      http_proxy: proxy,
+      https_proxy: proxy,
+      NO_PROXY: direct,
+      no_proxy: direct,
+    },
+    warnings: [
+      ...(shadowing.length === 0
+        ? []
+        : [
+            `NO_PROXY leaves out ${shadowing.join(', ')}, which names reached through the proxy end with: an HTTP client sends it to the proxy, which refuses it, unless told not to use the proxy, as curl is with --noproxy`,
+          ]),
+      ...(left === 0
+        ? []
+        : [
+            `NO_PROXY leaves out ${left} of the ${destinations.length} names, addresses and networks reached directly, past ${MAX_NO_PROXY_CHARS} characters: an HTTP client sends those to the proxy, which refuses them, unless told not to use it, as curl is with --noproxy`,
+          ]),
+    ],
+  };
+};
+
+const proxyPolicy = (token: string, resolved: ResolvedEngagement): ProxyPolicy => {
+  const { scope, engagement } = resolved;
+  return {
+    token,
+    names: resolved.proxied.map(({ host, ports }) =>
+      ports === undefined ? { host } : { host, ports },
+    ),
+    direct: { allow: scope.allow, deny: scope.deny },
+    ...(engagement.window === undefined ? {} : { window: engagement.window }),
+    ...(engagement.newConnectionsPerSecond === undefined
+      ? {}
+      : { newConnectionsPerSecond: engagement.newConnectionsPerSecond }),
+  };
+};
+
 // pasta reaches an address of this host as the host itself, its services listening there
 // included: a scope that authorizes one, as a laboratory on this machine does, is told.
 const ownAddressesWarning = (scope: Scope): string[] => {
@@ -136,8 +226,17 @@ export class SecuritySession implements EngagementWindow {
     private readonly options: SecurityOptions,
     // What the operator is told at the start: what the limits or the directory could not do.
     readonly warnings: string[],
+    private readonly proxy: RunningProxy | null,
   ) {
     this.ended = this.ending.signal;
+    // A proxy that ends by itself frees its port of the host, where pasta still forwards the
+    // sandbox's: whatever listens there next would receive the sandbox's requests and its
+    // credential. The network closes, as when pasta ends, and the watch tells it.
+    void proxy?.ended.then((reason) => {
+      if (this.closing === null && reason !== 'the proxy was stopped') {
+        void this.closeNetwork(`the proxy stopped: ${reason}`);
+      }
+    });
     this.ticker = setInterval(() => this.tick(), TICK_MS);
     // The watch never keeps the process alive by itself.
     this.ticker.unref?.();
@@ -163,10 +262,15 @@ export class SecuritySession implements EngagementWindow {
     if (ended() !== null) return { error: ended() as string };
     const resolved = await resolveEngagement(engagement, options.resolve ?? lookupAll);
     if (!resolved.ok) return { error: resolved.error };
-    // pasta's memory comes out of the sandbox's, whatever limits it: the session's budget stays
-    // three quarters.
-    const limits = await prepareLimits(options.env, defaultLimits(), PASTA_LIMITS.memoryBytes);
-    if (limits.how !== 'cgroup' || limits.scope === undefined) {
+    const proxied = resolved.value.proxied.length > 0;
+    // pasta's memory, and the proxy's, come out of the sandbox's, whatever limits it: the
+    // session's budget stays three quarters.
+    const limits = await prepareLimits(
+      options.env,
+      defaultLimits(),
+      PASTA_LIMITS.memoryBytes + (proxied ? PROXY_PROCESS_LIMITS.memoryBytes : 0),
+    );
+    if (limits.how !== 'cgroup' || limits.scope === undefined || limits.clean === undefined) {
       return {
         error: `the security sandbox needs the limits of a cgroup: ${limits.warnings.join('; ')}`,
       };
@@ -177,6 +281,7 @@ export class SecuritySession implements EngagementWindow {
     const { directory } = created;
     const etc = join(directory.path, 'etc');
     let control: NetworkControl | null = null;
+    let proxy: RunningProxy | null = null;
     let preparing: Promise<void> = Promise.resolve();
     // Given up with the start: the preparation's helpers are killed, so the undoing that waits for
     // it does not outlast the start's time by theirs.
@@ -191,9 +296,15 @@ export class SecuritySession implements EngagementWindow {
         const failure = errorMessage(error);
         if (failure !== GIVEN_UP && !why.includes(failure)) left.push(failure);
       });
-      await control?.dispose().catch((error: unknown) => {
+      // The network first: pasta must not forward to the proxy's port once it is free.
+      const network = control?.dispose().catch((error: unknown) => {
         left.push(`the network did not end: ${errorMessage(error)}`);
       });
+      await control?.close().catch(() => undefined);
+      await proxy?.stop().catch((error: unknown) => {
+        left.push(`the proxy did not end: ${errorMessage(error)}`);
+      });
+      await network;
       try {
         removeWorkspaceDirectory(directory);
       } catch (error) {
@@ -210,12 +321,48 @@ export class SecuritySession implements EngagementWindow {
     }
     units += 1;
     const unit = `nullrivet-pasta-${process.pid}-${units}.scope`;
+    const proxyUnit = `nullrivet-proxy-${process.pid}-${units}.scope`;
     const scope = limits.scope;
+    const clean = limits.clean;
+    const token = proxied ? randomBytes(32).toString('hex') : null;
+    const environment = token === null ? null : proxyEnvironment(token, resolved.value);
+    // Told once per name and address: the proxy refuses a name that came to resolve to an address
+    // the scope authorizes directly, where the sandbox reaches it without the proxy.
+    const told = new Set<string>();
+    const report = (event: ProxyEvent): void => {
+      if (event.type !== 'refused' || event.direct !== true || told.has(event.reason)) return;
+      told.add(event.reason);
+      options.notice(
+        'warning',
+        `${event.reason}: the sandbox reaches that address without the proxy, as the scope authorizes`,
+      );
+    };
+    const startProxy =
+      options.proxy ??
+      proxyProcess({
+        bwrap: options.host.bwrap,
+        arch: options.host.arch,
+        clean,
+        scope: {
+          prefix: scope(proxyUnit, PROXY_PROCESS_LIMITS),
+          env: limits.env,
+          unit: proxyUnit,
+          limits: PROXY_PROCESS_LIMITS,
+        },
+      });
     let pid = 0;
     const prepare = (launched: Launched): Promise<void> => {
       preparing = (async () => {
         verifyLauncher(launched.pid, launched.status);
         pid = launched.pid;
+        if (token !== null) {
+          proxy = await startProxy({
+            policy: proxyPolicy(token, resolved.value),
+            report,
+            signal: abandon.signal,
+          });
+        }
+        const forward = proxy === null ? {} : { forward: { port: PROXY_PORT, to: proxy.port } };
         control = await NetworkControl.prepare(
           tools,
           pinNamespaces(launched.pid),
@@ -228,6 +375,7 @@ export class SecuritySession implements EngagementWindow {
               unit,
               limits: PASTA_LIMITS,
             },
+            ...forward,
             signal: abandon.signal,
           },
         );
@@ -247,6 +395,7 @@ export class SecuritySession implements EngagementWindow {
         tools: options.launch.tools,
         jobs: true,
         prepare,
+        ...(environment === null ? {} : { environment: environment.variables }),
         ...(options.signal === undefined ? {} : { signal: options.signal }),
         ...(options.prepareTimeoutMs === undefined
           ? {}
@@ -263,7 +412,13 @@ export class SecuritySession implements EngagementWindow {
       engagement,
       resolved.value,
       options,
-      [...limits.warnings, ...created.warnings, ...ownAddressesWarning(resolved.value.scope)],
+      [
+        ...limits.warnings,
+        ...created.warnings,
+        ...ownAddressesWarning(resolved.value.scope),
+        ...(environment?.warnings ?? []),
+      ],
+      proxy,
     );
   }
 
@@ -325,11 +480,36 @@ export class SecuritySession implements EngagementWindow {
     } catch (error) {
       return { error: `nothing changed: the hosts file cannot be written: ${errorMessage(error)}` };
     }
+    // While the kernel takes the new scope, the proxy holds both, and refuses an address either
+    // authorizes directly.
+    const { scope } = resolved.value;
     try {
-      await this.control.replace(resolved.value.scope);
+      await this.proxy?.setDirect({
+        allow: [...this.resolved.scope.allow, ...scope.allow],
+        deny: scope.deny,
+      });
+    } catch (error) {
+      const reason = `the proxy did not take the new scope: ${errorMessage(error)}`;
+      void this.closeNetwork(reason);
+      return { error: `the network was closed: ${reason}` };
+    }
+    stop = stopped();
+    if (stop !== null) return stop;
+    try {
+      await this.control.replace(scope);
     } catch (error) {
       // A replacement that fails closes the network itself.
       return { error: `the network was closed: ${errorMessage(error)}` };
+    }
+    stop = stopped();
+    if (stop !== null) return stop;
+    try {
+      await this.proxy?.setDirect(resolved.value.scope);
+    } catch (error) {
+      // The proxy would hold a name to the scope before it: the network closes.
+      const reason = `the proxy did not take the new scope: ${errorMessage(error)}`;
+      void this.closeNetwork(reason);
+      return { error: `the network was closed: ${reason}` };
     }
     stop = stopped();
     if (stop !== null) return stop;
@@ -338,13 +518,20 @@ export class SecuritySession implements EngagementWindow {
     } catch (error) {
       // The scope in force and the names the sandbox reads would disagree: the network closes.
       const reason = `the hosts file cannot be replaced: ${errorMessage(error)}`;
-      void this.control.close(reason);
+      void this.closeNetwork(reason);
       return { error: `the network was closed: ${reason}` };
     }
     stop = stopped();
     if (stop !== null) return stop;
-    const before = new Map(this.resolved.names.map(({ host, addresses }) => [host, addresses]));
-    const changes = resolved.value.names.flatMap(({ host, addresses }) => {
+    // The names of the proxy too, whose addresses it resolves again for each connection anyway.
+    const named = (value: ResolvedEngagement) => [
+      ...value.names,
+      ...value.proxied.filter(
+        (entry, index) => value.proxied.findIndex(({ host }) => host === entry.host) === index,
+      ),
+    ];
+    const before = new Map(named(this.resolved).map(({ host, addresses }) => [host, addresses]));
+    const changes = named(resolved.value).flatMap(({ host, addresses }) => {
       const old = before.get(host) ?? [];
       const added = addresses.filter((address) => !old.includes(address));
       const removed = old.filter((address) => !addresses.includes(address));
@@ -355,14 +542,18 @@ export class SecuritySession implements EngagementWindow {
   }
 
   // Ends everything the sandbox holds, in order: the watch, the network with pasta's scope, the
-  // worker, the directory. Idempotent; the network closes at once, whatever a refresh is doing.
+  // proxy, the worker, the directory. Idempotent; the network closes at once, whatever a refresh is doing.
   close(): Promise<void> {
     if (this.closing === null) {
       clearInterval(this.ticker);
       const network = this.control.dispose();
+      const proxy = this.afterNetwork(this.control.close());
       this.closing = (async () => {
         const failures: string[] = [];
         await network.catch((error: unknown) => failures.push(errorMessage(error)));
+        await proxy?.catch((error: unknown) =>
+          failures.push(`the proxy did not end: ${errorMessage(error)}`),
+        );
         await this.backend.close();
         try {
           removeWorkspaceDirectory(this.directory);
@@ -375,6 +566,24 @@ export class SecuritySession implements EngagementWindow {
       })();
     }
     return this.closing;
+  }
+
+  // Stops the proxy once the network is closed, pasta ended with the port it forwarded: stopped
+  // before, its port of the host would be free while pasta still led the sandbox there.
+  private afterNetwork(closed: Promise<void>): Promise<void> | undefined {
+    const { proxy } = this;
+    if (proxy === null) return undefined;
+    return closed.then(
+      () => proxy.stop(),
+      () => proxy.stop(),
+    );
+  }
+
+  // Closes the network for a failure, then the proxy, and tells what of them did not end.
+  private async closeNetwork(reason: string): Promise<void> {
+    await this.afterNetwork(this.control.close(reason))?.catch((error: unknown) =>
+      this.options.notice('warning', `the proxy did not end: ${errorMessage(error)}`),
+    );
   }
 
   private now(): Date {
@@ -406,8 +615,12 @@ export class SecuritySession implements EngagementWindow {
     const until = iso((this.engagement.window as { until: Date }).until);
     // Each step is taken whatever the others did, and every failure is told.
     const problems: string[] = [];
-    const network = this.control.close().catch((error: unknown) => {
+    const closed = this.control.close();
+    const network = closed.catch((error: unknown) => {
       problems.push(errorMessage(error));
+    });
+    const proxy = this.afterNetwork(closed)?.catch((error: unknown) => {
+      problems.push(`the proxy did not end: ${errorMessage(error)}`);
     });
     try {
       await this.backend.stopJobs();
@@ -419,6 +632,7 @@ export class SecuritySession implements EngagementWindow {
       });
     }
     await network;
+    await proxy;
     this.options.notice(
       problems.length === 0 ? 'info' : 'warning',
       `The engagement window ended at ${until}: the network is closed, commands are refused, and the running ones were stopped.${problems.length === 0 ? '' : ` ${problems.join('; ')}`}`,

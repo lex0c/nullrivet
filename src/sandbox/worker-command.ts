@@ -1,6 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import type { JobSession } from '../tools/jobs.ts';
-import { WORKER_ARGUMENT } from './protocol.ts';
+import { PROXY_ARGUMENT, WORKER_ARGUMENT } from './protocol.ts';
 
 // The compiled binary embeds its modules under /$bunfs/ and runs its own entry point whatever
 // arguments it gets. From source, bun runs the entry point with the flags of its shebang, which
@@ -48,6 +48,22 @@ export const sandboxedWorker = (tools: readonly string[], jobs?: JobSession): Sa
   const sourceDir = `${SANDBOX_WORKER_DIR}/src`;
   return {
     command: commandFor(binary, sourceDir, tools, jobs),
+    mounts: [
+      { source: process.execPath, target: binary },
+      ...(COMPILED ? [] : [{ source: SOURCE_DIR, target: sourceDir }]),
+    ],
+  };
+};
+
+// The proxy of the security profile, started from its files bound under SANDBOX_WORKER_DIR in a
+// sandbox of its own, from the same entry point as the worker.
+export const sandboxedProxy = (): SandboxedWorker => {
+  const binary = `${SANDBOX_WORKER_DIR}/${COMPILED ? 'nullrivet' : 'bun'}`;
+  const sourceDir = `${SANDBOX_WORKER_DIR}/src`;
+  return {
+    command: COMPILED
+      ? [binary, PROXY_ARGUMENT]
+      : [binary, '--no-env-file', '--config=/dev/null', `${sourceDir}/main.ts`, PROXY_ARGUMENT],
     mounts: [
       { source: process.execPath, target: binary },
       ...(COMPILED ? [] : [{ source: SOURCE_DIR, target: sourceDir }]),

@@ -32,6 +32,10 @@ Common behavior:
   `engagement.window`, before they reach the sandbox; at its end, the calls of these tools still
   running are cancelled and the background jobs stopped. The others, `git`, `glob` and `grep`
   included, which run fixed programs, stay available; so do `bash_jobs` and `bash_kill`.
+- **Names through the proxy.** When the engagement file marks names `"via": "proxy"`, the commands
+  of `bash` and `bash_background` get `HTTP_PROXY`, `HTTPS_PROXY` and their lower-case forms, which
+  name the proxy with the session's credential, and `NO_PROXY` with what is reached directly. Those
+  names reach the sandbox through the proxy alone ([SANDBOX.md](SANDBOX.md)).
 - **Sandbox restarts.** In an interactive session with `--sandbox workspace`, applying or
   discarding the changes stops the sandbox and starts a new one on the project as it is then. A
   call running at that moment ends with `sandbox.restarted`; calls made meanwhile wait for the new

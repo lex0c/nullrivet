@@ -495,6 +495,131 @@ describe('resolving the engagement', () => {
   });
 });
 
+describe('names reached through the proxy', () => {
+  const resolver = (answers: Record<string, string[]>) => async (host: string) =>
+    answers[host] ?? [];
+  const resolved = async (scope: unknown, answers: Record<string, string[]>) => {
+    const result = await resolveEngagement(parsed({ scope }), resolver(answers), undefined, []);
+    return result.ok ? result.value : result.error;
+  };
+
+  test('are marked on a host, and a name is reached one way only', () => {
+    expect(error({ scope: { allow: [{ cidr: '203.0.113.0/24', via: 'proxy' }] } })).toBe(
+      'scope.allow[0].via: only a host is reached through the proxy: a cidr is reached directly',
+    );
+    expect(error({ scope: { allow: [{ host: 'app.example', via: 'direct' }] } })).toBe(
+      'scope.allow[0].via: must be "proxy"',
+    );
+    expect(
+      error({
+        scope: {
+          allow: [
+            { host: 'app.example', ports: [443], via: 'proxy' },
+            { host: 'App.Example', ports: [80] },
+          ],
+        },
+      }),
+    ).toBe(
+      'scope.allow[1]: app.example is reached through the proxy in scope.allow[0]: a name is reached one way',
+    );
+  });
+
+  test('get no rule and no line of the hosts file, and are stated as the proxy reaches them', async () => {
+    const value = await resolved(
+      {
+        allow: [
+          { host: 'app.example', ports: [443], via: 'proxy' },
+          { host: 'direct.example', ports: [22] },
+        ],
+      },
+      { 'app.example': ['198.51.100.7'], 'direct.example': ['198.51.100.9'] },
+    );
+    if (typeof value === 'string') throw new Error(value);
+    expect(value.scope.allow).toEqual([
+      { network: { family: 4, address: '198.51.100.9', prefix: 32 }, ports: [22] },
+    ]);
+    expect(value.names).toEqual([{ host: 'direct.example', addresses: ['198.51.100.9'] }]);
+    expect(value.proxied).toEqual([
+      { host: 'app.example', ports: [443], addresses: ['198.51.100.7'] },
+    ]);
+    expect(hostsFile(value)).not.toContain('app.example');
+    expect(describeScope(value)).toEqual([
+      'Authorized, over TCP and UDP, and ICMP echo:',
+      '- direct.example, ports 22, at 198.51.100.9',
+      'Authorized by name, through the proxy only, which HTTP_PROXY and HTTPS_PROXY name: HTTPS with the name in TLS, or plain HTTP with it in Host. There is no direct route to these names. The proxy resolves each name again for every connection, and checks the name a connection opens with, not each request inside TLS:',
+      '- app.example, ports 443, last checked at 198.51.100.7',
+    ]);
+  });
+
+  test('stop the session at IPv6 forms that hold an IPv4 address: Teredo, IPv4-translated', async () => {
+    expect(
+      await resolved(
+        { allow: [{ host: 'app.example', ports: [443], via: 'proxy' }] },
+        { 'app.example': ['2001:0:4136:e378:8000:63bf:f5ff:fffe', '::ffff:0:a00:1'] },
+      ),
+    ).toBe(
+      'names reached through the proxy must resolve to public addresses the scope does not deny: app.example resolves to 2001:0:4136:e378:8000:63bf:f5ff:fffe, not on the public internet (Teredo); app.example resolves to ::ffff:0:a00:1, not on the public internet (IPv4-translated)',
+    );
+  });
+
+  test('stop the session at an internal or denied address, which no cidr makes one the proxy reaches', async () => {
+    expect(
+      await resolved(
+        {
+          allow: [
+            { host: 'app.example', ports: [443], via: 'proxy' },
+            { cidr: '10.0.0.0/8', ports: [22] },
+          ],
+          deny: [{ cidr: '198.51.100.0/24' }],
+        },
+        { 'app.example': ['10.0.0.1', '198.51.100.7', '203.0.113.9'] },
+      ),
+    ).toBe(
+      'names reached through the proxy must resolve to public addresses the scope does not deny: app.example resolves to 10.0.0.1, not on the public internet (private); app.example resolves to 198.51.100.7, denied by the scope',
+    );
+  });
+
+  test('stop the session where the direct scope reaches their addresses on their ports', async () => {
+    const answers = { 'app.example': ['198.51.100.7'], 'other.example': ['198.51.100.7'] };
+    expect(
+      await resolved(
+        {
+          allow: [
+            { cidr: '198.51.100.0/24', ports: [443, 8443] },
+            { host: 'app.example', ports: [443], via: 'proxy' },
+          ],
+        },
+        answers,
+      ),
+    ).toBe(
+      'names reached through the proxy resolve to addresses the scope authorizes directly, where the sandbox would reach them without it: app.example resolves to 198.51.100.7, which 198.51.100.0/24, ports 443, 8443, authorizes directly',
+    );
+    // A name reached directly that resolves to the same address is the same way around.
+    expect(
+      await resolved(
+        {
+          allow: [{ host: 'other.example' }, { host: 'app.example', ports: [443], via: 'proxy' }],
+        },
+        answers,
+      ),
+    ).toBe(
+      'names reached through the proxy resolve to addresses the scope authorizes directly, where the sandbox would reach them without it: app.example resolves to 198.51.100.7, which 198.51.100.7/32, every port, authorizes directly',
+    );
+    // On ports apart, the address is reached directly on its own and through the proxy on the
+    // name's.
+    const apart = await resolved(
+      {
+        allow: [
+          { cidr: '198.51.100.0/24', ports: [22] },
+          { host: 'app.example', ports: [443], via: 'proxy' },
+        ],
+      },
+      answers,
+    );
+    expect(typeof apart).not.toBe('string');
+  });
+});
+
 describe('the engagement window', () => {
   test('is open between its times, and always without one', () => {
     const engagement = parsed(EXAMPLE);

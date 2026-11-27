@@ -25,6 +25,8 @@ export interface Limits {
   memoryBytes: number;
   // Relative to the default of 100, under contention only.
   cpuWeight: number;
+  // An absolute bound, in percent of one CPU, whatever else runs; absent, none.
+  cpuQuotaPercent?: number;
 }
 
 const MEMORY_SHARE = 0.75;
@@ -79,7 +81,7 @@ const BUS_VARIABLES = ['XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS'];
 // The limits the cgroup at `path` holds: absent for a file it does not have.
 export const cgroupLimits = (path: string): Map<string, string> => {
   const held = new Map<string, string>();
-  for (const name of ['memory.max', 'memory.swap.max', 'pids.max', 'cpu.weight']) {
+  for (const name of ['memory.max', 'memory.swap.max', 'pids.max', 'cpu.weight', 'cpu.max']) {
     try {
       held.set(name, readFileSync(`/sys/fs/cgroup${path}/${name}`, 'utf8').trim());
     } catch {
@@ -99,6 +101,10 @@ export const missingLimits = (held: ReadonlyMap<string, string>, limits: Limits)
     ['cpu.weight', String(limits.cpuWeight)],
   ];
   if (held.get('memory.swap.max') !== 'absent') expected.push(['memory.swap.max', '0']);
+  // The manager's period is 100 ms: a quota of n percent is n thousand microseconds of it.
+  if (limits.cpuQuotaPercent !== undefined) {
+    expected.push(['cpu.max', `${limits.cpuQuotaPercent * 1000} 100000`]);
+  }
   return expected
     .filter(([name, value]) => held.get(name) !== value)
     .map(([name, value]) => `${name} is ${held.get(name) ?? 'not read'} instead of ${value}`);
@@ -160,6 +166,7 @@ const scopeArgs = (
   'MemorySwapMax=0',
   '-p',
   `CPUWeight=${limits.cpuWeight}`,
+  ...(limits.cpuQuotaPercent === undefined ? [] : ['-p', `CPUQuota=${limits.cpuQuotaPercent}%`]),
   ...optional.flatMap((option) => option.args),
   '--',
 ];

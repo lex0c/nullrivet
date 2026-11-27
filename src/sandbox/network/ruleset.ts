@@ -92,7 +92,8 @@ export const parseNetwork = (text: string): Network | null => {
   return { family, address: family === 4 ? v4Text(first) : v6Text(first), prefix };
 };
 
-const isPort = (port: number): boolean => Number.isInteger(port) && port >= 1 && port <= 65535;
+export const isPort = (port: number): boolean =>
+  Number.isInteger(port) && port >= 1 && port <= 65535;
 
 const LAST_TIME = Date.UTC(2500, 0, 1);
 
@@ -229,6 +230,7 @@ export const rulesetFor = (
   scope: Scope,
   table: ScopeTable,
   previous: ScopeTable | null,
+  proxyPort?: number,
 ): string[] => {
   const times = windowRules(scope.window);
   const rate = scope.newConnectionsPerSecond;
@@ -284,7 +286,19 @@ export const rulesetFor = (
   // With a rate, what the scope authorizes goes through the meter first, and only that: a
   // destination out of scope never takes a place in its sets, which a flood of them would fill.
   const pass = rate === undefined ? 'accept' : 'goto admit';
+  // pasta forwards the proxy's port of the loopback to the host's loopback at the address the
+  // connection was for: 127.0.0.2 or ::1 there would reach another service of the host. Only
+  // 127.0.0.1 passes, where the proxy listens, and only within the window, as for any destination.
+  const proxied =
+    proxyPort === undefined
+      ? []
+      : [
+          `oif "lo" meta nfproto ipv6 tcp dport ${proxyPort} goto refuse`,
+          `oif "lo" ip daddr != 127.0.0.1 tcp dport ${proxyPort} goto refuse`,
+          ...times.map((time) => `oif "lo" tcp dport ${proxyPort} ${time} goto refuse`),
+        ];
   const output = [
+    ...proxied,
     'oif "lo" accept',
     ...times.map((time) => `${time} goto refuse`),
     // A routing header sends the packet on to addresses past the one the rules match: refused

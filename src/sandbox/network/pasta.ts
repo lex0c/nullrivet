@@ -1,7 +1,7 @@
 import { type ChildProcess, spawn } from 'node:child_process';
-import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { errorMessage } from '../../errors.ts';
-import { cgroupLimits, type Limits, missingLimits } from '../limits.ts';
+import type { Limits } from '../limits.ts';
 import {
   enterArgs,
   GIVEN_UP,
@@ -11,13 +11,16 @@ import {
   type NetworkTools,
   runInNamespaces,
 } from './namespace.ts';
+import { confirmScope, emptied, type HelperScope, unitCgroup } from './scoped.ts';
 
 // pasta connects a sandbox's network namespace to the host's network, translating its TCP, UDP and
 // ICMP echo flows into sockets of the host. It runs in the namespaces' user namespace, which gives
 // it the capabilities to configure the network namespace, and stays in the host's network.
 //
 // Nothing is forwarded but what the sandbox opens: no port of the host leads into the namespace,
-// and none of the namespace's to the host, in either protocol (`-t none -u none -T none -U none`).
+// and none of the namespace's to the host, in either protocol (`-t none -u none -T none -U none`),
+// but the proxy's when the scope has names reached through it: one port of the namespace's
+// loopback to the host's, where the proxy listens, which the ruleset holds to 127.0.0.1.
 // The gateway's address is not mapped to the host's loopback (`--no-map-gw`), which would
 // otherwise reach the host's own services, and DHCP is not offered. A pasta that ends leaves the
 // namespace without a way out: it is never started again. pasta ends by itself once the process
@@ -36,7 +39,6 @@ const READY_TIMEOUT_MS = 10_000;
 const POLL_MS = 20;
 const SETTLE_MS = 50;
 const STOP_GRACE_MS = 2_000;
-const EMPTIED_TIMEOUT_MS = 5_000;
 const PASTA_NAMES = /^pas(?:ta|st)(?:\.avx2)?$/;
 
 // What pasta may take, beside the sandbox's own limits: it holds a few buffers per connection, in
@@ -45,62 +47,7 @@ export const PASTA_LIMITS: Limits = { tasks: 8, memoryBytes: 256 * 1024 * 1024, 
 
 // A scope of the user's service manager for pasta alone, so that traffic to and from the targets
 // costs it what its own limits allow, and its end can be confirmed whole.
-export interface PastaScope {
-  // What starts pasta in the scope, named `unit`.
-  prefix: readonly string[];
-  // For that command alone.
-  env: Record<string, string>;
-  unit: string;
-  limits: Limits;
-}
-
-// The cgroup of the unit named, found through any process in it: when what started pasta did not
-// run it in place, pasta runs there without being the process followed.
-const unitCgroup = (unit: string): string | null => {
-  for (const entry of readdirSync('/proc')) {
-    if (!/^\d+$/.test(entry)) continue;
-    const path = cgroupOf(Number(entry));
-    if (path?.endsWith(`/${unit}`) === true) return path;
-  }
-  return null;
-};
-
-// The cgroup `pid` runs in, or null once it is gone.
-const cgroupOf = (pid: number): string | null => {
-  try {
-    const line = readFileSync(`/proc/${pid}/cgroup`, 'utf8')
-      .split('\n')
-      .find((row) => row.startsWith('0::'));
-    return line === undefined ? null : line.slice(3);
-  } catch {
-    return null;
-  }
-};
-
-// Kills every process of the cgroup at `path` and its descendants, and resolves once none is
-// left, or the cgroup is gone: the manager removes a scope that has no process.
-const emptied = async (path: string): Promise<void> => {
-  const dir = `/sys/fs/cgroup${path}`;
-  try {
-    writeFileSync(`${dir}/cgroup.kill`, '1');
-  } catch {
-    // Gone already, or not writable: what is left shows below.
-  }
-  const deadline = Date.now() + EMPTIED_TIMEOUT_MS;
-  for (;;) {
-    let events: string;
-    try {
-      events = readFileSync(`${dir}/cgroup.events`, 'utf8');
-    } catch {
-      return;
-    }
-    if (/^populated 0$/m.test(events)) return;
-    if (Date.now() > deadline) {
-      throw new Error(`the scope of pasta, ${path}, still holds processes`);
-    }
-    await Bun.sleep(POLL_MS);
-  }
-};
+export type PastaScope = HelperScope;
 
 // Whether routes, as /proc/net/route and /proc/net/ipv6_route list them, go through an interface
 // other than the loopback, which pasta adds once it configured the namespace: a default one, or
@@ -206,6 +153,8 @@ export class Pasta {
     address?: PastaAddress,
     scope?: PastaScope,
     signal?: AbortSignal,
+    // The one port of the namespace's loopback forwarded to the host's: the proxy's.
+    forward?: { port: number; to: number },
   ): Promise<Pasta> {
     const { pid } = namespaces;
     if (!holdsNetwork(namespaces)) {
@@ -226,7 +175,7 @@ export class Pasta {
       '-u',
       'none',
       '-T',
-      'none',
+      forward === undefined ? 'none' : `${forward.port}:${forward.to}`,
       '-U',
       'none',
       ...(address === undefined
@@ -289,17 +238,7 @@ export class Pasta {
   private confirmScope(scope: PastaScope): void {
     const pid = this.child.pid as number;
     // pasta runs again as passt.avx2 where the processor has those instructions.
-    const comm = readFileSync(`/proc/${pid}/comm`, 'utf8').trim();
-    if (!PASTA_NAMES.test(comm)) throw new Error(`the process followed runs ${comm}, not pasta`);
-    const path = cgroupOf(pid);
-    if (path === null || !path.endsWith(`/${scope.unit}`)) {
-      throw new Error(`pasta does not run in the scope ${scope.unit}`);
-    }
-    this.cgroup = path;
-    const wrong = missingLimits(cgroupLimits(path), scope.limits);
-    if (wrong.length > 0) {
-      throw new Error(`the scope of pasta does not hold its limits: ${wrong.join('; ')}`);
-    }
+    this.cgroup = confirmScope(pid, scope, 'pasta', PASTA_NAMES);
   }
 
   // Ends a pasta that did not start as it must, with its scope, and rejects with why.
@@ -310,7 +249,7 @@ export class Pasta {
     const path = this.cgroup ?? (this.scope === undefined ? null : unitCgroup(this.scope.unit));
     if (path !== null) {
       try {
-        await emptied(path);
+        await emptied(path, 'pasta');
       } catch (left) {
         throw new Error(`${errorMessage(error)}; ${errorMessage(left)}`);
       }
@@ -325,7 +264,7 @@ export class Pasta {
     const timer = setTimeout(() => this.kill(), STOP_GRACE_MS);
     await this.ended;
     clearTimeout(timer);
-    if (this.cgroup !== null) await emptied(this.cgroup);
+    if (this.cgroup !== null) await emptied(this.cgroup, 'pasta');
   }
 
   private kill(signal: NodeJS.Signals = 'SIGKILL'): void {

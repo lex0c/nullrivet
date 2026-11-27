@@ -10,6 +10,7 @@ import { JobProjection } from './job-projection.ts';
 import { LineSplitter } from './lines.ts';
 import {
   encodeMessage,
+  environmentProblem,
   type HostToWorker,
   MAX_LINE_BYTES,
   PROTOCOL_VERSION,
@@ -54,6 +55,9 @@ export interface WorkerBackendOptions {
   prepareTimeoutMs?: number;
   // Gives up a start still under way, gated or not.
   signal?: AbortSignal;
+  // Variables the worker's commands inherit, sent on the protocol's descriptors once it is ready
+  // and before any call: a launcher's arguments and environment are readable by every user.
+  environment?: Record<string, string>;
 }
 
 const DEFAULT_READY_TIMEOUT_MS = 10_000;
@@ -163,6 +167,11 @@ export class WorkerBackend implements ToolBackend {
   // did not get ready is not left running.
   static start(options: WorkerBackendOptions): Promise<WorkerBackend> {
     const inputs = options.launch.inputs ?? [];
+    const environment =
+      options.environment === undefined ? null : environmentProblem(options.environment);
+    if (environment !== null) {
+      return Promise.reject(new Error(`the worker would refuse its environment: ${environment}`));
+    }
     const gated = options.launch.gate === true;
     const [file, ...args] = options.launch.command;
     if (file === undefined) return Promise.reject(new Error('the worker command is empty'));
@@ -208,8 +217,14 @@ export class WorkerBackend implements ToolBackend {
       this.onReady = (error) => {
         clearTimeout(timer);
         this.onReady = null;
-        if (error === null) resolve(this);
-        else reject(error);
+        if (error !== null) {
+          reject(error);
+          return;
+        }
+        if (options.environment !== undefined) {
+          this.send({ type: 'worker.environment', variables: options.environment });
+        }
+        resolve(this);
       };
     });
   }

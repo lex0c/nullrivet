@@ -1,10 +1,10 @@
 # Sandbox and engagement scope
 
-Status: phases 1 to 4 are implemented: the ToolBroker; the worker with the `inspect` profile,
-background jobs included; the `workspace` profile with its ChangeSet; and the `security` profile,
-with the network of an engagement's scope within its window and the resource limits of every
-profile. The allowlisting HTTP proxy (4b), the evidence log (phase 5) and the virtual machine
-backend (phase 6) are not. The document records the design, the facts checked on a Linux host
+Status: phases 1 to 4b are implemented: the ToolBroker; the worker with the `inspect` profile,
+background jobs included; the `workspace` profile with its ChangeSet; the `security` profile, with
+the network of an engagement's scope within its window and the resource limits of every profile;
+and the proxy that authorizes names. The evidence log (phase 5) and the virtual machine backend
+(phase 6) are not. The document records the design, the facts checked on a Linux host
 while building it, and the decisions taken on it.
 
 ## Purpose
@@ -149,15 +149,18 @@ does not start.
 type HostToWorker =
   | { type: 'tool.execute'; id: string; name: string; input: Record<string, unknown>; cwd: string }
   | { type: 'tool.cancel'; id: string }
-  | { type: 'worker.shutdown' };
+  | { type: 'jobs.stop' }
+  | { type: 'worker.shutdown' }
+  | { type: 'worker.environment'; variables: Record<string, string> };
 
 type WorkerToHost =
-  | { type: 'worker.ready'; protocol: 1; tools: string[] }
+  | { type: 'worker.ready'; protocol: 3; tools: string[] }
   | { type: 'tool.result'; id: string; result: ToolResult }
   | { type: 'worker.error'; message: string }
   | { type: 'job.started'; jobId: string }
   | { type: 'job.event'; seq: number; event: JobEvent }
-  | { type: 'job.shown'; jobId: string };
+  | { type: 'job.shown'; jobId: string }
+  | { type: 'jobs.stopped'; running: number };
 ```
 
 - **Correlation.** The host generates the ids, unique per session. Each `tool.execute` gets exactly
@@ -173,6 +176,12 @@ type WorkerToHost =
   host without stopping it.
 - **Readiness.** The host sends nothing before `worker.ready`, whose tool list must match what the
   profile allows, within 10 s of the start.
+- **Environment.** `worker.environment`, sent once the worker is ready and before any call, sets
+  variables its commands inherit: those of the proxy of the `security` profile alone, which carry
+  its credential. A launcher's arguments are readable by every user of the host, and Bubblewrap
+  takes the sandbox's environment as arguments (`--setenv`), held for the whole session: the
+  credential goes on the protocol's descriptors instead. Any other name, or a value over 64 KiB,
+  stops the worker; the host checks the variables the same way before it starts one.
 - **Cancellation.** `tool.cancel` aborts the call's signal in the worker, which still answers with
   the interrupted result. A cancelled command gets SIGTERM, SIGKILL after the 2 s kill grace, and up
   to the same grace for its output to close, so the host waits twice the grace plus 3 s (7 s).
@@ -741,7 +750,8 @@ interface. Checked: a connection from inside fails at once with "Network is unre
 In `security`, passt's `pasta` connects the namespace to the host network once the rules are in
 place. Without it the profile does not start. It runs in the namespaces' user namespace, by the
 name `pasta`, which chooses its mode, with nothing forwarded in either direction or protocol
-(`-t none -u none -T none -U none`), without DHCP, and without mapping the gateway's address to
+(`-t none -u none -T none -U none`) but the proxy's port when the scope has names reached through
+it, as described below, without DHCP, and without mapping the gateway's address to
 the host's loopback (`--no-map-gw`). What else pasta offers stays off by default and is not
 turned on: forwarding DNS (`--dns-forward`), mapping a guest address to the host's
 (`--map-guest-addr`), and a control socket (`-c`); DHCPv6 is off as well. What stays on: answering
@@ -783,9 +793,8 @@ container whose output was otherwise blocked, which would leave that channel ope
 An authorized address is not an authorized host name. A name that resolves to a shared address (a
 CDN) authorizes every site served from that address, and the session shows at start the addresses
 each name authorized. When the engagement requires the distinction, the address allowlist does not
-provide it, and phase 4b does: an allowlisting HTTP proxy on the host, matched on the requested
-host name. A name handled by the proxy gets no rule of its own, since a tool could otherwise reach
-the address without the proxy.
+provide it; the proxy does, as described below. A name handled by the proxy gets no rule of its
+own, since a tool could otherwise reach the address without the proxy.
 
 `/scope refresh` resolves the names again and replaces the ruleset, for targets whose addresses
 change, as one logical step: every name is resolved and checked first, and a failure changes
@@ -796,6 +805,145 @@ not wait for them, and none puts anything in force after it. The sandbox's `/etc
 into a directory of the host bound read-only, `/etc/nullrivet`, since a file bound by itself would
 keep the one it was bound to after a rename; a new lookup reads the new one, and a program that
 caches answers keeps its own, which the ruleset still holds to the scope.
+
+### Names reached through the proxy
+
+An entry of the engagement file marked `"via": "proxy"` authorizes a host name rather than its
+addresses. The proxy runs on the host side and checks, for each connection, the name the
+connection opens with:
+
+- `CONNECT name:port`, then a TLS ClientHello whose server name is the same name: one host name in
+  the server name extension, without Encrypted Client Hello (its code, those of its drafts, and that
+  of the encrypted server name before it), which would hide the real name behind a front, and
+  without a repeated extension. The ClientHello must arrive whole in the first record; clients send
+  it so. Checked with curl 8.22: `CONNECT app.example:443`, then a ClientHello of 1571 bytes in one
+  record, with the name and without ECH. Chromium sends an ECH extension of no use (GREASE) when a
+  server has no ECH configuration, which the proxy cannot tell from one in use: a browser reaches a
+  name of the proxy with ECH turned off, as Chromium is with
+  `--disable-features=EncryptedClientHello`. A tunnel that does not start with TLS is refused: plain
+  HTTP goes as a request to the proxy.
+- a plain HTTP request in absolute form, `GET http://name[:port]/...`, with `Host` equal to the
+  URL's host and port. The proxy sends the target one request on its connection, rebuilt: in origin
+  form, with the client's fields but the hop-by-hop ones, then the `Host` and the `Content-Length`
+  it validated and `Connection: close`. The body is exactly the bytes declared, counted inside each
+  chunk; what follows, a pipelined request included, never reaches the target, and the client is
+  not read further. What two parsers could read two ways is refused before anything is sent: lines
+  not ending in CRLF, a folded field, two `Host` or two `Content-Length`, a length of more than ten
+  digits or 1 GiB, `Transfer-Encoding`, `Upgrade`, an `Expect` other than `100-continue`, and a
+  `Connection` naming anything but `close` and `keep-alive`, since dropping a field it names, as
+  `Content-Length` or `Host`, would change how the target frames or routes what the proxy checked.
+  `Expect: 100-continue` is passed on, and the answer relayed from the start, so the target's
+  `100 Continue` reaches the client.
+
+Then the proxy resolves the name with the host's resolver, and every address of the answer must be
+on the public internet (the same ranges as for a name reached directly, and the addresses of this
+host, read again each time), not denied, and not authorized directly on the port; one that is not
+refuses the connection. It connects to the address it checked, never to the name, within ten
+seconds, and only then answers `200`. No byte of the client's reaches the target before the
+ClientHello or the request was checked. A refusal answers `403`, or `407` without the credential,
+with the reason in the body, as `nullrivet proxy: other.example is not reached through the proxy`,
+so that the model reads why.
+
+**What it guarantees:** an entry through the proxy creates no direct authorization; every connection
+through it is held to the name, the port and each address the name resolves to; and it goes to the
+address checked. **What it guarantees on a condition:** a name of the proxy has no direct way while
+no direct authorization of the scope in force covers its addresses. The start and every `/scope
+refresh` refuse such an overlap, with the name's addresses of that moment, whether a cidr or a name
+reached directly makes it: a name reached directly that moves onto the address of a name of the
+proxy stops the refresh, and nothing changes. While a refresh puts a new scope in force, the proxy
+holds the old one and the new one together, and refuses an address either authorizes directly; the
+refresh reports the addresses the names of the proxy moved to as well. The proxy refuses a
+connection to such an address, and the session warns once per name and address. What nothing
+prevents: when the name of the proxy itself comes to resolve to an address the scope authorizes
+directly, that address stays reached directly, as the operator authorized it. **What it does not
+guarantee:** that every request inside a TLS tunnel is for the name. The proxy sees the name a
+tunnel opens with, not the requests inside: HTTP/2 can send requests for another authority the
+certificate covers on the same connection, and a server that routes by the inner `Host` serves
+another site. Past the ClientHello, a tunnel is not inspected; intercepting TLS would need a
+certificate authority in the sandbox and would alter the evidence. Nor does it guarantee that a
+front behind the name does not route a plain request by a field of the client's: `Forwarded`,
+`X-Forwarded-Host` and the like pass as the client sent them, since testing an application sends
+them on purpose.
+
+**How the sandbox reaches it.** The proxy listens on the host's loopback, on a port the system
+chooses, and pasta forwards port 3128 of the sandbox's loopback to it (`-T 3128:<port>`). pasta
+forwards to the host's loopback at the address the connection was for: measured, `127.0.0.2:3128`
+and `[::1]:3128` in the sandbox reached a service of the host on `127.0.0.2` and `::1` at that port,
+and the whole of 127.0.0.0/8 is local without configuration. pasta refuses a target address for
+`-T`, so the ruleset holds the port: ahead of the loopback's accept, a packet to port 3128 that is
+IPv6 or for another address than 127.0.0.1 is refused, and so is any outside the window. Tested on a
+real namespace with pasta: the proxy is reached at 127.0.0.1 alone, no other service of the host on
+its port, and nothing before the window. The sandbox's HTTP clients find it in `HTTP_PROXY`,
+`HTTPS_PROXY` and their lower-case forms, `http://nullrivet:<credential>@127.0.0.1:3128`; `NO_PROXY`
+lists the loopback, the names reached directly with their addresses, and the networks reached
+directly, up to 16 KiB, past which the session warns of what it leaves out: an HTTP client sends
+those to the proxy, which refuses them, unless told not to use it. Clients match a `NO_PROXY` name
+against every name that ends with it, Python's requests with no dot between: a name reached directly
+that a name of the proxy ends with, as `acme.example` for `api.acme.example`, is left out, its
+addresses kept, and the session says so. The names of the proxy are in neither the ruleset nor
+`/etc/hosts`, so the proxy is their only way.
+
+**Its credential.** Every process of every user of the host reaches the host's loopback, so the
+proxy takes only the credential the sandbox was given: 32 random bytes in hexadecimal, compared in
+constant time, removed before anything is sent on. It reaches the sandbox's commands on the worker's
+protocol (`worker.environment`), and the proxy on its standard input; it is in no command line
+nullrivet makes, and in no environment but those of the sandbox's commands. Tested: with a session
+running, no `/proc/*/cmdline` of the user's processes holds it, and no `/proc/*/environ` outside the
+sandbox's PID namespace. A command that passes it as an argument, as a tool given `--proxy
+"$HTTPS_PROXY"`, shows it in its own command line, which every user of the host can read where
+`/proc` is mounted without `hidepid`: such a user could use the proxy, within the scope, until the
+session ends. Every user of the host also reaches the proxy's port, and its 256 connections count
+before the credential is checked: a local user who holds them blocks the proxy, ten seconds at a
+time.
+
+**Its process.** The proxy handles what the sandbox sends, so it runs apart from the host's process,
+which holds the provider keys: the same program, started with `--nullrivet-network-proxy`, in a
+Bubblewrap of its own and a scope of its own. The Bubblewrap shares the host's network, to resolve
+and connect, and nothing else: `/usr` and its links, the files the resolver reads
+(`/etc/resolv.conf` and its target, `hosts`, `nsswitch.conf`, `gai.conf`, `host.conf`,
+`ld.so.cache`, `localtime`), its own program, `/proc`, `/dev` and an empty `/tmp`; no capability, no
+user namespace, a session of its own. It is started through `env -i` with `PATH` and `TZ` alone. The
+network namespace it shares holds the host's abstract Unix sockets too, the X server's among them,
+which takes any local client: the sandbox's seccomp program applies, which refuses Unix sockets, and
+the resolver does without them. Measured, under that program: it resolves as the host does, the same
+answers for the same names, it reads the interfaces and connects over TCP, the X server's socket is
+out of its reach, and its root holds neither the home directory nor the project. Its scope takes
+`TasksMax=256` (the runtime starts threads by the number of processors: twenty at rest on twelve),
+`MemoryMax` of 256 MiB, no swap, `CPUWeight=20` and `CPUQuota=50%`, a bound whatever else runs; its
+memory comes out of the sandbox's three quarters, as pasta's does. The host checks that the process
+it follows is Bubblewrap, in that scope, holding those limits, as for pasta; its stop ends its
+input, which closes every connection, kills it after two seconds, and waits for the scope to be
+empty. A proxy that ends by itself closes the network, as pasta's end does, and the session says so:
+its port of the host is free then, while pasta still forwards the sandbox's there, and whatever took
+it would receive what the sandbox sends the proxy, its credential included. Tested: with the proxy
+killed and its port taken by another server, nothing of the sandbox reached that server. For the
+same reason, a close, the end of the window and a start given up close the network, pasta included,
+before they stop the proxy.
+
+**Its window.** The kernel refuses the proxy's port outside the window, as any destination. The
+connections the proxy opens leave from the host's network, which the sandbox's ruleset does not
+see: the proxy checks the window when a connection arrives and before it relays each chunk, in
+both directions, and the end of the window stops it with the network. A chunk already written to a
+socket before the end may still reach the target, as for pasta. Tested: a tunnel that wrote the
+time every 10 ms across the end of the window, and no time written after it reached the target.
+
+**Its limits.** 256 connections at once, and as many lookups under way: a lookup cannot be
+cancelled, so it counts until the resolver answers it, its client gone or not, past the ten seconds
+the proxy waits for it, and a client gone before its connection to the target opened gets none. 16
+KiB and ten seconds for a request head, read in time linear in its length however it is cut; ten
+seconds for the resolver, for the connection to the target, all the addresses of a name together,
+each checked against the scope again right before it is tried, and for the ClientHello; five minutes
+without a byte in either direction closes a connection, one whose target keeps it open after a plain
+request included. It relays with backpressure, pausing a side while the other's buffer is full. An
+error accepting a connection, as when descriptors run out, costs that connection only, and is told.
+The rate applies per address **on each way**: the kernel counts what the sandbox opens directly, and
+the proxy what it opens, with a bucket per address of burst N refilled at N per second, 65,536
+addresses at most, past which a new one is refused. An address authorized directly on one port and
+through the proxy on another can receive both rates; one budget for both would need the proxy and
+nft to share a count.
+
+Wildcard names, WebSocket over plain HTTP, HTTP/2 to the proxy itself and the interception of TLS
+are left out.
 
 ### Raw sockets
 
@@ -827,6 +975,13 @@ The evidence log of phase 5 adds `"evidence": { "dir": "./evidence" }`; until th
 refused.
 
 - `deny` wins over `allow`. A file without `allow` entries leaves the sandbox without network.
+- `"via": "proxy"` on a host entry, as `{ "host": "app.acme.example", "ports": [443], "via":
+  "proxy" }`, reaches that name through the proxy alone, as described under Names reached through
+  the proxy. `via` takes only `"proxy"`, and only on a host: a cidr is reached directly. A name is
+  reached one way: given once with `via` and once without, the file is refused. Such a name must
+  resolve to public addresses the scope does not deny, every address of the answer, whatever a cidr
+  of the file holds, since a cidr that authorized one would open the direct way to it; and none of
+  its addresses may be authorized directly on one of its ports.
 - `rate` applies per destination address.
 - Outside `window`, the kernel refuses every packet and the broker refuses commands before they
   start. When the window ends, the network closes for good and the running commands and jobs are
@@ -864,13 +1019,13 @@ refused.
 - A name that resolves to an address off the public internet stops the session too, unless a `cidr`
   of the file holds that address: in `deny`, or in `allow` with every port of the name, so that an
   answer cannot open ports the `cidr` does not. Each entry of a name is held to it with its own
-  ports, a name given twice included. An authorization by name must not reach the inside
-  by an answer of DNS, as a cloud's metadata service at `169.254.169.254`. These are the
-  unspecified, private, shared, loopback, link-local, multicast and reserved ranges of IPv4; of
-  IPv6 the unspecified and loopback addresses, the IPv4-compatible, IPv4-mapped, NAT64
-  (`64:ff9b::/96`, `64:ff9b:1::/48`), 6to4, unique local, site-local, link-local and multicast
-  ranges, the ones that hold an IPv4 address included; and the addresses of this host. A private
-  network is a common target: it is authorized by naming it.
+  ports, a name given twice included. An authorization by name must not reach the inside by an
+  answer of DNS, as a cloud's metadata service at `169.254.169.254`. These are the unspecified,
+  private, shared, loopback, link-local, multicast and reserved ranges of IPv4; of IPv6 the
+  unspecified and loopback addresses, the IPv4-compatible, IPv4-mapped, IPv4-translated, NAT64
+  (`64:ff9b::/96`, `64:ff9b:1::/48`), 6to4, Teredo, unique local, site-local, link-local and
+  multicast ranges, the ones that hold an IPv4 address included; and the addresses of this host. A
+  private network is a common target: it is authorized by naming it.
 - At the start, and in the system prompt, the scope is stated as facts the host validated and
   resolved: each network and name with its ports and, for a name, the addresses it authorized;
   what is denied; the rate; the window. The system prompt adds that every other destination is
@@ -968,7 +1123,9 @@ and `passt.avx2`, which it runs again as), in that scope, which holds those limi
 did not run it in place, or a scope that does not hold them, ends the start. Its stop ends pasta,
 then kills what is left of its scope with `cgroup.kill` and waits for `populated 0` in its
 `cgroup.events`, or for the scope's removal, five seconds at most: a stop that cannot confirm it
-fails, and the session says so. The network helpers, nsenter and nft, live for one command each,
+fails, and the session says so. The proxy of the names reached through it has a scope of its own
+too, `nullrivet-proxy-<pid>-<n>.scope`, with the limits given under Names reached through the
+proxy. The network helpers, nsenter and nft, live for one command each,
 under a ten-second timeout, and run outside it, each in a process group of its own: at its timeout,
 or when the preparation is given up, the group is killed whole, so that nothing a helper started
 holds its output open. A start given up within its thirty seconds undoes what it made, and says
@@ -1062,7 +1219,14 @@ hard alike.
       running a program the repository named for signatures, and the gaps listed in this
       document, all fixed and tested.
 
-   4b: the allowlisting HTTP proxy.
+   4b: the proxy that authorizes names, done, in the order two reviews of its plan set: the parsers
+   of the ClientHello and of the request head; the proxy, tested in the host's process; the
+   engagement file's `via` and the rule against overlaps, at the start and on a refresh; the
+   credential on the worker's protocol, before anything was wired to the launch; the proxy's
+   process in its Bubblewrap and scope, the forwarded port and its rules; the session. Then two
+   reviews, of the proxy and of its place in the sandbox, found a port the proxy left that pasta
+   still led to, the abstract Unix sockets its network shares, a connection opened for a client
+   gone during its lookup, and the gaps listed in this document, all fixed and tested.
 5. **Evidence log**, written by the host, with credentials removed from the arguments: the tool
    calls, and the network's events, as described under Evidence log.
 6. **Virtual machine backend** for macOS and for raw-socket laboratories.

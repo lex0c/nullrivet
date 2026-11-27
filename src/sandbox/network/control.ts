@@ -52,11 +52,19 @@ export interface NetworkOptions {
   address?: PastaAddress;
   // A scope of its own for pasta.
   pasta?: PastaScope;
+  // A port of the namespace's loopback that pasta forwards to a port of the host's, where the
+  // proxy listens.
+  forward?: Forward;
   // Gives up the preparation: its helpers are killed, and what it made undone.
   signal?: AbortSignal;
 }
 
 const GROUP_RANGE = '/proc/sys/net/ipv4/ping_group_range';
+
+export interface Forward {
+  port: number;
+  to: number;
+}
 
 const message = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
@@ -73,6 +81,7 @@ export class NetworkControl {
     private readonly pasta: Pasta,
     // The table the scope in force is in.
     private active: ScopeTable,
+    private readonly proxyPort: number | undefined,
   ) {
     void pasta.ended.then((reason) => {
       if (this.closing === null) this.failed = reason;
@@ -91,7 +100,7 @@ export class NetworkControl {
     let pasta: Pasta;
     try {
       const [first] = SCOPE_TABLES;
-      await install(tools, namespaces, NOTHING, first, null, signal);
+      await install(tools, namespaces, NOTHING, first, null, options.forward?.port, signal);
       // Every group of the namespace, which maps only the user's: its processes may open ICMP
       // echo sockets. The range is read in the namespace's ids.
       await runInNamespaces(
@@ -101,12 +110,25 @@ export class NetworkControl {
         '',
         signal,
       );
-      pasta = await Pasta.start(tools, namespaces, options.address, options.pasta, signal);
+      pasta = await Pasta.start(
+        tools,
+        namespaces,
+        options.address,
+        options.pasta,
+        signal,
+        options.forward,
+      );
     } catch (error) {
       releaseNamespaces(namespaces);
       throw error;
     }
-    const control = new NetworkControl(tools, namespaces, pasta, SCOPE_TABLES[0]);
+    const control = new NetworkControl(
+      tools,
+      namespaces,
+      pasta,
+      SCOPE_TABLES[0],
+      options.forward?.port,
+    );
     try {
       await control.replace(scope, signal);
     } catch (error) {
@@ -133,7 +155,15 @@ export class NetworkControl {
       if (this.closing !== null) throw new Error('the network was closed');
       try {
         const next = SCOPE_TABLES.find((table) => table !== this.active) as ScopeTable;
-        await install(this.tools, this.namespaces, scope, next, this.active, signal);
+        await install(
+          this.tools,
+          this.namespaces,
+          scope,
+          next,
+          this.active,
+          this.proxyPort,
+          signal,
+        );
         this.active = next;
       } catch (error) {
         if (this.closing !== null) throw new Error('the network was closed');
@@ -311,9 +341,10 @@ const install = async (
   scope: Scope,
   table: ScopeTable,
   previous: ScopeTable | null,
+  proxyPort: number | undefined,
   signal?: AbortSignal,
 ): Promise<void> => {
-  await withScripts(rulesetFor(scope, table, previous), async (paths) => {
+  await withScripts(rulesetFor(scope, table, previous, proxyPort), async (paths) => {
     for (const path of paths) {
       await runInNamespaces(tools, namespaces, [tools.nft, '-f', path], '', signal);
     }

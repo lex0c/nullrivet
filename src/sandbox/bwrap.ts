@@ -9,7 +9,7 @@ import { inNewNamespaces } from './network/namespace.ts';
 import { HOST_TO_WORKER_FD, WORKER_TO_HOST_FD } from './protocol.ts';
 import { type SyscallArch, sandboxArch, seccompProgram } from './seccomp.ts';
 import { gateDescriptors, type WorkerLaunch } from './worker-backend.ts';
-import { SANDBOX_WORKER_DIR, sandboxedWorker } from './worker-command.ts';
+import { SANDBOX_WORKER_DIR, type SandboxedWorker, sandboxedWorker } from './worker-command.ts';
 
 type Env = Record<string, string | undefined>;
 
@@ -251,6 +251,71 @@ const hostEntryArgs = (path: string): string[] => {
     // Absent on this host.
   }
   return [];
+};
+
+// What the proxy's resolver reads, the target of /etc/resolv.conf included where it is a link.
+const RESOLVER_FILES = [
+  '/etc/resolv.conf',
+  '/etc/hosts',
+  '/etc/nsswitch.conf',
+  '/etc/gai.conf',
+  '/etc/host.conf',
+  '/etc/ld.so.cache',
+  '/etc/localtime',
+];
+
+// The proxy of the security profile runs in a sandbox of its own. It shares the host's network, to
+// resolve names and reach the targets, and sees none of the user's files: only the system, what
+// its resolver reads, and its own program. The network namespace holds the abstract Unix sockets
+// too, the X server's among them: the sandbox's seccomp program, read from `seccompFd`, refuses
+// Unix sockets, which the resolver does without.
+export const proxyBwrapArgs = (proxy: SandboxedWorker, seccompFd: number): string[] => {
+  let resolvConf: string | null = null;
+  try {
+    resolvConf = realpathSync('/etc/resolv.conf');
+  } catch {
+    // No resolver configuration: the proxy resolves through /etc/hosts alone, as the host does.
+  }
+  return [
+    '--unshare-all',
+    '--share-net',
+    '--unshare-user',
+    '--disable-userns',
+    '--cap-drop',
+    'ALL',
+    '--die-with-parent',
+    '--new-session',
+    '--clearenv',
+    '--setenv',
+    'PATH',
+    SANDBOX_PATH,
+    '--setenv',
+    'TZ',
+    'UTC',
+    '--ro-bind',
+    '/usr',
+    '/usr',
+    ...ROOT_LINKS.flatMap(hostEntryArgs),
+    ...RESOLVER_FILES.flatMap((path) => ['--ro-bind-try', path, path]),
+    ...(resolvConf === null || resolvConf === '/etc/resolv.conf'
+      ? []
+      : ['--ro-bind', resolvConf, resolvConf]),
+    '--proc',
+    '/proc',
+    '--dev',
+    '/dev',
+    '--tmpfs',
+    '/tmp',
+    ...proxy.mounts.flatMap(({ source, target }) => ['--ro-bind', source, target]),
+    '--seccomp',
+    String(seccompFd),
+    '--chdir',
+    '/',
+    '--remount-ro',
+    '/',
+    '--',
+    ...proxy.command,
+  ];
 };
 
 export interface LaunchOptions {

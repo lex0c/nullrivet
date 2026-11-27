@@ -64,6 +64,27 @@ describe("pasta's readiness", () => {
 });
 
 describe('the ruleset of a scope', () => {
+  test("holds the proxy's port to 127.0.0.1 and to the window, ahead of the loopback", () => {
+    const window = {
+      from: new Date('2026-11-20T12:00:00Z'),
+      until: new Date('2026-11-20T21:00:00Z'),
+    };
+    const lines = rulesetFor({ allow: [], deny: [], window }, 'nullrivet_a', null, 3128)
+      .join('')
+      .split('\n')
+      .map((line) => line.trim());
+    const out = lines.indexOf('oif "lo" accept');
+    expect(lines.slice(out - 4, out)).toEqual([
+      'oif "lo" meta nfproto ipv6 tcp dport 3128 goto refuse',
+      'oif "lo" ip daddr != 127.0.0.1 tcp dport 3128 goto refuse',
+      'oif "lo" tcp dport 3128 meta time < "2026-11-20 12:00:00" goto refuse',
+      'oif "lo" tcp dport 3128 meta time >= "2026-11-20 21:00:00" goto refuse',
+    ]);
+    expect(rulesetFor({ allow: [], deny: [] }, 'nullrivet_a', null).join('')).not.toContain(
+      'dport 3128',
+    );
+  });
+
   test('refuses packets outside its window, inward to the second, in both directions', () => {
     const text = generate({
       allow: [],
@@ -1071,6 +1092,80 @@ describe.if(networkTestsRun && process.platform === 'linux')('the ruleset on rea
     // One flow: its ten datagrams. Ten flows, one socket each: two, the rate.
     expect(result).toBe('10 2');
   });
+});
+
+describe.if(networkTestsRun && process.platform === 'linux')("the proxy's port", () => {
+  const t = (): NetworkTools => {
+    if (typeof tools === 'string') throw new Error(tools);
+    if (hostAddress === undefined) throw new Error('the host has no IPv4 address to test with');
+    return tools;
+  };
+  // A service of the host on each loopback address, all on one port, each saying which it is.
+  const services = async (): Promise<number> => {
+    const listen = (host: string, port: number) =>
+      new Promise<Server>((resolve, reject) => {
+        const server = createServer((socket) => socket.end(`${host}\n`));
+        server.once('error', reject);
+        server.listen(port, host, () => resolve(server));
+      });
+    const first = await listen('127.0.0.1', 0);
+    const port = (first.address() as { port: number }).port;
+    const others = await Promise.all([listen('127.0.0.2', port), listen('::1', port)]);
+    cleanups.push(() => {
+      for (const server of [first, ...others]) server.close();
+    });
+    return port;
+  };
+  const PROBE = [
+    'import socket',
+    'for host in ("127.0.0.1", "127.0.0.2", "::1"):',
+    '    try:',
+    '        s = socket.create_connection((host, 3128), timeout=3)',
+    '        print(host, s.recv(64).decode().strip() or "nothing")',
+    '    except OSError as e:',
+    '        print(host, type(e).__name__)',
+  ].join('\n');
+
+  test('reaches the proxy at 127.0.0.1 alone, and no other service of the host on its port', async () => {
+    const s = await servers();
+    cleanups.push(s.close);
+    const to = await services();
+    const { sandbox } = await prepared(t(), s, 'probe', hostScope(s), {
+      forward: { port: 3128, to },
+    });
+    const seen = await runInNamespaces(t(), pinned(sandbox.pid), [
+      t().sh,
+      '-c',
+      `python3 -I -c '${PROBE}'`,
+    ]);
+    // Without the ruleset, pasta forwards 127.0.0.2 and ::1 to the same addresses of the host.
+    expect(seen).toBe(
+      '127.0.0.1 127.0.0.1\n127.0.0.2 ConnectionRefusedError\n::1 ConnectionRefusedError\n',
+    );
+  }, 60_000);
+
+  test('refuses the proxy outside the window, in the kernel', async () => {
+    const s = await servers();
+    cleanups.push(s.close);
+    const to = await services();
+    const window = {
+      from: new Date(Date.now() + 3_600_000),
+      until: new Date(Date.now() + 7_200_000),
+    };
+    const { sandbox } = await prepared(
+      t(),
+      s,
+      'probe',
+      { ...hostScope(s), window },
+      { forward: { port: 3128, to } },
+    );
+    const seen = await runInNamespaces(t(), pinned(sandbox.pid), [
+      t().sh,
+      '-c',
+      `python3 -I -c '${PROBE}'`,
+    ]);
+    expect(seen.split('\n')[0]).toBe('127.0.0.1 ConnectionRefusedError');
+  }, 60_000);
 });
 
 describe.if(networkTestsRun && process.platform === 'linux')('the window of a scope', () => {

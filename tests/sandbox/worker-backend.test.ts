@@ -4,6 +4,7 @@ import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BackendLostError, executeToolCall } from '../../src/agent/tool-broker.ts';
+import { parseHostMessage } from '../../src/sandbox/protocol.ts';
 import { WorkerBackend, type WorkerBackendOptions } from '../../src/sandbox/worker-backend.ts';
 import { workerCommand } from '../../src/sandbox/worker-command.ts';
 import { BUILTIN_TOOLS } from '../../src/tools/index.ts';
@@ -76,6 +77,55 @@ describe.if(linux)('WorkerBackend with the real worker', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  test('gives its commands the variables the host sends on the protocol', async () => {
+    const proxy = 'http://nullrivet:0123abcd@127.0.0.1:3128';
+    const backend = track(
+      await WorkerBackend.start({
+        ...realWorker(['bash']),
+        environment: { HTTPS_PROXY: proxy, NO_PROXY: 'direct.example' },
+      }),
+    );
+    const ran = await backend.execute(
+      tool('bash'),
+      { command: 'echo "$HTTPS_PROXY $NO_PROXY"' },
+      context(),
+    );
+    expect(ran.content).toContain(`${proxy} direct.example`);
+  });
+
+  test('starts no worker whose environment the worker would refuse', async () => {
+    await expect(
+      WorkerBackend.start({
+        ...realWorker(['bash']),
+        environment: { NO_PROXY: 'a'.repeat(64 * 1024 + 1) },
+      }),
+    ).rejects.toThrow(
+      'the worker would refuse its environment: NO_PROXY is longer than 65536 characters',
+    );
+    await expect(
+      WorkerBackend.start({ ...realWorker(['bash']), environment: { PATH: '/tmp' } }),
+    ).rejects.toThrow(
+      'the worker would refuse its environment: PATH is not a variable the worker takes',
+    );
+  });
+
+  test('takes from the host only the variables of the proxy', () => {
+    const line = (variables: unknown) =>
+      parseHostMessage(JSON.stringify({ type: 'worker.environment', variables }));
+    expect(line({ HTTP_PROXY: 'a', https_proxy: 'b', no_proxy: 'c' })).toEqual({
+      type: 'worker.environment',
+      variables: { HTTP_PROXY: 'a', https_proxy: 'b', no_proxy: 'c' },
+    });
+    expect(line({ LD_PRELOAD: '/tmp/x.so' })).toBeNull();
+    expect(line({ PATH: '/tmp' })).toBeNull();
+    expect(line({ HTTP_PROXY: 1 })).toBeNull();
+    expect(line({ HTTP_PROXY: 'a\0b' })).toBeNull();
+    expect(line(['HTTP_PROXY'])).toBeNull();
+    expect(
+      parseHostMessage(JSON.stringify({ type: 'worker.environment', variables: {}, more: 1 })),
+    ).toBeNull();
   });
 
   test('refuses to start when the worker offers other tools than expected', async () => {

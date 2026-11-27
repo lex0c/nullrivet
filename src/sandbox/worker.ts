@@ -235,6 +235,9 @@ export const runWorker = (argv: readonly string[]): void => {
         case 'worker.shutdown':
           stop(0);
           return;
+        case 'worker.environment':
+          Object.assign(process.env, message.variables);
+          return;
       }
     },
     () => fail('a host message exceeds the line limit'),

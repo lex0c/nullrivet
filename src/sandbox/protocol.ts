@@ -7,8 +7,10 @@ import type { ToolResult } from '../tools/types.ts';
 // The entry point runs the sandbox worker instead of the CLI when its first argument is this. It
 // is not an option of the CLI, so no prompt or flag can collide with it.
 export const WORKER_ARGUMENT = '--nullrivet-sandbox-worker';
+// Likewise for the proxy of the security profile.
+export const PROXY_ARGUMENT = '--nullrivet-network-proxy';
 
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 // One JSON object per line in each direction. A longer line is a protocol violation.
 export const MAX_LINE_BYTES = 8 * 1024 * 1024;
@@ -39,7 +41,34 @@ export type HostToWorker =
   | { type: 'tool.cancel'; id: string }
   // Ends every background job; the worker answers jobs.stopped once they have ended, or could not.
   | { type: 'jobs.stop' }
-  | { type: 'worker.shutdown' };
+  | { type: 'worker.shutdown' }
+  // Variables the worker's commands inherit, sent before any call. They reach the worker this way,
+  // not by the launcher's arguments, where every user of the host can read them.
+  | { type: 'worker.environment'; variables: Record<string, string> };
+
+// The variables a host may set in the worker this way: those of the proxy of the security
+// profile, whose credential must not appear in a command line.
+export const WORKER_ENVIRONMENT_NAMES: ReadonlySet<string> = new Set([
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'http_proxy',
+  'https_proxy',
+  'NO_PROXY',
+  'no_proxy',
+]);
+const MAX_VARIABLE_CHARS = 64 * 1024;
+
+// Why the worker would refuse these variables, or null: the host checks before it starts one.
+export const environmentProblem = (variables: Record<string, unknown>): string | null => {
+  for (const [name, text] of Object.entries(variables)) {
+    if (!WORKER_ENVIRONMENT_NAMES.has(name)) return `${name} is not a variable the worker takes`;
+    if (typeof text !== 'string' || text.includes('\0')) return `${name} is not a text`;
+    if (text.length > MAX_VARIABLE_CHARS) {
+      return `${name} is longer than ${MAX_VARIABLE_CHARS} characters`;
+    }
+  }
+  return null;
+};
 
 // Background jobs run in the worker, which sends each fact as it happens: a job started, became
 // ready or ended (with a sequence number), or was shown to the model by a tool.
@@ -57,7 +86,7 @@ export type JobMessage = Extract<WorkerToHost, { type: 'job.started' | 'job.even
 
 type Parsed<T> = { ok: true; message: T } | { ok: false; reason: string };
 
-const isPlainObject = (value: unknown): value is Record<string, unknown> =>
+export const isPlainObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' &&
   value !== null &&
   !Array.isArray(value) &&
@@ -363,6 +392,17 @@ export const parseHostMessage = (line: string): HostToWorker | null => {
       return hasExactKeys(value, ['type']) ? { type: 'jobs.stop' } : null;
     case 'worker.shutdown':
       return hasExactKeys(value, ['type']) ? { type: 'worker.shutdown' } : null;
+    case 'worker.environment': {
+      const { variables } = value;
+      if (
+        !hasExactKeys(value, ['type', 'variables']) ||
+        !isPlainObject(variables) ||
+        environmentProblem(variables) !== null
+      ) {
+        return null;
+      }
+      return { type: 'worker.environment', variables: variables as Record<string, string> };
+    }
     default:
       return null;
   }

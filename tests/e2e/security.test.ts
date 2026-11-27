@@ -136,6 +136,26 @@ describe.if(overlayTestsRun && networkTestsRun && cgroupTestsRun)('--sandbox sec
     expect(server.requests.length).toBe(before);
   }, 30_000);
 
+  test('does not start when a name reached through the proxy resolves off the public internet', async () => {
+    const { home, project, file } = setUp({
+      scope: { allow: [{ host: 'localhost', ports: [80], via: 'proxy' }] },
+    });
+    server.handle(() => ({ text: 'never asked' }));
+    const before = server.requests.length;
+    const cli = startCli(['--sandbox', 'security', '--engagement', file, 'look'], {
+      env: cliEnv(server, { HOME: home, ...bus() }),
+      cwd: project,
+    });
+    const { code } = await cli.finished;
+    expect(code).toBe(1);
+    const errors = cli.events.filter((e) => e.type === 'error').map((e) => String(e.message));
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatch(
+      /^names reached through the proxy must resolve to public addresses the scope does not deny: localhost resolves to (127\.0\.0\.1|::1), not on the public internet \(loopback\)/,
+    );
+    expect(server.requests.length).toBe(before);
+  }, 30_000);
+
   test.skipIf(Bun.which('python3') === null)(
     'shows and refreshes its scope in the interactive session',
     async () => {
