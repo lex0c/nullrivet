@@ -6,14 +6,16 @@ import { createServer, type Server, Socket } from 'node:net';
 import { networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sandboxHost } from '../../src/sandbox/bwrap.ts';
-import { NetworkControl } from '../../src/sandbox/network/control.ts';
+import { NetworkControl, rulesetProblem } from '../../src/sandbox/network/control.ts';
 import {
   inNewNamespaces,
   type NetworkTools,
   networkTools,
   runInNamespaces,
 } from '../../src/sandbox/network/namespace.ts';
+import { hostRelaysEcho } from '../../src/sandbox/network/pasta.ts';
 import {
+  buildRuleset,
   type Network,
   NOTHING,
   parseNetwork,
@@ -69,6 +71,47 @@ describe('the ruleset of a scope', () => {
       rulesetFor({ allow: [{ network: net('203.0.113.0/28'), ports: [] }], deny: [] }),
     ).toThrow();
     expect(() => rulesetFor({ ...NOTHING, newConnectionsPerSecond: 0.5 })).toThrow();
+  });
+
+  test('finds a namespace that holds another ruleset than the one written', () => {
+    const ruleset = buildRuleset({
+      allow: [{ network: net('203.0.113.0/28'), ports: [443] }],
+      deny: [],
+    });
+    const listing = (change: { drop?: string; policy?: string; table?: string } = {}) => {
+      const rules = Object.entries(ruleset.rules).flatMap(([chain, count]) =>
+        Array.from({ length: chain === change.drop ? count - 1 : count }, () => ({
+          rule: { table: 'nullrivet', chain },
+        })),
+      );
+      return JSON.stringify({
+        nftables: [
+          { metainfo: { version: '1' } },
+          { table: { family: 'inet', name: 'nullrivet' } },
+          ...(change.table === undefined
+            ? []
+            : [{ table: { family: 'inet', name: change.table } }]),
+          { chain: { name: 'output', hook: 'output', type: 'filter', policy: 'drop' } },
+          {
+            chain: {
+              name: 'input',
+              hook: 'input',
+              type: 'filter',
+              policy: change.policy ?? 'drop',
+            },
+          },
+          { chain: { name: 'refuse' } },
+          { set: { name: 'new4' } },
+          { set: { name: 'new6' } },
+          ...rules,
+        ],
+      });
+    };
+    expect(rulesetProblem(listing(), ruleset)).toBeNull();
+    expect(rulesetProblem(listing({ drop: 'output' }), ruleset)).toContain('chain output holds');
+    expect(rulesetProblem(listing({ policy: 'accept' }), ruleset)).toContain('chain input');
+    expect(rulesetProblem(listing({ table: 'other' }), ruleset)).toContain('2 tables');
+    expect(rulesetProblem('not json', ruleset)).toContain('JSON');
   });
 
   test('denies before it allows, and accepts an incoming packet only from where it may go', () => {
@@ -370,7 +413,15 @@ describe.if(networkTestsRun && process.platform === 'linux')('the network of a s
     }
     signal(sandbox, 'go');
     await sandbox.ended;
-    expect(Object.fromEntries(sandbox.lines)).toEqual({
+    const {
+      'nft flush': flush,
+      'sysctl write': sysctl,
+      'new user namespace': userns,
+      ...rest
+    } = Object.fromEntries(sandbox.lines);
+    // Refused, with whatever code the program gives its failure.
+    for (const code of [flush, sysctl, userns]) expect(code).toBeGreaterThan(0);
+    expect(rest).toEqual({
       'tcp allowed': 'reply okx',
       'tcp other port': 'ConnectionRefusedError',
       'tcp host loopback service': 'ConnectionRefusedError',
@@ -380,11 +431,10 @@ describe.if(networkTestsRun && process.platform === 'linux')('the network of a s
       'tcp ipv6': expect.stringMatching(/Error$/),
       'udp allowed': 'reply udpx',
       'udp other port': 'PermissionError',
-      'icmp allowed': 'reply type 0',
+      // pasta relays echo with the host's ICMP echo sockets, which the host's ping group range
+      // may refuse the user.
+      'icmp allowed': hostRelaysEcho() ? 'reply type 0' : 'TimeoutError',
       'icmp other': 'PermissionError',
-      'nft flush': 1,
-      'sysctl write': 1,
-      'new user namespace': 1,
       listening: 47199,
     });
   }, 60_000);
@@ -454,6 +504,39 @@ describe.if(networkTestsRun && process.platform === 'linux')('the network of a s
     expect(outcome['tcp allowed after']).not.toMatch(/^reply/);
   }, 60_000);
 
+  test('never lets an installation under way undo the revocation of a close', async () => {
+    const s = await servers();
+    cleanups.push(s.close);
+    // An nft that takes a second, once, as a helper slowed down would.
+    const dir = mkdtempSync(join(tmpdir(), 'nullrivet-slow-nft-'));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    const slowOnce = join(dir, 'slow');
+    const nft = join(dir, 'nft');
+    writeFileSync(
+      nft,
+      `#!/bin/sh\nif [ -e ${slowOnce} ]; then rm -f ${slowOnce}; sleep 1; fi\nexec ${t().nft} "$@"\n`,
+      { mode: 0o755 },
+    );
+    const slow = { ...t(), nft };
+    const sandbox = startSandbox(slow, s, 'probe');
+    await Bun.sleep(200);
+    const control = await NetworkControl.prepare(slow, sandbox.pid, hostScope(s), {
+      address: ADDRESS,
+    });
+    cleanups.push(() => control.close());
+    writeFileSync(slowOnce, '');
+    const granting = control.replace(hostScope(s));
+    await Bun.sleep(100);
+    const closing = control.close();
+    await expect(control.replace(hostScope(s))).rejects.toThrow('the network was closed');
+    await granting.catch(() => undefined);
+    await closing;
+    // The slow installation landed after the first revocation; the last one came after it.
+    const held = await runInNamespaces(t(), sandbox.pid, [t().nft, 'list', 'ruleset']);
+    expect(held).toContain('table inet nullrivet');
+    expect(held).not.toContain(hostAddress as string);
+  }, 60_000);
+
   test('stays closed when pasta ends, and says so', async () => {
     const s = await servers();
     cleanups.push(s.close);
@@ -520,6 +603,35 @@ describe.if(networkTestsRun && process.platform === 'linux')('the network of a s
       `process ${process.pid} runs in the host's user namespace`,
     );
   });
+
+  test('does not take a pasta that ends right after configuring the namespace for ready', async () => {
+    const s = await servers();
+    cleanups.push(s.close);
+    // A pasta that gives the namespace a route, then ends.
+    const dir = mkdtempSync(join(tmpdir(), 'nullrivet-fake-pasta-'));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    const pasta = join(dir, 'pasta');
+    writeFileSync(
+      pasta,
+      [
+        '#!/bin/sh',
+        'for arg; do [ "$previous" = --netns ] && namespace=$arg; previous=$arg; done',
+        `${t().nsenter} --net="$namespace" ${t().sh} -c 'ip tuntap add mode tap name t0 && ip addr add 10.9.9.9/24 dev t0 && ip link set t0 up' || exit 3`,
+        'exit 0',
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+    const broken = { ...t(), pasta };
+    const sandbox = startSandbox(broken, s, 'probe');
+    await Bun.sleep(200);
+    await expect(
+      NetworkControl.prepare(broken, sandbox.pid, hostScope(s), { address: ADDRESS }),
+    ).rejects.toThrow('pasta exited with code 0');
+    sandbox.child.kill('SIGKILL');
+    await sandbox.ended;
+    expect(existsSync(join(sandbox.marker, 'ran'))).toBe(false);
+  }, 60_000);
 
   test('never runs the command when the sandbox ends before it is released', async () => {
     const s = await servers();

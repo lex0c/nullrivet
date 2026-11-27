@@ -112,9 +112,18 @@ const NDP_IN =
 
 export const TABLE = 'nullrivet';
 
-// The ruleset, as one nft transaction that replaces whatever the namespace had: it applies whole
-// or not at all.
-export const rulesetFor = (scope: Scope): string => {
+export interface Ruleset {
+  // One nft transaction that replaces whatever the namespace had: it applies whole or not at all.
+  text: string;
+  // The rules each chain holds once it is installed, to check against what the kernel lists.
+  rules: { output: number; input: number; refuse: number };
+}
+
+const REFUSE = ['meta l4proto tcp reject with tcp reset', 'reject with icmpx admin-prohibited'];
+
+export const rulesetFor = (scope: Scope): string => buildRuleset(scope).text;
+
+export const buildRuleset = (scope: Scope): Ruleset => {
   const rate = scope.newConnectionsPerSecond;
   if (rate !== undefined && !(Number.isInteger(rate) && rate >= 1 && rate <= 1_000_000)) {
     throw new Error('the rate must be an integer number of new connections per second, at least 1');
@@ -183,11 +192,13 @@ export const rulesetFor = (scope: Scope): string => {
     ...input.map((rule) => `    ${rule}`),
     '  }',
     '  chain refuse {',
-    '    meta l4proto tcp reject with tcp reset',
-    '    reject with icmpx admin-prohibited',
+    ...REFUSE.map((rule) => `    ${rule}`),
     '  }',
     '}',
     '',
   ];
-  return lines.join('\n');
+  return {
+    text: lines.join('\n'),
+    rules: { output: output.length, input: input.length, refuse: REFUSE.length },
+  };
 };

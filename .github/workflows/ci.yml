@@ -61,6 +61,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends bubblewrap nftables passt
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          # pasta relays ICMP echo with echo sockets of the host, which this range allows.
+          sudo sysctl -w net.ipv4.ping_group_range="0 2147483647"
           echo NULLRIVET_TEST_REQUIRE_SANDBOX=1 >> "$GITHUB_ENV"
           echo NULLRIVET_TEST_REQUIRE_NETWORK=1 >> "$GITHUB_ENV"
       - if: matrix.overlays

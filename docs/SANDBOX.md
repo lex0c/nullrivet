@@ -590,11 +590,12 @@ process never joins them, so the agent loop and the providers keep the host's ne
    id, with every capability dropped (`--cap-drop ALL`) and `--disable-userns`, and waits on
    `--block-fd` before starting the worker.
 2. Helpers enter the first two namespaces from outside, by the process id of Bubblewrap, which
-   runs in them (`nsenter --user --net --preserve-credentials --keep-caps`), and, in order:
+   runs in them (`nsenter --user --net --preserve-credentials`), and, in order:
    install a ruleset that authorizes nothing, while the namespace has only its loopback; set the
    ping group range, so ICMP echo works without raw sockets; start pasta, which gives the
    namespace its way out, still closed; install the scope's ruleset in one transaction, and check
-   that the kernel holds that table alone, with both chains dropping by default.
+   what the kernel lists against what was written: that table alone, its chains with their hooks
+   and policies, the sets of the rate limit, and as many rules in each chain as were written.
 3. Only then is the worker released, by writing to the block descriptor. A step that fails ends
    the sandbox unreleased. Bubblewrap reads the descriptor once and goes on at its end as well, so
    a host that dies mid-way does not hold it back: what holds is the ruleset that authorizes
@@ -605,8 +606,8 @@ nothing in the sandbox does, being in a namespace nested below them. Checked: fr
 `nft flush ruleset` and writing a network sysctl fail, and so does making a user namespace. The
 helper must enter the namespace that owns the network namespace: entering the one of the
 sandbox's process gives capabilities there only, and `nft` fails with "Operation not permitted".
-`--keep-caps` keeps the namespace's capabilities across the helper's exec, which drops them for
-an id other than root. A mapped root is what lets the host set the ping group range: the network
+The helper is the namespaces' root, the user's id being mapped to it, so its exec keeps their
+capabilities, as it would not for another id. A mapped root is what lets the host set the ping group range: the network
 namespace's sysctls belong to it, and a namespace Bubblewrap makes without one leaves them out of
 reach, and ICMP with them. The range names the namespace's own ids, `0 0`, the user's group.
 
@@ -628,6 +629,13 @@ sidecar container sharing the locked namespace could not download nftables to ap
   engagement file promises.
 
 ### Revoking a destination
+
+Installations run one after another: two transactions are each atomic, but not ordered, and a
+ruleset that lands after a revocation would undo it. Closing the network installs the ruleset that
+authorizes nothing at once, without waiting for an installation under way, whose helper may hang
+until its timeout, and again once that one is done; installations still waiting install nothing.
+Tested with an nft slowed down for one installation: what the namespace holds at the end
+authorizes nothing.
 
 The scope can shrink during a session: `/scope refresh` drops an address a name no longer resolves
 to, and the window ends. A connection opened earlier must not outlive its authorization, as it
@@ -654,7 +662,10 @@ place. Without it the profile does not start. It runs in the namespaces' user na
 name `pasta`, which chooses its mode, with nothing forwarded in either direction or protocol
 (`-t none -u none -T none -U none`), without DHCP, and without mapping the gateway's address to
 the host's loopback (`--no-map-gw`). A pasta that ends leaves the namespace without a way out, and
-is not started again. Tests with real namespaces, and servers on the host's own address
+is not started again, nor taken for ready when it ends right after configuring the namespace.
+It relays ICMP echo with echo sockets of the host, which the host's ping group range must allow
+the user: without it, TCP and UDP pass and echo requests get no reply. Tests with real
+namespaces, and servers on the host's own address
 (`tests/sandbox/network.test.ts`), establish:
 
 - that TCP, UDP and ICMP echo to an authorized destination pass, and to any other are refused at

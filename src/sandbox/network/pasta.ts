@@ -24,6 +24,7 @@ export interface PastaAddress {
 
 const READY_TIMEOUT_MS = 10_000;
 const POLL_MS = 20;
+const SETTLE_MS = 50;
 const STOP_GRACE_MS = 2_000;
 
 // Whether the namespace of `pid` has a route through an interface other than the loopback, which
@@ -49,6 +50,29 @@ const configured = (pid: number): boolean => {
           !(fields[0] ?? '').startsWith('fe80') &&
           !(fields[0] ?? '').startsWith('ff'),
       );
+  } catch {
+    return false;
+  }
+};
+
+// Whether pasta can relay ICMP echo, which it does with ICMP echo sockets of the host: the host's
+// ping group range must hold one of the user's groups. Without it, TCP and UDP still pass, and
+// echo requests get no reply.
+export const hostRelaysEcho = (): boolean => {
+  try {
+    const [low, high] = readFileSync('/proc/sys/net/ipv4/ping_group_range', 'utf8')
+      .trim()
+      .split(/\s+/)
+      .map(Number);
+    const groups = [process.getgid?.(), ...(process.getgroups?.() ?? [])];
+    return groups.some(
+      (group) =>
+        group !== undefined &&
+        low !== undefined &&
+        high !== undefined &&
+        group >= low &&
+        group <= high,
+    );
   } catch {
     return false;
   }
@@ -125,6 +149,10 @@ export class Pasta {
       }
       await Bun.sleep(POLL_MS);
     }
+    // A pasta that configured the namespace and ended right after is not a way out: it is checked
+    // once more, after its exit had the time to be seen.
+    await Bun.sleep(SETTLE_MS);
+    if (ended !== null) throw new Error(ended);
     return pasta;
   }
 

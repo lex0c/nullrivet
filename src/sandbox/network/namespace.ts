@@ -85,15 +85,14 @@ export const inNewNamespaces = (tools: NetworkTools, command: readonly string[])
   ...command,
 ];
 
-// The arguments that enter the user and network namespaces of `pid` with their capabilities: the
-// user's credentials are kept, since setting groups is refused in a user namespace, and so are the
-// capabilities the namespace grants, which an exec would otherwise drop.
+// The arguments that enter the user and network namespaces of `pid` with their capabilities. The
+// user's credentials are kept, since setting groups is refused in a user namespace; they are its
+// root, which keeps every capability of the namespace across the helper's exec.
 export const enterArgs = (tools: NetworkTools, pid: number, net = true): string[] => [
   tools.nsenter,
   `--user=/proc/${pid}/ns/user`,
   ...(net ? [`--net=/proc/${pid}/ns/net`] : []),
   '--preserve-credentials',
-  '--keep-caps',
   '--',
 ];
 
