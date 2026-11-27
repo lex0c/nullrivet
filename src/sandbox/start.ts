@@ -11,6 +11,7 @@ import {
   sandboxProject,
   workspaceLaunch,
 } from './bwrap.ts';
+import { limitedLaunch, prepareLimits } from './limits.ts';
 import { WorkerBackend } from './worker-backend.ts';
 import {
   createWorkspaceDirectory,
@@ -90,13 +91,14 @@ export const startSandbox = async (
   };
   const scope = { profile, root: project.root };
   if (profile === 'inspect') {
+    const limits = await prepareLimits(env);
     try {
       const backend = await WorkerBackend.start({
-        launch: inspectLaunch(options),
+        launch: limitedLaunch(inspectLaunch(options), limits),
         tools,
         jobs: true,
       });
-      return { backend, scope, cwd: project.cwd, warnings: [] };
+      return { backend, scope, cwd: project.cwd, warnings: limits.warnings };
     } catch (error) {
       return { error: `the inspect sandbox did not start: ${errorMessage(error)}` };
     }
@@ -112,6 +114,8 @@ export const startSandbox = async (
   } catch (error) {
     return { error: `the workspace sandbox cannot be prepared: ${errorMessage(error)}` };
   }
+  // Decided once: every sandbox of the session starts under the same limits.
+  const limits = await prepareLimits(env);
   const launch: WorkspaceLaunch = async () => {
     let created: ReturnType<typeof createWorkspaceDirectory>;
     try {
@@ -131,7 +135,7 @@ export const startSandbox = async (
     }
     try {
       const backend = await WorkerBackend.start({
-        launch: workspaceLaunch(options, workspace.directory),
+        launch: limitedLaunch(workspaceLaunch(options, workspace.directory), limits),
         tools,
         jobs: true,
       });
@@ -149,6 +153,6 @@ export const startSandbox = async (
     cwd: project.cwd,
     workspace: started.workspace,
     relaunch: launch,
-    warnings: started.warnings,
+    warnings: [...limits.warnings, ...started.warnings],
   };
 };

@@ -11,7 +11,8 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { sandboxTestsRun } from '../helpers/sandbox.ts';
+import { defaultLimits, userTasks } from '../../src/sandbox/limits.ts';
+import { cgroupTestsRun, sandboxTestsRun } from '../helpers/sandbox.ts';
 import {
   type ChatRequest,
   cliCommand,
@@ -60,6 +61,19 @@ const workspace = () => {
 
 const uniqueSleep = (): string => `sleep ${50 + Math.floor(Math.random() * 1_000) / 100}`;
 
+// The process whose whole command line is `command`, once it runs.
+const pidOf = async (command: string): Promise<number> => {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const [found = ''] = Bun.spawnSync(['pgrep', '-x', '-f', command])
+      .stdout.toString()
+      .split('\n');
+    if (found !== '') return Number(found);
+    await Bun.sleep(50);
+  }
+  throw new Error(`no process runs ${command}`);
+};
+
 describe.if(sandboxTestsRun)('--sandbox inspect', () => {
   test('runs the tools in the sandbox and tells the model its limits', async () => {
     const { home, project } = workspace();
@@ -75,6 +89,11 @@ describe.if(sandboxTestsRun)('--sandbox inspect', () => {
     });
     const { code } = await cli.finished;
     expect(code).toBe(0);
+    // Without a way to the user's service manager, as this environment has: the operator is told
+    // what is not limited.
+    const warnings = cli.events.filter((e) => e.type === 'warning').map((e) => String(e.message));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/^the sandbox's (memory and CPU|resources) are not limited/);
     const request = server.requests.at(-1);
     const results = toolMessages(request).map((m) => m.content);
     expect(results.join('\n')).not.toContain('PRIVATE KEY');
@@ -83,6 +102,70 @@ describe.if(sandboxTestsRun)('--sandbox inspect', () => {
     expect(offered).toContain('bash');
     expect(offered).toContain('bash_background');
     expect(server.requests[0]?.messages[0]?.content).toContain('# Sandbox: inspect');
+  }, 30_000);
+
+  test.if(cgroupTestsRun)(
+    "starts the sandbox in a scope of the user's service manager, without a warning",
+    async () => {
+      const { home, project } = workspace();
+      const sleep = uniqueSleep();
+      server.handle(toolsThenText([{ name: 'bash', args: { command: sleep } }]));
+      const bus = Object.fromEntries(
+        ['XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS'].flatMap((name) => {
+          const value = process.env[name];
+          return value === undefined ? [] : [[name, value]];
+        }),
+      );
+      const cli = startCli(['--sandbox', 'inspect', 'look'], {
+        env: cliEnv(server, { HOME: home, ...bus }),
+        cwd: project,
+      });
+      // A command of the sandbox, seen from the host: its cgroup is a scope with the limits.
+      const pid = await pidOf(sleep);
+      const cgroup = readFileSync(`/proc/${pid}/cgroup`, 'utf8').trim().replace(/^0::/, '');
+      expect(cgroup).toMatch(/\.scope$/);
+      expect(readFileSync(`/sys/fs/cgroup${cgroup}/pids.max`, 'utf8').trim()).toBe('4096');
+      expect(readFileSync(`/sys/fs/cgroup${cgroup}/memory.max`, 'utf8').trim()).toBe(
+        String(defaultLimits().memoryBytes),
+      );
+      process.kill(pid);
+      const { code } = await cli.finished;
+      expect(code).toBe(0);
+      expect(cli.events.filter((e) => e.type === 'warning')).toEqual([]);
+    },
+    30_000,
+  );
+
+  test('without the service manager, limits the processes of the sandbox by RLIMIT_NPROC', async () => {
+    const { home, project } = workspace();
+    const sleep = uniqueSleep();
+    server.handle(toolsThenText([{ name: 'bash', args: { command: sleep } }]));
+    const cli = startCli(['--sandbox', 'inspect', 'look'], {
+      env: cliEnv(server, { HOME: home }),
+      cwd: project,
+    });
+    const pid = await pidOf(sleep);
+    const row = readFileSync(`/proc/${pid}/limits`, 'utf8')
+      .split('\n')
+      .find((line) => line.startsWith('Max processes'));
+    const [soft, hard] = row?.trim().split(/\s+/).slice(2, 4) ?? [];
+    const tasks = userTasks(process.getuid?.() ?? -1);
+    process.kill(pid);
+    const { code } = await cli.finished;
+    expect(code).toBe(0);
+    // Soft and hard alike, so nothing in the sandbox can raise it: the user's tasks at its start
+    // plus its own, give or take the user's processes that started or ended since, and never above
+    // the limit the user had.
+    expect(soft).toBe(hard);
+    const own = readFileSync('/proc/self/limits', 'utf8')
+      .split('\n')
+      .find((line) => line.startsWith('Max processes'))
+      ?.trim()
+      .split(/\s+/)[2];
+    const ownLimit = own === 'unlimited' ? Number.POSITIVE_INFINITY : Number(own);
+    expect(Number(soft)).toBeLessThanOrEqual(ownLimit);
+    if (tasks + 4096 + 500 < ownLimit)
+      expect(Math.abs(Number(soft) - 4096 - tasks)).toBeLessThan(500);
   }, 30_000);
 
   test('a process left in the sandbox ends when nullrivet is killed', async () => {

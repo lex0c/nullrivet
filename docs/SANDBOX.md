@@ -818,16 +818,51 @@ the end of the session, or a signature.
 
 ## Resources
 
-CPU, memory and process limits use cgroups when the user's systemd manager can create a scope
-(`systemd-run --user --scope`), and `prlimit` otherwise. Unlike the file and network isolation,
-which stop the session when unavailable, a missing limit is a warning: limits protect stability,
-not the boundary.
+The sandbox's resources are limited, for every profile, so that a command that exhausts them, by
+design or by mistake, leaves the host usable. The limits protect the host's stability, not the
+boundary: unlike the file and network isolation, which stop the session when unavailable, a limit
+that cannot be put in force is a warning.
 
-Not implemented yet; they come in phase 4, before the `security` profile runs, for every
-profile. Until then only the sizes of the sandbox's `/tmp` and home are limited:
-`inspect` isolates files, network, processes and credentials, and gives no protection against a
-command that exhausts CPU, memory or the process table. Code meant to do that waits for these
-limits or for the virtual machine backend.
+With the user's service manager, the sandbox runs in a scope of its own, made by
+`systemd-run --user --scope`: a cgroup that holds the whole sandbox, whatever namespaces it makes.
+
+- `TasksMax=4096`: processes and threads together.
+- `MemoryMax`: three quarters of the host's memory, rounded down to 64 KiB so that the kernel holds
+  it as given, with `MemorySwapMax=0`, so that the sandbox cannot push the host into swap.
+- `CPUWeight=20`, against a default of 100: the sandbox slows down only when the host needs the
+  processors, and keeps them all otherwise.
+- `OOMPolicy=continue`: when the sandbox passes its memory, the kernel kills its largest process,
+  usually the command that took the memory, and the manager leaves the rest running. With `stop`,
+  the default of `DefaultOOMPolicy=`, the manager ends the whole scope a moment after the kill.
+  Scopes took the setting in systemd 253; an older manager refuses it, and does not end a scope
+  after a kill either, so the scope is made without it there. When the largest process is the
+  worker, the session reports its sandbox lost, as for any end of the worker.
+
+Before the first sandbox of a session, a scope made the same way reads its limits back from its
+cgroup, `memory.max`, `pids.max` and `cpu.weight`: a manager that does not delegate a controller
+accepts the property and holds nothing, and only the values as the kernel holds them show it, or
+the file's absence. The check takes about
+fifty milliseconds, and the manager's answer is awaited five seconds at most. systemd-run reaches
+the manager by `XDG_RUNTIME_DIR` or `DBUS_SESSION_BUS_ADDRESS`, given to it alone: Bubblewrap
+clears the environment for the sandbox.
+
+Without the manager, as over SSH without lingering or in a container, only the processes are
+limited, by `prlimit --nproc` around Bubblewrap. RLIMIT_NPROC counts every task of the user, the
+host's included, whatever user namespace they run in: a limit of 64 with 700 tasks running lets the
+sandbox start nothing. Each sandbox's is therefore the user's count when it starts plus 4096,
+counted again for the sandbox that follows an `/apply`, never above the user's own limit, and soft
+and hard alike so that nothing inside can raise it; other processes of the user that start
+meanwhile take from the same budget. Memory and CPU are not limited then, and
+the session says so when it starts.
+
+systemd-run and prlimit are taken from system directories only, as Bubblewrap is, and run the
+sandbox in place of themselves, with the descriptors the worker's protocol uses. The limits apply
+to the sandbox; pasta and the network helpers of the `security` profile run outside it.
+
+Tested: a process that forks under a limit of 64 tasks stops below it, in a cgroup and by
+RLIMIT_NPROC; a process that passes 256 MiB is killed, and the sandbox still runs a second later;
+a command of a session's sandbox, seen from the host, is in a scope with the limits, or has
+RLIMIT_NPROC soft and hard alike.
 
 ## Lifecycle
 
@@ -896,10 +931,10 @@ limits or for the virtual machine backend.
    1. the network layer with its tests (the namespaces, the ruleset, pasta, revocation), done;
    2. the engagement file: its validation, the resolution of its names, the sandbox's hosts file,
       and the scope stated at the start and in the system prompt, done;
-   3. the resource limits described under Resources, for every profile, next: the `security` profile
-      runs tools against targets, and a sandbox that isolates files and network still shares the
-      host's CPU, memory and process table;
-   4. the profile end to end: the hosts file, the window, `/scope refresh`;
+   3. the resource limits described under Resources, for every profile, done: the `security`
+      profile runs tools against targets, and a sandbox that isolates files and network would
+      otherwise share the host's CPU, memory and process table;
+   4. the profile end to end, next: the hosts file, the window, `/scope refresh`;
    5. the documentation and an adversarial review.
 
    4b: the allowlisting HTTP proxy.

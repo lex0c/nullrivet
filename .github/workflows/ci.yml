@@ -32,13 +32,17 @@ jobs:
       matrix:
         include:
           # Ubuntu 26.04 ships Bubblewrap 0.11, with the overlay options the workspace profile
-          # uses: the overlay tests must run there, on both architectures.
+          # uses: the overlay tests must run there, on both architectures. The user's service
+          # manager is started there, so the sandbox runs in a cgroup with its limits.
           - os: ubuntu-latest
             overlays: true
+            cgroups: true
           - os: ubuntu-26.04-arm
             overlays: true
+            cgroups: true
           # Ubuntu 24.04 ships Bubblewrap 0.9, without them: the inspect profile is tested there,
-          # and the overlay tests are skipped.
+          # and the overlay tests are skipped. Without the user's service manager, the sandbox
+          # limits its processes by RLIMIT_NPROC alone.
           - os: ubuntu-24.04
           - os: macos-15
           - os: macos-15-intel
@@ -67,6 +71,19 @@ jobs:
           echo NULLRIVET_TEST_REQUIRE_NETWORK=1 >> "$GITHUB_ENV"
       - if: matrix.overlays
         run: echo NULLRIVET_TEST_REQUIRE_OVERLAY=1 >> "$GITHUB_ENV"
+      # A runner does not start the user's service manager: lingering starts it, and
+      # dbus-user-session gives it the bus systemd-run reaches it by. With
+      # NULLRIVET_TEST_REQUIRE_CGROUP set, a manager that cannot hold the limits fails the cgroup
+      # tests instead of skipping them.
+      - if: matrix.cgroups
+        run: |
+          sudo apt-get install -y --no-install-recommends dbus-user-session
+          sudo loginctl enable-linger "$USER"
+          runtime="/run/user/$(id -u)"
+          for _ in $(seq 100); do [ -S "$runtime/bus" ] && break; sleep 0.1; done
+          echo "XDG_RUNTIME_DIR=$runtime" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=$runtime/bus" >> "$GITHUB_ENV"
+          echo NULLRIVET_TEST_REQUIRE_CGROUP=1 >> "$GITHUB_ENV"
       - run: bun test
       # The end-to-end tests again, against the compiled executable, which resolves its embedded
       # modules differently from the sources.

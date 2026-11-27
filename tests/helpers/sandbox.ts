@@ -1,6 +1,7 @@
 import { mkdtempSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { atLeast, OVERLAY_BWRAP_VERSION, sandboxHost } from '../../src/sandbox/bwrap.ts';
+import { prepareLimits } from '../../src/sandbox/limits.ts';
 import { networkTools } from '../../src/sandbox/network/namespace.ts';
 
 // The sandbox tests need Bubblewrap and unprivileged user namespaces. They are skipped where
@@ -36,3 +37,11 @@ export const tmpfsDirectory = (prefix: string): string =>
 export const networkTestsRun =
   (sandboxTestsRun && typeof networkTools() !== 'string') ||
   process.env.NULLRIVET_TEST_REQUIRE_NETWORK === '1';
+
+// The cgroup tests need the user's service manager, with the CPU, memory and process controllers
+// delegated. They are skipped where it is missing, unless NULLRIVET_TEST_REQUIRE_CGROUP is set, as
+// in CI where one is started, so a manager that cannot hold the limits fails them instead.
+export const cgroupTestsRun =
+  sandboxTestsRun &&
+  ((await prepareLimits(process.env)).how === 'cgroup' ||
+    process.env.NULLRIVET_TEST_REQUIRE_CGROUP === '1');

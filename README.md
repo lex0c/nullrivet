@@ -260,10 +260,12 @@ not trust, such as reviewing an unknown repository:
   processes left behind end with the session.
 
 The execution mode still applies inside: `readonly` with `inspect` only reads. Background jobs run
-inside the sandbox too, with their logs in its `/tmp`. The sandbox does not limit CPU, memory or the
-number of processes, so it is not a defence against code meant to exhaust them. A sandbox that
-cannot start stops the session with the reason; nullrivet never falls back to running the tools
-without it.
+inside the sandbox too, with their logs in its `/tmp`. Its resources are limited, so that a command
+that exhausts them leaves your machine usable: with systemd's user manager, the sandbox runs in a
+cgroup of its own, with at most 4096 processes and threads, three quarters of the memory and no
+swap, and a lower CPU priority; without it, only the number of processes is limited, and a warning
+says so. A sandbox that cannot start stops the session with the reason; nullrivet never falls back
+to running the tools without it.
 
 `--sandbox workspace` is the same sandbox with the project writable through an overlay: the agent
 edits, builds and tests as usual, and nothing reaches the project while it works. With a task on the
