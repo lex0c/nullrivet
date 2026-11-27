@@ -29,6 +29,7 @@ const RESOLVE_NO_XDEV = 0x01n;
 const RESOLVE_NO_MAGICLINKS = 0x02n;
 const RESOLVE_NO_SYMLINKS = 0x04n;
 const RESOLVE_BENEATH = 0x08n;
+const RESOLVE_IN_ROOT = 0x10n;
 const RESOLVE = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV;
 // The same values on x86_64 and arm64, unlike O_DIRECTORY and O_NOFOLLOW, which come from Node.
 const O_CLOEXEC = 0o2000000;
@@ -149,6 +150,20 @@ export const openDirectory = (path: string): number =>
 export const openBeneath = (dir: number, name: Buffer, flags: number, mode = 0): number => {
   const how = new BigUint64Array([BigInt(flags | O_CLOEXEC), BigInt(mode), RESOLVE]);
   const fd = Number(lib().syscall(SYS_OPENAT2, dir, cString(name), ptr(how), 24n));
+  if (fd < 0) fail('openat2');
+  return fd;
+};
+
+// Opens `path` as if `root` were the root directory, which `..` and absolute paths do not leave,
+// through no symbolic link at all: for a file of a sandbox, read through the root of its
+// processes, which the sandbox's own links must not lead out of.
+export const openInRoot = (root: number, path: string, flags: number): number => {
+  const how = new BigUint64Array([
+    BigInt(flags | O_CLOEXEC),
+    0n,
+    RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS,
+  ]);
+  const fd = Number(lib().syscall(SYS_OPENAT2, root, cString(Buffer.from(path)), ptr(how), 24n));
   if (fd < 0) fail('openat2');
   return fd;
 };

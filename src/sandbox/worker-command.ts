@@ -21,12 +21,14 @@ const commandFor = (
   sourceDir: string,
   tools: readonly string[],
   jobs: JobSession | undefined,
+  hashOutputs = false,
 ): string[] => {
   const args = [
     WORKER_ARGUMENT,
     '--tools',
     tools.join(','),
     ...(jobs === undefined ? [] : ['--jobs', jobs]),
+    ...(hashOutputs ? ['--hash-outputs'] : []),
   ];
   if (COMPILED) return [binary, ...args];
   return [binary, '--no-env-file', '--config=/dev/null', `${sourceDir}/main.ts`, ...args];
@@ -43,11 +45,16 @@ export interface SandboxedWorker {
 }
 
 // The worker started inside a sandbox, from its files bound under SANDBOX_WORKER_DIR.
-export const sandboxedWorker = (tools: readonly string[], jobs?: JobSession): SandboxedWorker => {
+// `hashOutputs` with an evidence log: the worker hashes what each command writes.
+export const sandboxedWorker = (
+  tools: readonly string[],
+  jobs?: JobSession,
+  hashOutputs = false,
+): SandboxedWorker => {
   const binary = `${SANDBOX_WORKER_DIR}/${COMPILED ? 'nullrivet' : 'bun'}`;
   const sourceDir = `${SANDBOX_WORKER_DIR}/src`;
   return {
-    command: commandFor(binary, sourceDir, tools, jobs),
+    command: commandFor(binary, sourceDir, tools, jobs, hashOutputs),
     mounts: [
       { source: process.execPath, target: binary },
       ...(COMPILED ? [] : [{ source: SOURCE_DIR, target: sourceDir }]),

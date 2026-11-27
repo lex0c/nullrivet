@@ -1,6 +1,6 @@
 // Credentials used by the agent itself. Removing them from child process environments keeps a
 // command produced by prompt injection from reading and exfiltrating them.
-const AGENT_SECRET_ENV_KEYS = new Set([
+export const AGENT_SECRET_ENV_KEYS: ReadonlySet<string> = new Set([
   'ANTHROPIC_API_KEY',
   'OPENAI_API_KEY',
   'OPENROUTER_API_KEY',

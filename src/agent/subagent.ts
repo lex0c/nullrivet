@@ -577,6 +577,7 @@ export class SubagentRegistry implements PendingEventSource<SubagentEvent> {
           toolBackend: runtime.toolBackend,
           mode: () => 'readonly',
           ...(runtime.engagement === undefined ? {} : { engagement: runtime.engagement.window }),
+          agent: task.id,
           cwd: spec.cwd,
           systemPrompt: () =>
             buildSystemPrompt({

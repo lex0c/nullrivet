@@ -2,7 +2,7 @@ import { constants } from 'node:os';
 import { isAbsolute, resolve } from 'node:path';
 import type { JobEvent } from '../tools/jobs.ts';
 import { MAX_OUTPUT_PARTS, type SavedOutput } from '../tools/output-files.ts';
-import type { ToolResult } from '../tools/types.ts';
+import type { CapturedOutput, ToolResult } from '../tools/types.ts';
 
 // The entry point runs the sandbox worker instead of the CLI when its first argument is this. It
 // is not an option of the CLI, so no prompt or flag can collide with it.
@@ -76,7 +76,7 @@ export type WorkerToHost =
   | { type: 'worker.ready'; protocol: number; tools: string[] }
   | { type: 'tool.result'; id: string; result: ToolResult }
   | { type: 'worker.error'; message: string }
-  | { type: 'job.started'; jobId: string }
+  | { type: 'job.started'; jobId: string; callId?: string }
   | { type: 'job.event'; seq: number; event: JobEvent }
   | { type: 'job.shown'; jobId: string }
   // How many jobs still run after a jobs.stop: none, unless one did not end in the time allowed.
@@ -125,10 +125,10 @@ export const isTouchedPath = (path: unknown): path is string =>
 
 const readResult = (value: unknown): ToolResult | string => {
   if (!isPlainObject(value)) return 'the result is not an object';
-  if (!hasExactKeys(value, ['content', 'isError'], ['meta', 'touchedPaths'])) {
+  if (!hasExactKeys(value, ['content', 'isError'], ['meta', 'touchedPaths', 'outputs'])) {
     return 'the result has unknown or missing fields';
   }
-  const { content, isError, meta, touchedPaths } = value;
+  const { content, isError, meta, touchedPaths, outputs } = value;
   if (typeof content !== 'string') return 'the result content is not a string';
   if (typeof isError !== 'boolean') return 'the result isError is not a boolean';
   if (meta !== undefined) {
@@ -145,21 +145,99 @@ const readResult = (value: unknown): ToolResult | string => {
       return 'the result touchedPaths holds a path that is not absolute and normalized';
     }
   }
+  let captured: CapturedOutput[] | undefined;
+  if (outputs !== undefined) {
+    if (!Array.isArray(outputs) || outputs.length > MAX_OUTPUTS) {
+      return `the result outputs is not a list of at most ${MAX_OUTPUTS}`;
+    }
+    captured = [];
+    for (const output of outputs) {
+      const read = readCapturedOutput(output);
+      if (typeof read === 'string') return read;
+      captured.push(read);
+    }
+  }
   return {
     content,
     isError,
     ...(meta === undefined ? {} : { meta: meta as Record<string, unknown> }),
     ...(touchedPaths === undefined ? {} : { touchedPaths: touchedPaths as string[] }),
+    ...(captured === undefined ? {} : { outputs: captured }),
+  };
+};
+
+const MAX_OUTPUTS = 4;
+const SHA256 = /^[0-9a-f]{64}$/;
+
+// The parts of a call's output, in the sandbox's /tmp, as the output code names them.
+export const OUTPUT_PART =
+  /^\/tmp\/nullrivet-[A-Za-z0-9]{6}\/[0-9]{1,15}-(?:bash-stdout|bash-stderr|git|git-stderr)\.[0-9]{3}\.txt$/;
+
+const readCapturedOutput = (value: unknown): CapturedOutput | string => {
+  if (!isPlainObject(value)) return 'an output that is not an object';
+  if (
+    !hasExactKeys(
+      value,
+      ['stream', 'receivedBytes', 'receivedSha256', 'savedBytes', 'savedSha256', 'parts'],
+      ['stopReason', 'interrupted'],
+    )
+  ) {
+    return 'an output with unknown or missing fields';
+  }
+  const { stream, receivedBytes, receivedSha256, savedBytes, savedSha256, parts } = value;
+  if (stream !== 'stdout' && stream !== 'stderr') return 'an output of an unknown stream';
+  if (!isCount(receivedBytes) || !isCount(savedBytes) || savedBytes > receivedBytes) {
+    return 'an output with invalid sizes';
+  }
+  if (
+    typeof receivedSha256 !== 'string' ||
+    !SHA256.test(receivedSha256) ||
+    typeof savedSha256 !== 'string' ||
+    !SHA256.test(savedSha256)
+  ) {
+    return 'an output with invalid hashes';
+  }
+  if (
+    !Array.isArray(parts) ||
+    parts.length > MAX_OUTPUT_PARTS ||
+    !parts.every((part) => typeof part === 'string' && OUTPUT_PART.test(part))
+  ) {
+    return 'an output whose parts are not output files of the sandbox';
+  }
+  const { stopReason, interrupted } = value;
+  if (
+    stopReason !== undefined &&
+    (typeof stopReason !== 'string' || stopReason.length > MAX_ERROR_CHARS)
+  ) {
+    return 'an output with an invalid stop reason';
+  }
+  if (
+    interrupted !== undefined &&
+    (typeof interrupted !== 'string' || interrupted.length > MAX_ERROR_CHARS)
+  ) {
+    return 'an output with an invalid interruption';
+  }
+  return {
+    stream,
+    receivedBytes,
+    receivedSha256,
+    savedBytes,
+    savedSha256,
+    parts: parts as string[],
+    ...(stopReason === undefined ? {} : { stopReason: reduceStopReason(stopReason) }),
+    ...(interrupted === undefined ? {} : { interrupted: interrupted as string }),
   };
 };
 
 // A job id: the registry's random prefix and a positive sequence number a JavaScript number holds
 // exactly.
 export const JOB_ID_PATTERN = /^([0-9a-f]{16})-([1-9][0-9]{0,14})$/;
+// The id of a call, as the host gives it: a number of its own, or the evidence log's call id.
+const CALL_ID_PATTERN = /^c?[0-9]{1,15}$/;
 
 // The parts of a job log, in the sandbox's /tmp. The directory can change during a job, when
 // something removed it and the output code made a new one, so each part is checked on its own.
-const JOB_LOG_PART = /^\/tmp\/nullrivet-[A-Za-z0-9]{6}\/[0-9]{1,15}-job\.[0-9]{3}\.txt$/;
+export const JOB_LOG_PART = /^\/tmp\/nullrivet-[A-Za-z0-9]{6}\/[0-9]{1,15}-job\.[0-9]{3}\.txt$/;
 // The most parts the output code makes within its limit per output; a line that does not fit at
 // the end of a part starts the next, so parts can hold less than their size.
 const MAX_JOB_LOG_PARTS = MAX_OUTPUT_PARTS;
@@ -200,7 +278,7 @@ const readSavedOutput = (value: unknown): SavedOutput | string => {
     !hasExactKeys(
       value,
       ['parts', 'savedBytes', 'receivedBytes'],
-      ['stopReason', 'interrupted', 'binary'],
+      ['stopReason', 'interrupted', 'binary', 'receivedSha256', 'savedSha256'],
     )
   ) {
     return 'a job log with unknown or missing fields';
@@ -229,6 +307,12 @@ const readSavedOutput = (value: unknown): SavedOutput | string => {
     return 'a job log with an invalid interruption';
   }
   if (binary !== undefined && typeof binary !== 'boolean') return 'a job log with an invalid flag';
+  const { receivedSha256, savedSha256 } = value;
+  for (const hash of [receivedSha256, savedSha256]) {
+    if (hash !== undefined && (typeof hash !== 'string' || !SHA256.test(hash))) {
+      return 'a job log with an invalid hash';
+    }
+  }
   return {
     parts: parts as string[],
     savedBytes,
@@ -236,6 +320,8 @@ const readSavedOutput = (value: unknown): SavedOutput | string => {
     ...(stopReason === undefined ? {} : { stopReason: reduceStopReason(stopReason) }),
     ...(interrupted === undefined ? {} : { interrupted: reduceInterruption(interrupted) }),
     ...(binary === undefined ? {} : { binary }),
+    ...(receivedSha256 === undefined ? {} : { receivedSha256: receivedSha256 as string }),
+    ...(savedSha256 === undefined ? {} : { savedSha256: savedSha256 as string }),
   };
 };
 
@@ -334,15 +420,18 @@ export const parseWorkerMessage = (line: string): Parsed<WorkerToHost> => {
     }
     case 'job.started':
     case 'job.shown': {
-      const { jobId } = value;
+      const { jobId, callId } = value;
       if (
-        !hasExactKeys(value, ['type', 'jobId']) ||
+        !hasExactKeys(value, ['type', 'jobId'], value.type === 'job.started' ? ['callId'] : []) ||
         typeof jobId !== 'string' ||
-        !JOB_ID_PATTERN.test(jobId)
+        !JOB_ID_PATTERN.test(jobId) ||
+        (callId !== undefined && (typeof callId !== 'string' || !CALL_ID_PATTERN.test(callId)))
       ) {
         return { ok: false, reason: `a malformed ${value.type} message` };
       }
-      return { ok: true, message: { type: value.type, jobId } };
+      return value.type === 'job.started' && callId !== undefined
+        ? { ok: true, message: { type: 'job.started', jobId, callId: callId as string } }
+        : { ok: true, message: { type: value.type, jobId } };
     }
     case 'jobs.stopped': {
       const { running } = value;

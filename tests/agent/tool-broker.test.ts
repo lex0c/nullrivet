@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   BackendLostError,
+  type CallRecorder,
   executeToolCall,
   IN_PROCESS_BACKEND,
   type ToolBackend,
@@ -331,5 +332,106 @@ describe('the window of an engagement', () => {
         .map((tool) => tool.name)
         .sort(),
     ).toEqual(['bash', 'bash_background']);
+  });
+});
+
+describe('the record of each call, when the engagement keeps an evidence log', () => {
+  // A recorder that keeps what it is told, and whose writing of a start can fail or take time.
+  const recorder = (start: (callId: string) => boolean = () => true) => {
+    const entries: string[] = [];
+    let ids = 0;
+    const record: CallRecorder = {
+      nextCallId: () => {
+        ids += 1;
+        return `c${ids}`;
+      },
+      started: (callId, call, details) => {
+        const written = start(callId);
+        if (written) entries.push(`started ${callId} ${call.name} by ${details.agent}`);
+        return written;
+      },
+      finished: (callId, call) => entries.push(`finished ${callId} ${call.name}`),
+      refused: (callId, call, _agent, started, result) =>
+        entries.push(
+          `refused ${callId} ${call.name}${started ? ' after its start' : ''}: ${result.content.split('\n')[0]}`,
+        ),
+    };
+    return { entries, record };
+  };
+  const counting = () => {
+    let executions = 0;
+    const backend: ToolBackend = {
+      execute: async (tool) => {
+        executions += 1;
+        return { content: `${tool.name} ran`, isError: false };
+      },
+    };
+    return { backend, executed: () => executions };
+  };
+  const bash: Tool = { ...ok('bash', 'exec'), startsCommands: true };
+
+  test('dispatches a call only once its start is written, and records its outcome', async () => {
+    const { entries, record } = recorder();
+    const { backend, executed } = counting();
+    const ctx = context([bash], {
+      backend,
+      agent: 'subagent-2',
+      engagement: { closed: () => null, ended: new AbortController().signal, recorder: record },
+    });
+    await executeToolCall({ id: 'provider-1', name: 'bash', input: {} }, ctx);
+    expect(entries).toEqual(['started c1 bash by subagent-2', 'finished c1 bash']);
+    expect(executed()).toBe(1);
+  });
+
+  test('dispatches nothing whose start could not be written', async () => {
+    const { entries, record } = recorder(() => false);
+    const { backend, executed } = counting();
+    const ctx = context([bash], {
+      backend,
+      engagement: { closed: () => null, ended: new AbortController().signal, recorder: record },
+    });
+    const result = await executeToolCall({ id: 'p', name: 'bash', input: {} }, ctx);
+    expect(result.content).toStartWith(
+      'error [evidence.failed]: bash was not executed: its start could not be written to the evidence log',
+    );
+    expect(executed()).toBe(0);
+    expect(entries).toEqual([
+      'refused c1 bash: error [evidence.failed]: bash was not executed: its start could not be written to the evidence log',
+    ]);
+  });
+
+  test('refuses a call whose window ended while its start was written, which it records', async () => {
+    let closed: string | null = null;
+    // Writing the start takes until past the end of the window.
+    const { entries, record } = recorder(() => {
+      closed = 'the engagement window ended at 18:00';
+      return true;
+    });
+    const { backend, executed } = counting();
+    const ctx = context([bash], {
+      backend,
+      engagement: { closed: () => closed, ended: new AbortController().signal, recorder: record },
+    });
+    const result = await executeToolCall({ id: 'p', name: 'bash', input: {} }, ctx);
+    expect(result.content).toStartWith('error [engagement.window]: bash was not executed');
+    expect(executed()).toBe(0);
+    expect(entries).toEqual([
+      'started c1 bash by main',
+      'refused c1 bash after its start: error [engagement.window]: bash was not executed: the engagement window ended at 18:00',
+    ]);
+  });
+
+  test('records the refusals of the broker, each with an id of its own', async () => {
+    const { entries, record } = recorder();
+    const ctx = context([ok('write_file', 'write')], {
+      mode: 'readonly',
+      engagement: { closed: () => null, ended: new AbortController().signal, recorder: record },
+    });
+    await executeToolCall({ id: 'p', name: 'nope', input: {} }, ctx);
+    await executeToolCall({ id: 'p', name: 'write_file', input: {} }, ctx);
+    expect(entries).toEqual([
+      "refused c1 nope: error [tool.unknown]: unknown tool 'nope'",
+      "refused c2 write_file: error [policy.denied]: tool 'write_file' is not available in readonly mode",
+    ]);
   });
 });

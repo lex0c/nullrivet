@@ -72,6 +72,33 @@ export interface EngagementWindow {
   closed(): string | null;
   // Aborted when the window ends, for good.
   ended: AbortSignal;
+  // Records every call, when the engagement keeps an evidence log.
+  recorder?: CallRecorder | undefined;
+}
+
+// What an engagement's evidence log records of each call the broker handles. A call is dispatched
+// only once its start is written and synced; every refusal is recorded too, and every outcome.
+export interface CallRecorder {
+  // An id unique in the session, which every entry of the call holds.
+  nextCallId(): string;
+  // Writes and syncs the start of a call about to be dispatched; false when it could not be, and
+  // the call must then not run.
+  started(callId: string, call: ToolCall, details: CallDetails): boolean;
+  finished(callId: string, call: ToolCall, agent: string, result: ToolResult): void;
+  // A call not dispatched; `started` when its start was written already.
+  refused(
+    callId: string,
+    call: ToolCall,
+    agent: string,
+    started: boolean,
+    result: ToolResult,
+  ): void;
+}
+
+export interface CallDetails {
+  agent: string;
+  cwd: string;
+  runsOnHost: boolean;
 }
 
 export interface ToolExecutionContext {
@@ -85,6 +112,8 @@ export interface ToolExecutionContext {
   // when there are none.
   newInstructions?: (paths: readonly string[]) => Promise<string | null>;
   engagement?: EngagementWindow;
+  // Which agent makes the call: main, or a subagent's id.
+  agent?: string;
 }
 
 // Every tool call passes here: it is authorized in this process, then dispatched to the backend,
@@ -96,27 +125,38 @@ export const executeToolCall = async (
   call: ToolCall,
   context: ToolExecutionContext,
 ): Promise<ToolResult> => {
+  const recorder = context.engagement?.recorder;
+  const agent = context.agent ?? 'main';
+  const callId = recorder?.nextCallId();
+  // A call not dispatched, recorded as such; `started` once its start was written.
+  const refuse = (result: ToolResult, started = false): ToolResult => {
+    if (recorder !== undefined && callId !== undefined) {
+      recorder.refused(callId, call, agent, started, result);
+    }
+    return result;
+  };
   const tool = context.tools.get(call.name);
   if (tool === undefined) {
     const available = [...context.tools.keys()].join(', ');
-    return toolError(
-      'tool.unknown',
-      `unknown tool '${call.name}'`,
-      `available tools: ${available}`,
+    return refuse(
+      toolError('tool.unknown', `unknown tool '${call.name}'`, `available tools: ${available}`),
     );
   }
   if (!isToolAllowed(context.mode, tool)) {
-    return toolError(
-      'policy.denied',
-      `tool '${call.name}' is not available in ${context.mode} mode`,
-      'only read tools can be used in readonly mode',
+    return refuse(
+      toolError(
+        'policy.denied',
+        `tool '${call.name}' is not available in ${context.mode} mode`,
+        'only read tools can be used in readonly mode',
+      ),
     );
   }
   // Before the backend is chosen, so that a tool that runs on the host is held to it too.
   const window = tool.startsCommands === true ? context.engagement : undefined;
   const closed = window?.closed() ?? null;
-  if (closed !== null) return windowRefusal(call.name, closed);
+  if (closed !== null) return refuse(windowRefusal(call.name, closed));
   const backend = tool.runsOnHost === true ? IN_PROCESS_BACKEND : context.backend;
+  let started = false;
   try {
     // Inside the try: targetPaths is tool code and may reject its arguments.
     if (tool.targetPaths !== undefined && context.newInstructions !== undefined) {
@@ -127,27 +167,57 @@ export const executeToolCall = async (
           `${call.name} was not executed: AGENTS.md instructions that you had not seen apply to this path`,
           'Read them and issue the call again, adjusted to follow them.',
         );
-        return { ...refusal, content: `${refusal.content}\n\n${instructions}` };
+        return refuse({ ...refusal, content: `${refusal.content}\n\n${instructions}` });
       }
     }
     // Checked last before the dispatch, after any wait above, so a call the backend never received
     // is reported as not executed rather than as interrupted.
     const lost = context.backend.failure?.() ?? null;
-    if (lost !== null) return lostBackend(call.name, lost, false);
+    if (lost !== null) return refuse(lostBackend(call.name, lost, false));
     // Again, after the wait above: a window that ended meanwhile refuses the command before it is
     // sent, and the end of the window, which stops the jobs, cannot fall between this and the send.
     const ended = window?.closed() ?? null;
-    if (ended !== null) return windowRefusal(call.name, ended);
+    if (ended !== null) return refuse(windowRefusal(call.name, ended));
+    if (recorder !== undefined && callId !== undefined) {
+      const details = { agent, cwd: context.cwd, runsOnHost: tool.runsOnHost === true };
+      if (!recorder.started(callId, call, details)) {
+        return refuse(
+          toolError(
+            'evidence.failed',
+            `${call.name} was not executed: its start could not be written to the evidence log`,
+          ),
+        );
+      }
+      started = true;
+      // Checked again once the start is written and synced, which takes time: with nothing awaited
+      // between these checks and the send, a window that ended or a backend lost meanwhile refuses
+      // the call, whose start then has this outcome.
+      const lostSince = context.backend.failure?.() ?? null;
+      if (lostSince !== null) return refuse(lostBackend(call.name, lostSince, false), true);
+      const endedSince = window?.closed() ?? null;
+      if (endedSince !== null) return refuse(windowRefusal(call.name, endedSince), true);
+    }
     // Only the calls that start commands end with the window: the others, such as reading a file
     // or listing jobs, go on after it.
     const result = await backend.execute(tool, call.input, {
       cwd: context.cwd,
       signal:
         window === undefined ? context.signal : AbortSignal.any([context.signal, window.ended]),
+      ...(callId === undefined ? {} : { callId }),
     });
-    return { ...result, content: stripAnsi(result.content) };
+    return finish({ ...result, content: stripAnsi(result.content) });
   } catch (error) {
-    if (error instanceof BackendLostError) return lostBackend(call.name, error.message, true);
-    return thrownToolError(call.name, error);
+    const result =
+      error instanceof BackendLostError
+        ? lostBackend(call.name, error.message, true)
+        : thrownToolError(call.name, error);
+    return started ? finish(result) : refuse(result);
+  }
+
+  function finish(result: ToolResult): ToolResult {
+    if (recorder !== undefined && callId !== undefined) {
+      recorder.finished(callId, call, agent, result);
+    }
+    return result;
   }
 };

@@ -5,7 +5,7 @@ import { thrownToolError } from '../agent/tool-broker.ts';
 import { errorMessage } from '../errors.ts';
 import { BUILTIN_TOOLS } from '../tools/index.ts';
 import { createJobTools, JobRegistry } from '../tools/jobs.ts';
-import { jobLogs, removeOutputFiles } from '../tools/output-files.ts';
+import { jobLogs, outputFiles, removeOutputFiles } from '../tools/output-files.ts';
 import { killAllProcessGroups } from '../tools/process.ts';
 import { type Tool, type ToolResult, toolError } from '../tools/types.ts';
 import { LineSplitter } from './lines.ts';
@@ -67,6 +67,8 @@ const resultMessage = (id: string, result: ToolResult): string => {
       isError: result.isError,
       ...(meta === undefined ? {} : { meta }),
       ...(touchedPaths === undefined ? {} : { touchedPaths }),
+      // Within the protocol's bounds by construction: the tools report at most one per stream.
+      ...(result.outputs === undefined ? {} : { outputs: result.outputs }),
     },
   });
   if (Buffer.byteLength(line, 'utf8') <= MAX_LINE_BYTES) return line;
@@ -126,12 +128,21 @@ export const runWorker = (argv: readonly string[]): void => {
   try {
     const { values } = parseArgs({
       args: [...argv],
-      options: { tools: { type: 'string' }, jobs: { type: 'string' } },
+      options: {
+        tools: { type: 'string' },
+        jobs: { type: 'string' },
+        'hash-outputs': { type: 'boolean' },
+      },
       strict: true,
       allowPositionals: false,
     });
     toolNames = (values.tools ?? '').split(',').filter((name) => name.length > 0);
     jobSession = values.jobs;
+    // For the evidence log: what each command writes is hashed as it comes.
+    if (values['hash-outputs'] === true) {
+      outputFiles.hashOutputs();
+      jobLogs.hashOutputs();
+    }
   } catch (error) {
     fail(`invalid worker arguments: ${errorMessage(error)}`);
     return;
@@ -148,7 +159,8 @@ export const runWorker = (argv: readonly string[]): void => {
     // and its events before whatever they let resume.
     let seq = 0;
     registry = new JobRegistry(jobLogs, {
-      started: (jobId) => send({ type: 'job.started', jobId }),
+      started: (jobId, callId) =>
+        send({ type: 'job.started', jobId, ...(callId === undefined ? {} : { callId }) }),
       occurred: (event) => {
         seq += 1;
         send({ type: 'job.event', seq, event });
@@ -184,7 +196,7 @@ export const runWorker = (argv: readonly string[]): void => {
       result = toolError('tool.unknown', `the sandbox does not run ${name}`);
     } else {
       try {
-        result = await tool.execute(input, { cwd, signal: controller.signal });
+        result = await tool.execute(input, { cwd, signal: controller.signal, callId: id });
       } catch (error) {
         result = thrownToolError(name, error);
       }

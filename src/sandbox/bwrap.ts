@@ -364,6 +364,8 @@ export interface SecurityNetwork {
   tools: NetworkTools;
   // The host's directory that holds the file `hosts`.
   hostsDirectory: string;
+  // With an evidence log: the worker hashes what each command writes, for the log.
+  hashOutputs?: boolean;
 }
 
 // The `security` profile: the project through an overlay whose writes stay in memory and are
@@ -377,7 +379,7 @@ const launch = (
   project: readonly string[],
   network?: SecurityNetwork,
 ): WorkerLaunch => {
-  const worker = sandboxedWorker(options.tools, options.jobs);
+  const worker = sandboxedWorker(options.tools, options.jobs, network?.hashOutputs === true);
   const env = sandboxEnv(options.hostEnv, options.home);
   const identity = identityFiles(options.home);
   const files = [

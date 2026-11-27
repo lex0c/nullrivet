@@ -1,8 +1,19 @@
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, readFileSync, readlinkSync, renameSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  constants,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readlinkSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
-import type { EngagementWindow } from '../agent/tool-broker.ts';
+import packageJson from '../../package.json' with { type: 'json' };
+import type { CallRecorder, EngagementWindow } from '../agent/tool-broker.ts';
 import { errorMessage } from '../errors.ts';
+import { outputFiles } from '../tools/output-files.ts';
 import {
   atLeast,
   type LaunchOptions,
@@ -23,6 +34,10 @@ import {
   resolveEngagement,
   windowState,
 } from './engagement.ts';
+import { sha256 } from './evidence.ts';
+import { COPIES_LIMIT_BYTES, preserveOutput, type ReportedOutput } from './evidence-copy.ts';
+import { callRecorder, EvidenceRecorder, scopeRecord } from './evidence-recorder.ts';
+import { openEvidenceStore } from './evidence-store.ts';
 import { defaultLimits, type LimitedStart, limitedLaunch, prepareLimits } from './limits.ts';
 import { NetworkControl } from './network/control.ts';
 import { GIVEN_UP, type NetworkTools, networkTools, pinNamespaces } from './network/namespace.ts';
@@ -35,9 +50,13 @@ import {
   type RunningProxy,
 } from './network/proxy-process.ts';
 import type { Scope } from './network/ruleset.ts';
+import type { JobMessage } from './protocol.ts';
+import { hostSecrets } from './redaction.ts';
 import { type Launched, WorkerBackend } from './worker-backend.ts';
+import { sandboxedWorker } from './worker-command.ts';
 import {
   createSandboxDirectory,
+  processStart,
   removeWorkspaceDirectory,
   type SandboxDirectory,
 } from './workspace.ts';
@@ -55,6 +74,12 @@ import {
 const TICK_MS = 1_000;
 
 export type SecurityNotice = (level: 'info' | 'warning', text: string) => void;
+
+// A process of the sandbox, by its id and its start, which tells it from a later one of the id.
+interface SandboxProcess {
+  pid: number;
+  start: string;
+}
 
 export interface SecurityOptions {
   host: SandboxHost;
@@ -76,6 +101,8 @@ export interface SecurityOptions {
   // For tests: how the proxy of the names reached through it is started, a process of its own in
   // a sandbox and a scope of its own otherwise.
   proxy?: ProxyFactory;
+  // For tests: a smaller limit for the evidence log, which fails as a full disk would.
+  evidenceMaxBytes?: number;
 }
 
 export interface RefreshReport {
@@ -213,6 +240,13 @@ export class SecuritySession implements EngagementWindow {
   private closing: Promise<void> | null = null;
   private refreshing: Promise<unknown> = Promise.resolve();
   private reportedFailure = false;
+  // What the broker records each call by, with an evidence log.
+  readonly recorder: CallRecorder | undefined;
+  // What the session's copies may still take.
+  private readonly copiesBudget = { left: COPIES_LIMIT_BYTES };
+  // Why the evidence log cannot be written, once it cannot: the session goes on unrecorded no more.
+  private evidenceFailure: string | null = null;
+  private evidenceEnd: { level: 'info' | 'warning'; text: string } | null = null;
   private readonly ticker: ReturnType<typeof setInterval>;
 
   private constructor(
@@ -229,8 +263,30 @@ export class SecuritySession implements EngagementWindow {
     private readonly proxy: RunningProxy | null,
     // The proxy's credential, which the variables of the worker's commands carry.
     private readonly token: string | null,
+    // The evidence log, when the engagement asks for one.
+    readonly evidence: EvidenceRecorder | null,
+    evidenceFailure: { handle: (reason: string) => void },
+    // The sandbox's first process, through whose root the copies read its /tmp.
+    private readonly sandboxProcess: SandboxProcess | null,
+    jobFacts: { handle: (fact: JobMessage) => void },
   ) {
     this.ended = this.ending.signal;
+    evidenceFailure.handle = (reason) => this.evidenceFailed(reason);
+    if (evidence !== null && sandboxProcess !== null) {
+      const secrets = [
+        ...hostSecrets(options.env),
+        ...(token === null ? [] : [{ value: token, what: 'proxy credential' }]),
+      ];
+      this.recorder = callRecorder(
+        evidence,
+        secrets,
+        (output, owner, kind) => this.preserve(output, owner, kind),
+        (why) => this.options.notice('warning', `evidence: ${why}`),
+      );
+      jobFacts.handle = (fact) => this.jobFact(fact);
+    }
+    const early = evidence?.failed() ?? null;
+    if (early !== null) this.evidenceFailed(early);
     // A proxy that ends by itself frees its port of the host, where pasta still forwards the
     // sandbox's: whatever listens there next would receive the sandbox's requests and its
     // credential. The network closes, as when pasta ends, and the watch tells it.
@@ -278,8 +334,33 @@ export class SecuritySession implements EngagementWindow {
       };
     }
     if (options.signal?.aborted === true) return { error: 'the start of the sandbox was given up' };
+    // The evidence log, which the sandbox must not see, is opened before anything runs. A failure
+    // to write it is the session's to handle once it exists, and the start's until then.
+    const evidenceFailure: { handle: (reason: string) => void } = { handle: () => undefined };
+    let evidence: EvidenceRecorder | null = null;
+    if (engagement.evidence !== undefined) {
+      const store = openEvidenceStore({
+        dir: engagement.evidence.dir,
+        // What the sandbox sees: the project, the directories bound read-only, and the worker's
+        // own files, the source tree included when it runs from source.
+        forbidden: [
+          options.launch.root,
+          ...options.launch.readOnlyDirs,
+          ...sandboxedWorker(options.launch.tools).mounts.map(({ source }) => source),
+        ],
+        engagementBytes: engagement.source?.bytes ?? Buffer.alloc(0),
+        onFailure: (reason) => evidenceFailure.handle(reason),
+        ...(options.now === undefined ? {} : { now: options.now }),
+        ...(options.evidenceMaxBytes === undefined ? {} : { maxBytes: options.evidenceMaxBytes }),
+      });
+      if ('error' in store) return store;
+      evidence = new EvidenceRecorder(store, now);
+    }
     const created = createSandboxDirectory(options.env);
-    if ('error' in created) return created;
+    if ('error' in created) {
+      await evidence?.close({ outcome: 'not started', reason: created.error });
+      return created;
+    }
     const { directory } = created;
     const etc = join(directory.path, 'etc');
     let control: NetworkControl | null = null;
@@ -313,7 +394,9 @@ export class SecuritySession implements EngagementWindow {
         // Still listed as live: the exit handler and the next session try again.
         left.push(`the sandbox directory was not removed: ${errorMessage(error)}`);
       }
-      return { error: [why, ...left].join('; ') };
+      const error = [why, ...left].join('; ');
+      await evidence?.close({ outcome: 'not started', reason: error });
+      return { error };
     };
     try {
       mkdirSync(etc, { mode: 0o700 });
@@ -321,6 +404,10 @@ export class SecuritySession implements EngagementWindow {
     } catch (error) {
       return undo(`the hosts file of the sandbox cannot be written: ${errorMessage(error)}`);
     }
+    // With an evidence log, the sandbox's first process, by its id and its start: the outputs the
+    // worker saves in the sandbox's /tmp are read through its root.
+    const root: { process: SandboxProcess | null } = { process: null };
+    const jobFacts: { handle: (fact: JobMessage) => void } = { handle: () => undefined };
     units += 1;
     const unit = `nullrivet-pasta-${process.pid}-${units}.scope`;
     const proxyUnit = `nullrivet-proxy-${process.pid}-${units}.scope`;
@@ -332,6 +419,7 @@ export class SecuritySession implements EngagementWindow {
     // the scope authorizes directly, where the sandbox reaches it without the proxy.
     const told = new Set<string>();
     const report = (event: ProxyEvent): void => {
+      evidence?.proxy(event);
       if (event.type !== 'refused' || event.direct !== true || told.has(event.reason)) return;
       told.add(event.reason);
       options.notice(
@@ -357,6 +445,12 @@ export class SecuritySession implements EngagementWindow {
       preparing = (async () => {
         verifyLauncher(launched.pid, launched.status);
         pid = launched.pid;
+        if (evidence !== null) {
+          const child = (JSON.parse(launched.status) as Record<string, number>)['child-pid'];
+          const started = typeof child === 'number' ? processStart(child) : null;
+          if (started === null) throw new Error("the sandbox's first process cannot be found");
+          root.process = { pid: child as number, start: started };
+        }
         if (token !== null) {
           proxy = await startProxy({
             policy: proxyPolicy(token, resolved.value),
@@ -393,16 +487,47 @@ export class SecuritySession implements EngagementWindow {
       })();
       return preparing;
     };
+    const warnings = [
+      ...limits.warnings,
+      ...created.warnings,
+      ...ownAddressesWarning(resolved.value.scope),
+      ...(environment?.warnings ?? []),
+    ];
+    // Written and synced before the worker exists: it runs nothing the log has not seen start.
+    if (evidence !== null) {
+      const applied = scopeRecord(resolved.value.scope);
+      const source = engagement.source;
+      const started = evidence.sessionStarted({
+        nullrivet: packageJson.version,
+        profile: 'security',
+        engagement: {
+          path: source?.path ?? options.engagementPath,
+          sha256: sha256(source?.bytes ?? Buffer.alloc(0)),
+          ...(engagement.name === undefined ? {} : { name: engagement.name }),
+        },
+        scope: applied.record,
+        scopeSha256: applied.sha256,
+        names: resolved.value.names,
+        proxied: resolved.value.proxied,
+        warnings,
+      });
+      if (!started) return undo(evidence.failed() ?? 'the evidence log cannot be written');
+    }
     let backend: WorkerBackend;
     try {
       backend = await WorkerBackend.start({
         launch: limitedLaunch(
-          securityLaunch(options.launch, { tools, hostsDirectory: etc }),
+          securityLaunch(options.launch, {
+            tools,
+            hostsDirectory: etc,
+            ...(evidence === null ? {} : { hashOutputs: true }),
+          }),
           limits as LimitedStart,
         ),
         tools: options.launch.tools,
         jobs: true,
         prepare,
+        ...(evidence === null ? {} : { onJobFact: (fact: JobMessage) => jobFacts.handle(fact) }),
         ...(environment === null ? {} : { environment: environment.variables }),
         ...(options.signal === undefined ? {} : { signal: options.signal }),
         ...(options.prepareTimeoutMs === undefined
@@ -420,14 +545,13 @@ export class SecuritySession implements EngagementWindow {
       engagement,
       resolved.value,
       options,
-      [
-        ...limits.warnings,
-        ...created.warnings,
-        ...ownAddressesWarning(resolved.value.scope),
-        ...(environment?.warnings ?? []),
-      ],
+      warnings,
       proxy,
       token,
+      evidence,
+      evidenceFailure,
+      root.process,
+      jobFacts,
     );
   }
 
@@ -467,7 +591,12 @@ export class SecuritySession implements EngagementWindow {
   // Resolves the names again and puts the new scope in force, then its hosts file. Refreshes run
   // one after another; a close goes ahead of them, and none puts anything in force after it.
   refresh(): Promise<RefreshReport | { error: string }> {
-    const run = this.refreshing.then(() => this.refreshNow());
+    const run = this.refreshing
+      .then(() => this.refreshNow())
+      .then((report) => {
+        if ('error' in report) this.evidence?.scopeRefreshFailed(report.error);
+        return report;
+      });
     this.refreshing = run.catch(() => undefined);
     return run;
   }
@@ -555,6 +684,7 @@ export class SecuritySession implements EngagementWindow {
       const removed = old.filter((address) => !addresses.includes(address));
       return added.length + removed.length === 0 ? [] : [{ host, added, removed }];
     });
+    this.evidence?.scopeRefreshed(this.resolved.scope, resolved.value.scope, changes);
     this.resolved = resolved.value;
     return { changes };
   }
@@ -572,7 +702,20 @@ export class SecuritySession implements EngagementWindow {
         await proxy?.catch((error: unknown) =>
           failures.push(`the proxy did not end: ${errorMessage(error)}`),
         );
+        // With an evidence log, the jobs are stopped and the copies under way waited for while the
+        // sandbox, whose /tmp they read, still runs: a job's end brings its log.
+        if (this.evidence !== null) {
+          await this.backend
+            .stopJobs()
+            .catch((error: unknown) =>
+              failures.push(`the jobs could not be stopped: ${errorMessage(error)}`),
+            );
+          await this.evidence.drain();
+        }
         await this.backend.close();
+        // The calls the worker's end failed come back first: their outcome goes in before the end.
+        await new Promise((resolve) => setImmediate(resolve));
+        await this.closeEvidence();
         try {
           removeWorkspaceDirectory(this.directory);
         } catch (error) {
@@ -608,6 +751,106 @@ export class SecuritySession implements EngagementWindow {
     return (this.options.now ?? (() => new Date()))();
   }
 
+  // The evidence log cannot be written: the session stops by ways that do not depend on it, the
+  // network closed, commands refused and the jobs stopped, and the operator is told.
+  private evidenceFailed(reason: string): void {
+    if (this.evidenceFailure !== null) return;
+    this.evidenceFailure = reason;
+    void this.closeNetwork('the evidence log cannot be written');
+    void this.backend
+      .stopJobs()
+      .catch((error: unknown) =>
+        this.options.notice('warning', `the jobs could not be stopped: ${errorMessage(error)}`),
+      );
+    this.options.notice(
+      'warning',
+      `The evidence log cannot be written, so the network is closed and commands are refused: ${reason}`,
+    );
+  }
+
+  // Copies an output the worker saved into the evidence directory, and tells the operator when the
+  // copy is not what the worker saved, or could not be made.
+  private async preserve(
+    output: ReportedOutput,
+    owner: string,
+    kind: 'calls' | 'jobs',
+  ): Promise<Record<string, unknown>> {
+    const evidence = this.evidence as EvidenceRecorder;
+    // Opened for each copy, once the sandbox stands: before its release, its first process is still
+    // in the host's root. Its id is checked to be the same process still, by its start.
+    const sandbox = this.sandboxProcess as SandboxProcess;
+    let rootFd: number;
+    try {
+      if (processStart(sandbox.pid) !== sandbox.start) throw new Error('the sandbox has ended');
+      rootFd = openSync(`/proc/${sandbox.pid}/root`, constants.O_RDONLY | constants.O_DIRECTORY);
+    } catch (error) {
+      const why = `the sandbox's files cannot be reached: ${errorMessage(error)}`;
+      return { stream: output.stream, preservation: 'omitted', omitted: why, matchesSaved: null };
+    }
+    try {
+      const { record, problem } = await preserveOutput(
+        output,
+        owner,
+        { kind, rootFd },
+        { store: evidence.store, partBytes: outputFiles.partBytes, budget: this.copiesBudget },
+      );
+      if (problem !== null) this.options.notice('warning', `evidence: ${problem}`);
+      return record;
+    } finally {
+      closeSync(rootFd);
+    }
+  }
+
+  // A fact of a background job, as the worker sent it: its start, and its end with its log.
+  private jobFact(fact: JobMessage): void {
+    const evidence = this.evidence as EvidenceRecorder;
+    if (fact.type === 'job.started') {
+      evidence.jobStarted(fact.jobId, fact.callId ?? 'unknown');
+      return;
+    }
+    if (fact.type !== 'job.event' || fact.event.type !== 'job.finished') return;
+    const { jobId, status, exitCode, signal, durationMs, log } = fact.event;
+    const owner = `job-${jobId}`;
+    const finished = (record: Record<string, unknown>): void =>
+      evidence.jobFinished(jobId, { status, exitCode, signal, durationMs, log: record });
+    if (log === null) {
+      finished({ stream: 'log', preservation: 'omitted', omitted: 'the job kept no log' });
+      return;
+    }
+    void evidence.track(
+      this.preserve({ ...log, stream: 'log' }, owner, 'jobs').then(finished, (error: unknown) => {
+        const why = `the log could not be preserved: ${errorMessage(error)}`;
+        finished({ stream: 'log', preservation: 'omitted', omitted: why, matchesSaved: null });
+        this.options.notice('warning', `evidence: ${why}`);
+      }),
+    );
+  }
+
+  // Ends the evidence log, and keeps what the operator is told of it, its final hash the anchor to
+  // check it with: shown once the session is closed, where an interactive one has restored the
+  // terminal.
+  private async closeEvidence(): Promise<void> {
+    if (this.evidence === null) return;
+    const summary = await this.evidence.close({ reason: 'the session ended' });
+    const failure = this.evidence.failed();
+    const anchor = `the SHA-256 of the last is ${summary.finalHash}. Keep it apart from the log, to check it with --verify-evidence --expected-hash`;
+    this.evidenceEnd =
+      failure === null
+        ? {
+            level: 'info',
+            text: `The evidence log ${summary.path} holds ${summary.entries} entries; ${anchor}.`,
+          }
+        : {
+            level: 'warning',
+            text: `The evidence log ${summary.path} stopped at ${summary.entries} entries, ${failure}; ${anchor}.`,
+          };
+  }
+
+  // What the operator is told of the evidence log once the session is closed; null without one.
+  evidenceOutcome(): { level: 'info' | 'warning'; text: string } | null {
+    return this.evidenceEnd;
+  }
+
   private tick(): void {
     if (this.closing !== null) return;
     if (!this.ending.signal.aborted && windowState(this.engagement, this.now()) === 'after') {
@@ -621,6 +864,7 @@ export class SecuritySession implements EngagementWindow {
     const failure = this.control.failure();
     if (failure !== null && !this.reportedFailure && !this.ending.signal.aborted) {
       this.reportedFailure = true;
+      this.evidence?.networkStopped(failure);
       this.options.notice('warning', `the sandbox's network stopped: ${failure}`);
     }
   }
@@ -630,6 +874,7 @@ export class SecuritySession implements EngagementWindow {
   private async end(): Promise<void> {
     if (this.ending.signal.aborted) return;
     this.ending.abort();
+    this.evidence?.windowEnded((this.engagement.window as { until: Date }).until);
     const until = iso((this.engagement.window as { until: Date }).until);
     // Each step is taken whatever the others did, and every failure is told.
     const problems: string[] = [];

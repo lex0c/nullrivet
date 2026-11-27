@@ -113,6 +113,8 @@ it until end of file, so programs that start nullrivet without piping anything s
 | `--context-window <n>` | Override the model's context window, in tokens. |
 | `--max-output <n>` | Override the model's output token limit. |
 | `--list-models` | List the models of the built-in catalog and exit. See [Models](#models). |
+| `--verify-evidence <file>` | Check an evidence log of `--sandbox security` and the copies beside it, print its final hash, and exit: 0 when complete, 4 when consistent but incomplete, 1 when corrupted. |
+| `--expected-hash <sha256>` | With `--verify-evidence`: the final hash kept apart from the log, which the log's must be. |
 | `-h, --help` | Show help. |
 | `-v, --version` | Show the version. |
 
@@ -297,7 +299,11 @@ only an `/etc/hosts` with the file's names. The session states the scope at the 
 model is told it. Outside the window, commands are refused; at its end, the network closes for good,
 and the running commands and jobs are stopped. The project is writable through an overlay kept in
 memory, discarded at exit. The profile needs nftables, passt and systemd's user manager, whose
-cgroup limits it requires. `/scope refresh` resolves the names again.
+cgroup limits it requires. `/scope refresh` resolves the names again. With
+`"evidence": { "dir": "./evidence" }` in the engagement file, the host records each call, its
+outputs and the network's events in a hash-chained log, and gives the operator its final hash at
+the end; `--verify-evidence` checks it. The evidence directory holds the findings as produced, so it
+is sensitive.
 
 ```sh
 nullrivet --sandbox security --engagement acme.json "scan the web server in scope"

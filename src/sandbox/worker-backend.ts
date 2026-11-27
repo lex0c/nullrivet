@@ -12,6 +12,7 @@ import {
   encodeMessage,
   environmentProblem,
   type HostToWorker,
+  type JobMessage,
   MAX_LINE_BYTES,
   PROTOCOL_VERSION,
   parseWorkerMessage,
@@ -58,6 +59,8 @@ export interface WorkerBackendOptions {
   // Variables the worker's commands inherit, sent on the protocol's descriptors once it is ready
   // and before any call: a launcher's arguments and environment are readable by every user.
   environment?: Record<string, string>;
+  // Each fact of a background job as it arrives, for the evidence log.
+  onJobFact?: (fact: JobMessage) => void;
 }
 
 const DEFAULT_READY_TIMEOUT_MS = 10_000;
@@ -112,6 +115,7 @@ export class WorkerBackend implements ToolBackend {
   private closing = false;
   // The background jobs the worker runs, when it was started with them.
   readonly jobs: JobProjection | undefined;
+  private readonly onJobFact: ((fact: JobMessage) => void) | undefined;
   private ready = false;
   private sequence = 0;
   private untrack: () => void = () => undefined;
@@ -135,6 +139,7 @@ export class WorkerBackend implements ToolBackend {
     this.released = options.launch.gate !== true;
     this.cancelGraceMs = options.cancelGraceMs ?? DEFAULT_CANCEL_GRACE_MS;
     this.jobs = options.jobs === true ? new JobProjection() : undefined;
+    this.onJobFact = options.onJobFact;
     this.toWorker = child.stdio[3] as Writable;
     const fromWorker = child.stdio[4] as Readable;
     if (child.pid !== undefined) this.untrack = trackProcessGroup(child.pid);
@@ -357,7 +362,8 @@ export class WorkerBackend implements ToolBackend {
       );
     }
     this.sequence += 1;
-    const id = String(this.sequence);
+    // The id the evidence log gave the call, so that what the worker reports of it names it.
+    const id = context.callId ?? String(this.sequence);
     const line = encodeMessage({
       type: 'tool.execute',
       id,
@@ -518,7 +524,12 @@ export class WorkerBackend implements ToolBackend {
         return;
       }
       const violation = this.jobs.receive(message);
-      if (violation !== null) this.lose(`the worker broke the job protocol: ${shown(violation)}`);
+      if (violation !== null) {
+        this.lose(`the worker broke the job protocol: ${shown(violation)}`);
+        return;
+      }
+      // Apart from the projection, whose delivery to the model can drop and prune what it holds.
+      this.onJobFact?.(message);
       return;
     }
     const call = this.pending.get(message.id);

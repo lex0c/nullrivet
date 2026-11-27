@@ -75,6 +75,8 @@ export interface TurnDependencies {
   // Read before every request and every tool call, so a mode change takes effect immediately.
   mode: () => ExecutionMode;
   engagement?: EngagementWindow;
+  // Which agent this is, for the evidence log: main, or a subagent's id.
+  agent?: string;
   cwd: string;
   systemPrompt: () => string;
   // Text sent at the start of the first user message of every request, such as the project
@@ -290,6 +292,7 @@ const executeToolCalls = async (
       backend: deps.toolBackend,
       newInstructions: unseenBeforeWrite,
       ...(deps.engagement === undefined ? {} : { engagement: deps.engagement }),
+      ...(deps.agent === undefined ? {} : { agent: deps.agent }),
     });
     let content = result.content;
     const attached = await discover(result.touchedPaths ?? []);

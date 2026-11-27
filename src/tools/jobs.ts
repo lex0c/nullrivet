@@ -77,7 +77,8 @@ export interface BackgroundJobs extends PendingEventSource<JobEvent> {
 // Called by a registry as things happen, before anything waiting on them resumes, so a sandboxed
 // worker can send each fact to the host in the order it occurred.
 export interface JobHooks {
-  started(jobId: string): void;
+  // With the id of the call that started the job, when the call had one.
+  started(jobId: string, callId?: string): void;
   occurred(event: JobEvent): void;
   // A tool showed the job to the model, with every event it had so far.
   shown(jobId: string): void;
@@ -153,6 +154,8 @@ class Job {
   finishDelivered = false;
   // Handed to the registry's hooks as started.
   startAnnounced = false;
+  // The id of the call that started it, when the call had one.
+  callId: string | undefined;
   // The end of the previous chunk, so a ready pattern split between two chunks is found.
   private readyCarry = Buffer.alloc(0);
   // Callbacks of waits in progress, removed when they run or when the wait gives up, so a job
@@ -334,6 +337,8 @@ export const describeJobEvent = (event: JobEvent): string => {
 export interface JobStartOptions {
   command: string;
   cwd: string;
+  // The id of the call that starts the job, which its start is reported with.
+  callId?: string;
   maxRuntimeMs?: number;
   readyPattern?: string;
 }
@@ -395,7 +400,7 @@ export class JobRegistry implements BackgroundJobs {
   private announceStart(job: Job): void {
     if (this.hooks === null || job.startAnnounced) return;
     job.startAnnounced = true;
-    this.hooks.started(job.id);
+    this.hooks.started(job.id, job.callId);
   }
 
   private occurred(job: Job, kind: 'ready' | 'finished'): void {
@@ -456,6 +461,7 @@ export class JobRegistry implements BackgroundJobs {
         announce: () => this.announce(),
       },
     );
+    job.callId = options.callId;
     try {
       job.handle = await startProcess({
         file: 'bash',
@@ -713,6 +719,7 @@ export const createJobTools = (registry: JobRegistry | null, session: JobSession
         job = await registry.start({
           command,
           cwd: resolved.cwd,
+          ...(ctx.callId === undefined ? {} : { callId: ctx.callId }),
           ...(maxRuntimeMs === undefined ? {} : { maxRuntimeMs }),
           ...(readyPattern === undefined ? {} : { readyPattern }),
         });

@@ -1,10 +1,10 @@
 # Sandbox and engagement scope
 
-Status: phases 1 to 4b are implemented: the ToolBroker; the worker with the `inspect` profile,
+Status: phases 1 to 5 are implemented: the ToolBroker; the worker with the `inspect` profile,
 background jobs included; the `workspace` profile with its ChangeSet; the `security` profile, with
 the network of an engagement's scope within its window and the resource limits of every profile;
-and the proxy that authorizes names. The evidence log (phase 5) and the virtual machine backend
-(phase 6) are not. The document records the design, the facts checked on a Linux host
+the proxy that authorizes names; and the evidence log. The virtual machine backend (phase 6) is
+not. The document records the design, the facts checked on a Linux host
 while building it, and the decisions taken on it.
 
 ## Purpose
@@ -58,8 +58,8 @@ tries to cross the boundary fails to, not when the sandbox starts without errors
 - **Ephemeral by design.** Kept: the sandbox lives for one session, its writable layers are in
   memory-backed storage, and it is destroyed at exit.
 - **Zero persistence by default.** Kept: nothing is written unless the operator names a path, as
-  with `--session`. The evidence log (phase 5) is off unless an engagement file names its
-  directory, and the host writes it.
+  with `--session`. The evidence log is off unless an engagement file names its directory,
+  and the host writes it.
 - **Tool effects are allowed, without a workspace restriction.** Kept for the default, which stays
   unsandboxed. The profiles below are opt-in restrictions.
 - **Minimal execution policy, no approvals.** One exception, accepted: applying the changes of the
@@ -157,7 +157,7 @@ type WorkerToHost =
   | { type: 'worker.ready'; protocol: 3; tools: string[] }
   | { type: 'tool.result'; id: string; result: ToolResult }
   | { type: 'worker.error'; message: string }
-  | { type: 'job.started'; jobId: string }
+  | { type: 'job.started'; jobId: string; callId?: string }
   | { type: 'job.event'; seq: number; event: JobEvent }
   | { type: 'job.shown'; jobId: string }
   | { type: 'jobs.stopped'; running: number };
@@ -261,9 +261,9 @@ would be refused in it; the notes go out with the next prompt.
 - The project at its real path, so paths in tool results and in the conversation are the same
   inside and outside: read-only in `inspect`, an overlay in `workspace` and `security`.
 - In phase 2a the worker's saved output stays in the sandbox's own `/tmp`, and the directory where
-  the host saves subagent reports is bound read-only at its path. The writable directory shared
-  with the host, described under Files the worker writes, comes with its first consumer, the
-  evidence log (phase 5).
+  the host saves subagent reports is bound read-only at its path. No writable directory is
+  shared with the host: the evidence log reads the outputs the worker saves in the sandbox's own
+  `/tmp`, through the root of the sandbox's processes, as described under Evidence log.
 - Those subagent reports are a known limitation: they are written in the host's temporary
   directory, which may be on disk. They are removed at exit, but an end without the exit handler,
   such as SIGKILL, leaves them there. Memory-backed storage (phase 3) covers them.
@@ -979,8 +979,7 @@ the wire belong in the virtual machine backend's laboratory profile, not in `sec
 }
 ```
 
-The evidence log of phase 5 adds `"evidence": { "dir": "./evidence" }`; until then the field is
-refused.
+`"evidence": { "dir": "./evidence" }` adds the evidence log, described under Evidence log.
 
 - `deny` wins over `allow`. A file without `allow` entries leaves the sandbox without network.
 - `"via": "proxy"` on a host entry, as `{ "host": "app.acme.example", "ports": [443], "via":
@@ -1009,8 +1008,8 @@ refused.
   it as an IPv4 address; ports out of 1 to 65535 or an empty list (left out, every port); a time
   without its offset, so it does not depend on the machine's time zone, or one the calendar does not
   have, as a 30th of February or 24:00, which a date parser would move to the day after; a window
-  that ends before it starts; a rate out of 1 to 1,000,000. `deny` takes networks only. `evidence`
-  is refused until the evidence log exists, rather than ignored; `name` may not hold control
+  that ends before it starts; a rate out of 1 to 1,000,000. `deny` takes networks only; `evidence`
+  takes `dir` alone, a path; `name` may not hold control
   characters. The file is opened without blocking, and a FIFO or anything else that is not a regular
   file is refused; a file is read no further than its limit, whatever its size says. The file may
   hold 4 MiB and 1,000 host names, and the scope, once resolved, 20,000 destinations: each network
@@ -1041,28 +1040,115 @@ refused.
 
 ## Evidence log
 
-With `evidence.dir` set, the host records each tool call in a JSON lines file there, from what
-passes through the broker: time, tool, arguments, working directory, exit code, the SHA-256 of each
-output stream, and copies of the saved output, read from the session's saved output directory as
-described under Files the worker writes. The worker has no access to the evidence directory.
-Nothing is written when it is not set.
+With `"evidence": { "dir": "./evidence" }` in the engagement file, relative to the file's directory,
+the host records the session in a JSON lines file there: what ran, and what the sandbox could reach
+at each moment. Nothing is written without it. The worker never sees the evidence directory.
 
-Before an entry is written, credentials in the arguments are replaced by a marker that names what
-was removed: the values of the secrets the host holds, such as provider keys, by exact match, and
-by pattern `Authorization` headers, passwords in URLs and the values of password and token options.
-The pattern part is best effort, so the evidence directory is still to be handled as sensitive.
-Output copies are kept as produced, since they are the findings.
+**What it shows, and what it does not.** Each entry holds the SHA-256 of the line before it. The
+chain alone shows the material is consistent: an entry edited, removed or reordered breaks it. It
+does not show that the file was not rewritten whole with its hashes worked out again; compared
+with the final hash the operator is given at the end of the session, kept apart from the log, it
+shows nothing changed since. It is not a proof of authenticity, which would need a signature or a
+record kept by someone else.
 
-The network's events go in the same file, from the host, which decides them: the scope installed
-at the start, with the addresses each name authorized; each `/scope refresh`, with what it added
-and removed; an installation that failed, and the revocation it caused; the end of the window;
-pasta ending. A session can then show what the sandbox could reach at each moment, not only what
-its commands did.
+**The directory.** It is opened one component at a time without following a link, the last made with
+0700 when missing; one that exists must be the user's, not writable by group or others, and its real
+path, read from the descriptor opened, must not be inside what the sandbox sees: the project, a
+directory bound read-only, or the worker's own files, the source tree when it runs from source. Each
+session writes `<UTC time>-<pid>.jsonl` (0600, created exclusively) and a directory of the same name
+(0700) with `engagement.json`, the bytes of the engagement file the parser read, and the copies of
+outputs. `engagement.json` and its directory entry are synced, then the log is created and its entry
+synced, before the first entry is written.
 
-Each entry holds the hash of the previous one, which detects an entry removed or edited by
-accident. It does not prove integrity against someone who rewrites the whole file and recomputes
-the chain; that needs an anchor kept elsewhere, such as the final hash shown to the operator at
-the end of the session, or a signature.
+**The entries.** `{ seq, at, prev, type, ... }`:
+
+- `session.started`: the version and profile; the engagement file's path and the SHA-256 of the
+  bytes parsed, which `engagement.json` holds; the resolved scope and the SHA-256 of its canonical
+  form; the names with their addresses, those of the proxy, and the warnings. Written and synced
+  before the worker exists, or the session does not start.
+- `tool.started`: written and synced before the call is dispatched, or it is not; then the broker
+  checks again, with nothing awaited between the checks and the send, that the window is open and
+  the backend there, and a call refused then ends as `tool.refused` with the same id. It holds the
+  call's `callId`, unique in the session, the provider's id, the agent (`main` or a subagent's id),
+  the tool, the arguments with credentials taken out, the directory, and whether the tool runs on
+  the host. The broker records every call, those of the host and of subagents included.
+- `tool.finished`: whether the call failed, its result with the host's secrets taken out, its exit
+  code, signal and termination, and its outputs.
+- `tool.refused`: a call the broker did not dispatch, with why: the window, the policy, a lost
+  backend, the evidence log. With `started`, after its start was written.
+- `job.started`: a background job with the `callId` of the call that started it, which the worker
+  reports on the protocol. It is the observation of a start already under way: the durable intent
+  is the start of the `bash_background` call. `job.finished`: its status, exit code and log.
+  Recorded as the facts arrive, apart from what the model is told of them.
+- `scope.refreshed`, with the changes, the SHA-256 of the scope before and after, and the scope
+  in force after; `scope.refresh.failed`; `network.stopped`, with why; `window.ended`;
+  `proxy.authorized` and `proxy.refused`, twenty refusals a second one by one and the rest counted
+  in `proxy.refused.omitted`, written each second and at the end; `session.ended`, with the calls
+  started without an outcome and the jobs without an end.
+
+`session.started`, `tool.started`, `job.started`, `tool.refused`, the scope's, the network's and
+the window's entries and `session.ended` are synced; outcomes and the proxy's decisions are left to
+the system, and a loss of power shows as an operation without an outcome.
+
+**Outputs: received, saved, preserved.** With an evidence log, the worker hashes, as a command's
+output comes, every byte received, before any limit stops the saving, and every byte saved to parts;
+without one it hashes nothing. The result carries these, and the parts, in a field of its own the
+protocol checks, never read from its text. These are the bytes the capture received, which a timeout
+can cut short of what the command wrote. An output the result holds whole is recorded `inline`: its
+text, the host's secrets taken out, is the record. A reduced one was saved to parts in the sandbox's
+`/tmp`, held to its 1 GiB, which the host copies, reading it through the root of the sandbox's first
+process (`/proc/<pid>/root`, that process checked by its start to be the sandbox's still):
+
+- a part is taken only by a path of the output code's form, resolved with `openat2` as if that root
+  were the root directory, so that neither `..` nor an absolute path leaves it, through no symbolic
+  link at all, without blocking, as a regular file no larger than a part, read no further than that
+  plus a byte, in chunks without blocking the session. Checked: a link at the end of the path, or in
+  a directory of it, and `..`, were refused;
+- it must still be the same file, of the same size, once copied, and the copy and the directory
+  are synced before the entry that names the copy is written;
+- the record gives `receivedBytes`, `savedBytes`, `copiedBytes` and their SHA-256, whether all
+  that came was saved (`complete`), and whether the copy is what the worker saved
+  (`matchesSaved`), a truncated output included; null only when nothing was copied.
+
+A command can rewrite or replace a part before it is copied: the copy is then refused, or not what
+the worker saved, which the record says and the operator is told, never taken as preserved. Tested:
+a job that replaced each part with a link left the output recorded as not preserved. The copies of
+a session take 2 GiB at most; past them an output is recorded as not preserved. At the end of the
+session, while the sandbox still runs, the jobs are stopped, so that their end and their log are
+recorded, and the copies under way are waited for, ten seconds at most; those that did not end are
+recorded. The final hash is shown once the session is closed, on the standard error of an
+interactive one, whose terminal is restored by then.
+
+**Credentials.** In the arguments, the values of the secrets the host holds go by exact match, of
+eight characters or more: the providers' keys, the proxy's credential, and the password of the
+proxy the host goes through; and by pattern, best effort: `Authorization` and
+`Proxy-Authorization` values, passwords in URLs, the values of `--password`, `--passwd`, `--token`,
+`--api-key`, `--apikey`, `--secret` and `--client-secret`, curl's `-u user:password`, and
+`password`, `token` and `api_key` in query strings. A marker names what was removed. In results,
+the host's secrets go by exact match only, and the copies are kept as produced, since they are the
+findings: the evidence directory is to be handled as sensitive.
+
+**When it cannot be written.** A write is retried until the whole line is written; the sequence and
+the hash advance only after. On a failure, of a write, a sync, or the log's limit of 1 GiB, the log
+writes nothing more and throws nothing, and the session, told once, stops by ways that do not depend
+on it: the network closes, every call is refused (`evidence.failed`), since its start cannot be
+written, the jobs stop, and the operator is told, with the hash of the last line written. A session
+with an evidence log does not go on unrecorded.
+
+**Checking it.** `nullrivet --verify-evidence <file> [--expected-hash <sha256>]` works out the chain
+and the sequence again, checks the transitions (an outcome without a start, an id used twice, a job
+ended twice, an entry after the end, a job of an unknown call), the copy of the engagement file, and
+each copy named, looked for only in the directory beside the log, by a name of the form the host
+gives, never through a link. It exits 0 when the session is complete; 1 when it is corrupted, or its
+final hash is not the one expected, naming the first entry that is; and 4 when it is consistent but
+incomplete, with a line cut short, no end, operations without an outcome, or outputs not saved or
+preserved whole, 4 when it is consistent but incomplete, apart from the CLI's other codes, so that a
+script tells it from a mistyped option. Without `--expected-hash`, it says that only the consistency
+was checked. Tested: with the host killed during a command, the log keeps the call, which the
+verifier reports without an outcome.
+
+Individual packets are not recorded: the log shows what the sandbox could reach, what the proxy
+decided, and what the commands did.
 
 ## Resources
 
@@ -1235,8 +1321,11 @@ hard alike.
    reviews, of the proxy and of its place in the sandbox, found a port the proxy left that pasta
    still led to, the abstract Unix sockets its network shares, a connection opened for a client
    gone during its lookup, and the gaps listed in this document, all fixed and tested.
-5. **Evidence log**, written by the host, with credentials removed from the arguments: the tool
-   calls, and the network's events, as described under Evidence log.
+5. **Evidence log**, done, in the order three reviews of its plan set: the writer, the removal of
+   credentials and the verifier; the directory opened by descriptor and the session's and the
+   network's entries; the broker's record of each call, its start written before it is
+   dispatched, and the outputs' hashes in the worker; the shared output directory and the copies;
+   `--verify-evidence`.
 6. **Virtual machine backend** for macOS and for raw-socket laboratories.
 
 Each phase ends with tests that try to cross the boundary: read `~/.ssh` and the host's processes

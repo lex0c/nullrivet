@@ -32,6 +32,9 @@ export interface CliConfig {
   help: boolean;
   version: boolean;
   listModels: boolean;
+  // An evidence log to check instead of running, with the final hash kept elsewhere when given.
+  verifyEvidence: string | undefined;
+  expectedHash: string | undefined;
 }
 
 export class UsageError extends Error {
@@ -66,6 +69,13 @@ Options:
       --context-window <n>    Override the model context window
       --max-output <n>        Override the model output token limit
       --list-models           List the models of the built-in catalog
+      --verify-evidence <file>
+                              Check an evidence log and the copies beside it, and print its
+                              final hash: exit 0 when complete, 4 when consistent but
+                              incomplete, 1 when corrupted
+      --expected-hash <sha256>
+                              With --verify-evidence: the final hash kept apart from the log,
+                              which the log's must be
   -h, --help                  Show this help
   -v, --version               Show the version
 
@@ -153,6 +163,8 @@ export const parseCli = (
         'context-window': { type: 'string' },
         'max-output': { type: 'string' },
         'list-models': { type: 'boolean' },
+        'verify-evidence': { type: 'string' },
+        'expected-hash': { type: 'string' },
         help: { type: 'boolean', short: 'h' },
         version: { type: 'boolean', short: 'v' },
       },
@@ -179,7 +191,19 @@ export const parseCli = (
   const engagement = str('engagement');
   // Not for a run that only prints help, the version or the models: NULLRIVET_SANDBOX can name
   // the profile for every run, and the file comes with each.
-  const runs = values.help !== true && values.version !== true && values['list-models'] !== true;
+  const verifyEvidence = str('verify-evidence');
+  const expectedHash = str('expected-hash');
+  if (expectedHash !== undefined && verifyEvidence === undefined) {
+    throw new UsageError('--expected-hash needs --verify-evidence, whose log it anchors');
+  }
+  if (expectedHash !== undefined && !/^[0-9a-f]{64}$/.test(expectedHash)) {
+    throw new UsageError('--expected-hash must be a SHA-256 in lower-case hex, 64 characters');
+  }
+  const runs =
+    values.help !== true &&
+    values.version !== true &&
+    values['list-models'] !== true &&
+    verifyEvidence === undefined;
   if (runs && sandbox === 'security' && engagement === undefined) {
     throw new UsageError('--sandbox security needs --engagement <file>, which sets its scope');
   }
@@ -215,5 +239,7 @@ export const parseCli = (
     help: values.help === true,
     version: values.version === true,
     listModels: values['list-models'] === true,
+    verifyEvidence,
+    expectedHash,
   };
 };

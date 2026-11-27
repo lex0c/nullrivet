@@ -15,6 +15,8 @@ import { networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { executeToolCall, type ToolExecutionContext } from '../../src/agent/tool-broker.ts';
 import { type LaunchOptions, sandboxHost, sandboxProject } from '../../src/sandbox/bwrap.ts';
+import { sha256 } from '../../src/sandbox/evidence.ts';
+import { verifyEvidence } from '../../src/sandbox/evidence-verify.ts';
 import {
   type NetworkTools,
   networkTools,
@@ -926,5 +928,160 @@ describe.if(linux && runs)('the proxy of a security sandbox, as a process of its
     );
     await session.close();
     expect(activeUnits(`nullrivet-proxy-${process.pid}-`)).toEqual([]);
+  }, 60_000);
+});
+
+describe.if(linux && runs)('the evidence log of a security sandbox', () => {
+  const host = (): string => {
+    if (hostAddress === undefined) throw new Error('the host has no IPv4 address to test with');
+    return hostAddress;
+  };
+  let logs = 0;
+  const evidenceDir = (): string => {
+    logs += 1;
+    return join(scratch, `evidence-${logs}`);
+  };
+  const entriesOf = (dir: string) => {
+    const name = readdirSync(dir).find((entry) => entry.endsWith('.jsonl')) as string;
+    const path = join(dir, name);
+    const entries = readFileSync(path, 'utf8')
+      .split('\n')
+      .filter((line) => line !== '')
+      .map((line) => JSON.parse(line) as Record<string, unknown> & { type: string });
+    return { path, entries };
+  };
+  const finalHashOf = (notices: string[]): string =>
+    /the SHA-256 of the last is ([0-9a-f]{64})/.exec(notices.join('\n'))?.[1] as string;
+  const finishedOf = (entries: Record<string, unknown>[], callId: string) =>
+    entries.find((entry) => entry.type === 'tool.finished' && entry.callId === callId) as {
+      outputs?: Record<string, unknown>[];
+    };
+
+  test('records the session whole: each call, its outputs as the worker hashed them, and its jobs', async () => {
+    const ok = await listening();
+    const dir = evidenceDir();
+    const { session, run, notices } = await start({
+      scope: { allow: [{ cidr: `${host()}/32`, ports: [ok] }] },
+      evidence: { dir },
+    });
+    await run('bash', { command: 'echo hi' });
+    expect(await run('bash', { command: 'seq 1 200000' })).toContain('/tmp/nullrivet-');
+    await run('read_file', { path: join(project, 'notes.txt') });
+    // The sandbox does not see the evidence.
+    expect(await run('bash', { command: `ls ${dir} 2>&1 || true` })).toContain('No such file');
+    await run('bash_background', { command: 'echo job-output; sleep 0.2' });
+    await Bun.sleep(1_500);
+    // A job still running when the session ends is stopped, and its end and log recorded.
+    await run('bash_background', { command: 'echo still-running; sleep 60' });
+    await session.close();
+    const { path, entries } = entriesOf(dir);
+    const finalHash = finalHashOf([session.evidenceOutcome()?.text ?? '']);
+    void notices;
+    expect(verifyEvidence(path, finalHash)).toMatchObject({ status: 'complete', reasons: [] });
+    expect(entries[0]?.type).toBe('session.started');
+    expect(entries.at(-1)?.type).toBe('session.ended');
+    const started = entries.filter((entry) => entry.type === 'tool.started');
+    expect(started.map((entry) => [entry.callId, entry.tool])).toEqual([
+      ['c1', 'bash'],
+      ['c2', 'bash'],
+      ['c3', 'read_file'],
+      ['c4', 'bash'],
+      ['c5', 'bash_background'],
+      ['c6', 'bash_background'],
+    ]);
+    expect(finishedOf(entries, 'c1').outputs?.[0]).toMatchObject({
+      stream: 'stdout',
+      preservation: 'inline',
+      receivedSha256: sha256('hi\n'),
+      complete: true,
+    });
+    const sequence = `${Array.from({ length: 200_000 }, (_, index) => index + 1).join('\n')}\n`;
+    expect(finishedOf(entries, 'c2').outputs?.[0]).toMatchObject({
+      stream: 'stdout',
+      preservation: 'parts',
+      receivedBytes: Buffer.byteLength(sequence),
+      receivedSha256: sha256(sequence),
+      savedSha256: sha256(sequence),
+      copiedSha256: sha256(sequence),
+      complete: true,
+      matchesSaved: true,
+    });
+    const jobs = entries.filter((entry) => entry.type === 'job.started');
+    expect(jobs.map((job) => job.callId)).toEqual(['c5', 'c6']);
+    const finished = entries.filter((entry) => entry.type === 'job.finished') as unknown as {
+      log: Record<string, unknown>;
+    }[];
+    expect(finished).toHaveLength(2);
+    for (const job of finished) {
+      expect(job.log).toMatchObject({ preservation: 'parts', matchesSaved: true });
+    }
+    expect(entries.at(-1)).toMatchObject({ jobsWithoutEnd: [], callsWithoutOutcome: [] });
+  }, 60_000);
+
+  test('records a part the sandbox replaced before it was copied as not preserved, and tells', async () => {
+    const ok = await listening();
+    const dir = evidenceDir();
+    const { session, run, notices } = await start({
+      scope: { allow: [{ cidr: `${host()}/32`, ports: [ok] }] },
+      evidence: { dir },
+    });
+    // A job that puts a link in place of every part of a call's output, as soon as it appears.
+    await run('bash_background', {
+      command:
+        'while :; do for f in /tmp/nullrivet-*/*-bash-stdout.*; do [ -f "$f" ] && ln -sf /etc/passwd "$f"; done; sleep 0.005; done',
+    });
+    await run('bash', { command: 'seq 1 300000; sleep 0.3' });
+    await session.close();
+    const { path, entries } = entriesOf(dir);
+    const output = finishedOf(entries, 'c2').outputs?.[0] as Record<string, unknown>;
+    // The link leads to a file the sandbox has: it is refused, not followed.
+    expect(output.preservation).toBe('omitted');
+    expect(String(output.omitted)).toContain('cannot be opened');
+    expect(notices.join('\n')).toContain('warning: evidence:');
+    expect(verifyEvidence(path).status).toBe('incomplete');
+  }, 60_000);
+
+  test('does not start with the evidence inside what the sandbox sees', async () => {
+    const launch = await launchOptions();
+    const started = await SecuritySession.start({
+      host: launch.host,
+      launch,
+      env: process.env,
+      engagementPath: engagementFile({ scope: {}, evidence: { dir: join(project, 'evidence') } }),
+      notice: () => undefined,
+      address: ADDRESS,
+    });
+    expect('error' in started ? started.error : 'started').toContain(
+      `it is inside ${project}, which the sandbox sees`,
+    );
+  }, 30_000);
+
+  test('closes the network and refuses commands once the log cannot be written', async () => {
+    const ok = await listening();
+    const { session, run, notices } = await start(
+      {
+        scope: { allow: [{ cidr: `${host()}/32`, ports: [ok] }] },
+        evidence: { dir: evidenceDir() },
+      },
+      { evidenceMaxBytes: 12_000 },
+    );
+    let refused = '';
+    for (let attempt = 0; attempt < 20 && refused === ''; attempt += 1) {
+      const result = await run('bash', { command: 'seq 1 300' });
+      if (result.startsWith('error [')) refused = result;
+    }
+    expect(refused).toMatch(
+      /^error \[(evidence\.failed|engagement\.window)\]: bash was not executed/,
+    );
+    expect(notices.join('\n')).toContain(
+      'warning: The evidence log cannot be written, so the network is closed and commands are refused: the evidence log reached its limit of 12000 bytes',
+    );
+    await Bun.sleep(1_500);
+    expect(session.scope().at(-1)).toBe(
+      "None of it is in force: the sandbox's network stopped: the evidence log cannot be written.",
+    );
+    expect(await run('read_file', { path: join(project, 'notes.txt') })).toStartWith(
+      'error [evidence.failed]',
+    );
   }, 60_000);
 });

@@ -3,6 +3,7 @@ import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import { networkInterfaces } from 'node:os';
+import { dirname, resolve as resolvePath } from 'node:path';
 import { errorMessage } from '../errors.ts';
 import {
   type AllowedDestination,
@@ -39,6 +40,11 @@ export interface Engagement {
   deny: Network[];
   window?: { from: Date; until: Date };
   newConnectionsPerSecond?: number;
+  // Where the evidence log goes: as the file gives it, and absolute once read from a file, against
+  // the file's directory.
+  evidence?: { dir: string };
+  // The file the engagement was read from, and the very bytes parsed, which the evidence log keeps.
+  source?: { path: string; bytes: Buffer };
 }
 
 export interface ResolvedEngagement {
@@ -433,7 +439,12 @@ export const parseEngagement = (text: string): Result<Engagement> => {
       engagement.name = root.name as string;
     }
     if (root.evidence !== undefined) {
-      fail('evidence', 'the evidence log is not available yet; leave it out');
+      const evidence = object(root.evidence, 'evidence', ['dir']);
+      const dir = evidence.dir;
+      if (typeof dir !== 'string' || dir === '' || dir.length > 4096 || dir.includes('\0')) {
+        fail('evidence.dir', 'must be the path of a directory, as "./evidence"');
+      }
+      engagement.evidence = { dir: dir as string };
     }
     const scope = object(root.scope ?? fail('scope', 'is missing'), 'scope', ['allow', 'deny']);
     (scope.allow === undefined ? [] : array(scope.allow, 'scope.allow')).forEach((entry, index) => {
@@ -508,7 +519,7 @@ export const parseEngagement = (text: string): Result<Engagement> => {
 
 // Reads and validates the engagement file at `path`.
 export const readEngagement = async (path: string): Promise<Result<Engagement>> => {
-  let text: string;
+  let bytes: Buffer;
   try {
     // Without blocking: a FIFO would hold the open until something writes to it.
     const handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
@@ -533,15 +544,26 @@ export const readEngagement = async (path: string): Promise<Result<Engagement>> 
         if (length > MAX_FILE_BYTES) return tooLarge;
         chunks.push(chunk.subarray(0, bytesRead));
       }
-      text = Buffer.concat(chunks, length).toString('utf8');
+      bytes = Buffer.concat(chunks, length);
     } finally {
       await handle.close();
     }
   } catch (error) {
     return { ok: false, error: `cannot read the engagement file ${path}: ${errorMessage(error)}` };
   }
-  const parsed = parseEngagement(text);
-  return parsed.ok ? parsed : { ok: false, error: `the engagement file ${path}: ${parsed.error}` };
+  const parsed = parseEngagement(bytes.toString('utf8'));
+  if (!parsed.ok) return { ok: false, error: `the engagement file ${path}: ${parsed.error}` };
+  const engagement = parsed.value;
+  return {
+    ok: true,
+    value: {
+      ...engagement,
+      ...(engagement.evidence === undefined
+        ? {}
+        : { evidence: { dir: resolvePath(dirname(resolvePath(path)), engagement.evidence.dir) } }),
+      source: { path: resolvePath(path), bytes },
+    },
+  };
 };
 
 export type LookupAll = (host: string) => Promise<string[]>;

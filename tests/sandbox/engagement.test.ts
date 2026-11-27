@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -214,9 +214,15 @@ describe('the engagement file', () => {
     }
   });
 
-  test('refuses the evidence log, which is not available yet, rather than ignore it', () => {
-    expect(error({ ...EXAMPLE, evidence: { dir: './evidence' } })).toBe(
-      'evidence: the evidence log is not available yet; leave it out',
+  test('takes the directory of the evidence log, and nothing else of it', () => {
+    expect(parsed({ ...EXAMPLE, evidence: { dir: './evidence' } }).evidence).toEqual({
+      dir: './evidence',
+    });
+    expect(error({ ...EXAMPLE, evidence: { dir: '' } })).toBe(
+      'evidence.dir: must be the path of a directory, as "./evidence"',
+    );
+    expect(error({ ...EXAMPLE, evidence: { dir: './e', keep: true } })).toBe(
+      'evidence: unknown field "keep"',
     );
   });
 });
@@ -238,6 +244,13 @@ describe('reading the engagement file', () => {
     writeFileSync(path, JSON.stringify(EXAMPLE));
     const read = await readEngagement(path);
     expect(read.ok ? read.value.name : read.error).toBe('ACME external test');
+    // The bytes the parser read, kept for the evidence log, and its directory against the file's.
+    writeFileSync(path, JSON.stringify({ ...EXAMPLE, evidence: { dir: 'evidence' } }));
+    const kept = await readEngagement(path);
+    expect(kept.ok ? kept.value.source?.bytes.toString() : kept.error).toBe(
+      readFileSync(path, 'utf8'),
+    );
+    expect(kept.ok ? kept.value.evidence : kept.error).toEqual({ dir: join(base, 'evidence') });
     writeFileSync(path, JSON.stringify({ scope: { allow: [{ cidr: 'x' }] } }));
     const bad = await readEngagement(path);
     expect(bad.ok ? 'accepted' : bad.error).toBe(

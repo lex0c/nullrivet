@@ -10,6 +10,7 @@ import { MODEL_CATALOG } from '../providers/catalog.ts';
 import type { FetchLike } from '../providers/discovery.ts';
 import { type ModelOverrides, resolveModel } from '../providers/resolve.ts';
 import { sandboxProject } from '../sandbox/bwrap.ts';
+import { formatVerdict, verifyEvidence } from '../sandbox/evidence-verify.ts';
 import type { SecurityNotice } from '../sandbox/security.ts';
 import { SandboxSession } from '../sandbox/session.ts';
 import { type StartedSandbox, type StartedWorkspace, startSandbox } from '../sandbox/start.ts';
@@ -18,7 +19,7 @@ import { BUILTIN_TOOLS } from '../tools/index.ts';
 import type { JobSession } from '../tools/jobs.ts';
 import { outputFiles } from '../tools/output-files.ts';
 import { parseCli, USAGE, UsageError } from './args.ts';
-import { EXIT_CODES } from './exit-codes.ts';
+import { EVIDENCE_EXIT_CODES, EXIT_CODES } from './exit-codes.ts';
 import { formatModelList } from './list-models.ts';
 import { createJsonSink, createPlainSink } from './output.ts';
 import { PromptHistory } from './prompt-history.ts';
@@ -81,6 +82,12 @@ export const runCli = async (io: CliIO): Promise<number> => {
   if (config.listModels) {
     io.stdout(formatModelList(MODEL_CATALOG, io.env));
     return 0;
+  }
+  if (config.verifyEvidence !== undefined) {
+    // Against where nullrivet was started, as the other paths of the command line.
+    const verdict = verifyEvidence(resolve(io.cwd, config.verifyEvidence), config.expectedHash);
+    io.stdout(`${formatVerdict(verdict)}\n`);
+    return EVIDENCE_EXIT_CODES[verdict.status];
   }
 
   const sink = config.json
@@ -336,6 +343,13 @@ export const runCli = async (io: CliIO): Promise<number> => {
       await sandbox.security
         .close()
         .catch((error: unknown) => sink.notice('warning', errorMessage(error)));
+      // The evidence log's final hash, once the session is closed: an interactive one has restored
+      // the terminal by now, and shows nothing more.
+      const outcome = sandbox.security.evidenceOutcome();
+      if (outcome !== null) {
+        if (interactive) io.stderr(`nullrivet: ${outcome.text}\n`);
+        else sink.notice(outcome.level, outcome.text);
+      }
     } else {
       await sandbox?.backend.close();
     }

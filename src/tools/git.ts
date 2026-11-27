@@ -346,13 +346,21 @@ export const gitTool: Tool = {
         );
       }
       if (run.exitCode !== 0) {
-        return { ...toolError('git.failed', failureDetail(run, stderrSpool)), touchedPaths };
+        return {
+          ...toolError('git.failed', failureDetail(run, stderrSpool)),
+          touchedPaths,
+          ...(outputFiles.hashing ? { outputs: [stderrSpool.capture('stderr')] } : {}),
+        };
       }
+      // The outputs the result shows: the output of a command that succeeded, the error output of
+      // one that failed.
+      const content = formatOutput(subcommand, run, spool);
       return {
-        content: formatOutput(subcommand, run, spool),
+        content,
         isError: false,
         meta: { subcommand, cwd, durationMs: run.durationMs, stdoutBytes: run.stdoutBytes },
         touchedPaths,
+        ...(outputFiles.hashing ? { outputs: [spool.capture('stdout')] } : {}),
       };
     } finally {
       // Discards what the result does not show: the output of a failed command, and the error

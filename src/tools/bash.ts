@@ -160,8 +160,9 @@ export const bashTool: Tool = {
         return toolError('bash.spawn_failed', `could not start bash: ${message}`);
       }
 
+      const content = formatResult(run, timeoutMs, spools);
       return {
-        content: formatResult(run, timeoutMs, spools),
+        content,
         isError: run.termination !== 'exited',
         meta: {
           exitCode: run.exitCode,
@@ -173,6 +174,10 @@ export const bashTool: Tool = {
           cwd,
         },
         touchedPaths: [cwd],
+        // For an evidence log only, whose worker hashes what the commands write.
+        ...(outputFiles.hashing
+          ? { outputs: [spools.stdout.capture('stdout'), spools.stderr.capture('stderr')] }
+          : {}),
       };
     } finally {
       // Discards whatever a path above did not keep; a finished spool ignores the call.

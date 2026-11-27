@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -209,3 +209,75 @@ describe('--engagement', () => {
     }
   }, 30_000);
 });
+
+describe.if(overlayTestsRun && networkTestsRun && cgroupTestsRun)(
+  '--sandbox security with an evidence log',
+  () => {
+    const logOf = (dir: string): string =>
+      join(dir, readdirSync(dir).find((name) => name.endsWith('.jsonl')) as string);
+    const verify = (args: string[]) => {
+      const run = Bun.spawnSync(cliCommand(['--verify-evidence', ...args]), {
+        env: cliEnv(server, {}),
+      });
+      return { code: run.exitCode, stdout: run.stdout.toString() };
+    };
+
+    test('leaves a log the verifier finds complete against the final hash the operator is given', async () => {
+      const { home, project, file } = setUp({
+        scope: { allow: [{ cidr: '198.51.100.0/24', ports: [443] }] },
+        evidence: { dir: './evidence' },
+      });
+      server.handle(toolsThenText([{ name: 'bash', args: { command: 'echo evidence' } }]));
+      const cli = startCli(['--sandbox', 'security', '--engagement', file, 'look'], {
+        env: cliEnv(server, { HOME: home, ...bus() }),
+        cwd: project,
+      });
+      const { code } = await cli.finished;
+      expect(code).toBe(0);
+      const notice = cli.events
+        .filter((event) => event.type === 'info' || event.type === 'warning')
+        .map((event) => String(event.message))
+        .find((message) => message.startsWith('The evidence log '));
+      const finalHash = /the SHA-256 of the last is ([0-9a-f]{64})/.exec(
+        notice ?? '',
+      )?.[1] as string;
+      const log = logOf(join(file, '..', 'evidence'));
+      const checked = verify([log, '--expected-hash', finalHash]);
+      expect(checked.code).toBe(0);
+      expect(checked.stdout).toStartWith('complete: ');
+      expect(checked.stdout).toContain('the final hash is the one expected');
+      expect(verify([log, '--expected-hash', '0'.repeat(64)]).code).toBe(1);
+    }, 60_000);
+
+    test('keeps a call whose host was killed during it, as one without an outcome', async () => {
+      const { home, project, file } = setUp({
+        scope: { allow: [{ cidr: '198.51.100.0/24', ports: [443] }] },
+        evidence: { dir: './evidence' },
+      });
+      const sleep = uniqueSleep();
+      server.handle(toolsThenText([{ name: 'bash', args: { command: sleep } }]));
+      const cli = startCli(['--sandbox', 'security', '--engagement', file, 'look'], {
+        env: cliEnv(server, { HOME: home, ...bus() }),
+        cwd: project,
+      });
+      await cli.waitFor((event) => event.type === 'tool:start');
+      await Bun.sleep(300);
+      cli.child.kill('SIGKILL');
+      await cli.finished;
+      const checked = verify([logOf(join(file, '..', 'evidence'))]);
+      expect(checked.code).toBe(4);
+      expect(checked.stdout).toContain('- the session has no end recorded');
+      expect(checked.stdout).toContain('- calls started without an outcome recorded: c1');
+      // The sandbox ended with its host.
+      await Bun.sleep(1_000);
+      expect(Bun.spawnSync(['pgrep', '-f', sleep]).exitCode).toBe(1);
+      // Its directory stays, for the next session to sweep: removed here, by the killed process's id.
+      const runtime = process.env.XDG_RUNTIME_DIR as string;
+      for (const name of readdirSync(runtime)) {
+        if (name.startsWith(`nullrivet-${cli.child.pid}-`)) {
+          rmSync(join(runtime, name), { recursive: true, force: true });
+        }
+      }
+    }, 60_000);
+  },
+);
