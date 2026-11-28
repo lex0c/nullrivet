@@ -220,6 +220,8 @@ describe("the guest's QEMU", () => {
     ]);
     expect(line[line.indexOf('-sandbox') + 1]).toStartWith('on,');
     expect(line[line.indexOf('-machine') + 1]).toBe('q35,accel=kvm');
+    // No virtualization extensions: the guest runs no machine of its own.
+    expect(line[line.indexOf('-cpu') + 1]).toBe('host,vmx=off,svm=off');
     const netdev = line[line.indexOf('-netdev') + 1] as string;
     for (const offered of ['hostfwd', 'guestfwd', 'smb', 'tftp', 'bootfile']) {
       expect(netdev).not.toContain(offered);

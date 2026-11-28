@@ -114,7 +114,9 @@ export const qemuArgs = (options: QemuOptions): string[] => {
     '-machine',
     'q35,accel=kvm',
     '-cpu',
-    'host',
+    // The host's processor, but for its virtualization extensions: the guest has no use for virtual
+    // machines of its own, and would otherwise reach KVM's nested interface.
+    'host,vmx=off,svm=off',
     '-m',
     String(options.memoryMiB),
     '-smp',

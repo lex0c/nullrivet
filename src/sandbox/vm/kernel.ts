@@ -244,8 +244,9 @@ export const guestModules = (
   return modules;
 };
 
-// Why the kernel of `release` cannot load compressed modules, by the first configuration of it
-// found; null when it can, or when no configuration is found to tell.
+// Why the kernel of `release` cannot be shown to load compressed modules, by the first
+// configuration of it found; null when it can. Without one, nothing tells before the guest starts,
+// and its start would fail at the first module.
 const decompressionProblem = (release: string, configs: readonly string[]): string | null => {
   for (const path of configs) {
     let config: string;
@@ -259,5 +260,5 @@ const decompressionProblem = (release: string, configs: readonly string[]): stri
       ? null
       : `the kernel of release ${release} cannot decompress its modules, which the host cannot decompress either (xz)`;
   }
-  return null;
+  return `no configuration of release ${release} tells whether its kernel can decompress its modules, which the host cannot (xz): looked for ${configs.join(', ')}`;
 };

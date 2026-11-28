@@ -1,7 +1,8 @@
 # The guest's init, PID 1 for the guest's whole life. The Bun runtime cannot start before /proc is
 # mounted, and the guest has no static program of its own, so this one prepares the guest, starts
-# the worker without privileges, reaps every process orphaned to it, and powers the guest off once
-# the worker ends. Every call that can fail is checked: a failure is written to the console, and the
+# the worker without privileges, reaps the processes orphaned to it while the worker runs, and
+# powers the guest off once the worker ends, which ends whatever is left without waiting for it.
+# Should the guest not end, the host ends QEMU at its own timeout. Every call that can fail is checked: a failure is written to the console, and the
 # init ends QEMU through its debug-exit device with a status of its own, so that the host tells a
 # failed start from a guest that ended; it never leaves PID 1, which would make the kernel panic.
 #

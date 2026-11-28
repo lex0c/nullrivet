@@ -176,8 +176,10 @@ describe("the guest's modules", () => {
     writeFileSync(join(dir, 'kernel/c.ko.xz'), Buffer.from('xz bytes'));
     writeFileSync(join(dir, 'modules.dep'), 'kernel/c.ko.xz:\n');
     writeFileSync(join(dir, 'modules.builtin'), '');
-    // No configuration to tell: the kernel is left to try.
-    expect(guestModules('6.9.1-test', root, ['c'], boot)).toHaveLength(1);
+    // No configuration to tell: the start would fail in the guest, so it is refused here.
+    expect(guestModules('6.9.1-test', root, ['c'], boot)).toEqual({
+      error: `no configuration of release 6.9.1-test tells whether its kernel can decompress its modules, which the host cannot (xz): looked for ${join(dir, 'config')}, ${join(boot, 'config-6.9.1-test')}`,
+    });
     writeFileSync(join(boot, 'config-6.9.1-test'), 'CONFIG_MODULE_COMPRESS_XZ=y\n');
     expect(guestModules('6.9.1-test', root, ['c'], boot)).toEqual({
       error:
@@ -213,6 +215,7 @@ describe("the guest's modules", () => {
       'kernel/a.ko.zst:\nkernel/b.ko.gz: kernel/a.ko.zst\nkernel/c.ko.xz:\nkernel/d.ko: kernel/c.ko.xz\n',
     );
     writeFileSync(join(dir, 'modules.builtin'), '');
+    writeFileSync(join(dir, 'config'), 'CONFIG_MODULE_DECOMPRESS=y\n');
     const modules = guestModules('6.9.1-test', root, ['b', 'd']);
     if ('error' in modules) throw new Error(modules.error);
     expect(
