@@ -18,8 +18,8 @@ type Env = Record<string, string | undefined>;
 const SANDBOX_PATH = '/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin';
 const TMP_BYTES = 1024 * 1024 * 1024;
 const HOME_BYTES = 256 * 1024 * 1024;
-const ROOT_LINKS = ['/bin', '/sbin', '/lib', '/lib64', '/lib32'];
-const ETC_FILES = ['/etc/ld.so.cache', '/etc/alternatives'];
+export const ROOT_LINKS = ['/bin', '/sbin', '/lib', '/lib64', '/lib32'];
+export const ETC_FILES = ['/etc/ld.so.cache', '/etc/alternatives'];
 // Kernel keyring listings; the keys themselves are out of reach through the seccomp program.
 const MASKED_PROC_FILES = ['/proc/keys', '/proc/key-users'];
 // The launcher inputs follow the protocol descriptors.
@@ -205,7 +205,7 @@ const groupName = (gid: number, fallback: string): string => {
 };
 
 // Only root and the user: the host's files list every account on the system.
-const identityFiles = (home: string): { passwd: string; group: string } => {
+export const identityFiles = (home: string): { passwd: string; group: string } => {
   const user = userInfo();
   const name = user.username.replace(/[:\n]/g, '');
   const shell = user.shell !== null && user.shell.length > 0 ? user.shell : '/bin/sh';
@@ -217,7 +217,7 @@ const identityFiles = (home: string): { passwd: string; group: string } => {
 };
 
 const HOSTS = '127.0.0.1 localhost\n::1 localhost\n';
-const NSSWITCH = 'passwd: files\ngroup: files\nhosts: files\n';
+export const NSSWITCH = 'passwd: files\ngroup: files\nhosts: files\n';
 
 // Built from nothing: the host's environment holds provider keys and other credentials.
 // bubblewrap is started with it too, because its init process keeps the environment it was
@@ -358,7 +358,7 @@ export const workspaceLaunch = (options: LaunchOptions, overlay: Overlay): Worke
 // Where the sandbox of the `security` profile finds its hosts file, which the host replaces when
 // the scope's names are resolved again: a directory of the host bound read-only, with /etc/hosts a
 // link into it. A file bound by itself would keep the one it was bound to after a rename.
-const HOSTS_DIRECTORY = '/etc/nullrivet';
+export const HOSTS_DIRECTORY = '/etc/nullrivet';
 
 export interface SecurityNetwork {
   tools: NetworkTools;

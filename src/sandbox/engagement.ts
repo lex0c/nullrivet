@@ -154,6 +154,9 @@ const holds = (network: Network, address: Network): boolean =>
   network.family === address.family &&
   bits(address) >> BigInt((network.family === 4 ? 32 : 128) - network.prefix) === prefixOf(network);
 
+// Whether two networks share an address.
+export const overlaps = (a: Network, b: Network): boolean => holds(a, b) || holds(b, a);
+
 // The range off the public internet that holds `network`, this host's addresses included.
 const internalRange = (
   network: Network,
