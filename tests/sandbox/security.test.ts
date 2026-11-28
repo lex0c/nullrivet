@@ -966,6 +966,8 @@ describe.if(linux && runs)('the evidence log of a security sandbox', () => {
       evidence: { dir },
     });
     await run('bash', { command: 'echo hi' });
+    // A refresh, which names the scope it replaced by the hash the start gave it.
+    expect(await session.refresh()).toEqual({ changes: [] });
     expect(await run('bash', { command: 'seq 1 200000' })).toContain('/tmp/nullrivet-');
     await run('read_file', { path: join(project, 'notes.txt') });
     // The sandbox does not see the evidence.
@@ -981,6 +983,10 @@ describe.if(linux && runs)('the evidence log of a security sandbox', () => {
     expect(verifyEvidence(path, finalHash)).toMatchObject({ status: 'complete', reasons: [] });
     expect(entries[0]?.type).toBe('session.started');
     expect(entries.at(-1)?.type).toBe('session.ended');
+    expect(entries.find((entry) => entry.type === 'scope.refreshed')).toMatchObject({
+      beforeSha256: entries[0]?.scopeSha256,
+      afterSha256: entries[0]?.scopeSha256,
+    });
     const started = entries.filter((entry) => entry.type === 'tool.started');
     expect(started.map((entry) => [entry.callId, entry.tool])).toEqual([
       ['c1', 'bash'],

@@ -1144,19 +1144,22 @@ log does not go on unrecorded.
 
 **Checking it.** `nullrivet --verify-evidence <file> [--expected-hash <sha256>]` reads the log a
 line at a time, an entry past 64 MiB taken as corrupted rather than held, its line feed in the next
-chunk or not, works out the chain and the sequence again, checks the transitions (an outcome without
-a start, an id used twice, a job ended twice, an entry after the end, a job of an unknown call), the
-copy of the engagement file, each output's record checked to be of the form the host writes, every
-field it must hold present, and worked out again from what it says it copied (whether the copy is
-what the worker saved, whether all that came was saved, which form of preservation it has), and each
-copy named, read no further than a copy can be long, looked for only in the directory beside the
-log, by a name of the form the host gives, never through a link. It exits 0 when the session is
-complete; 1 when it is corrupted, or its final hash is not the one expected, naming the first entry
-that is; and 4 when it is consistent but incomplete, with a line cut short, no end, operations
-without an outcome, or outputs not saved or preserved whole, 4 when it is consistent but incomplete,
-apart from the CLI's other codes, so that a script tells it from a mistyped option. Without
-`--expected-hash`, it says that only the consistency was checked. Tested: with the host killed
-during a command, the log keeps the call, which the verifier reports without an outcome.
+chunk or not, works out the chain and the sequence again, takes an entry of a type the host does not
+write as corrupted, follows the scope by its hash from the session's start through each refresh,
+each saying which scope it replaced, checks that the end lists the calls and jobs the entries before
+it left open, checks the transitions (an outcome without a start, an id used twice, a job ended
+twice, an entry after the end, a job of an unknown call), the copy of the engagement file, each
+output's record checked to be of the form the host writes, every field it must hold present, and
+worked out again from what it says it copied (whether the copy is what the worker saved, whether all
+that came was saved, which form of preservation it has), and each copy named, read no further than a
+copy can be long, looked for only in the directory beside the log, by a name of the form the host
+gives, never through a link. It exits 0 when the session is complete; 1 when it is corrupted, or its
+final hash is not the one expected, naming the first entry that is; and 4 when it is consistent but
+incomplete, with a line cut short, no end, operations without an outcome, or outputs not saved or
+preserved whole, 4 when it is consistent but incomplete, apart from the CLI's other codes, so that a
+script tells it from a mistyped option. Without `--expected-hash`, it says that only the consistency
+was checked. Tested: with the host killed during a command, the log keeps the call, which the
+verifier reports without an outcome.
 
 Individual packets are not recorded: the log shows what the sandbox could reach, what the proxy
 decided, and what the commands did.

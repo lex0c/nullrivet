@@ -1,6 +1,7 @@
 import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
 import { join } from 'node:path';
 import { errorMessage } from '../errors.ts';
+import { stableStringify } from '../providers/canonical-json.ts';
 import { sha256, ZERO_HASH } from './evidence.ts';
 
 // Checks an evidence log and the copies beside it. What it shows depends on what it is given: the
@@ -39,6 +40,15 @@ export const companionOf = (logPath: string): string => logPath.replace(/\.jsonl
 type Entry = Record<string, unknown> & { seq: number; prev: string; type: string };
 
 class Corrupted extends Error {}
+
+// The SHA-256 a scope is named by in the log: that of its canonical form.
+const scopeHashOf = (scope: unknown): string => sha256(stableStringify(scope));
+
+// Whether a list holds the same ids as those worked out, each once, in any order.
+const sameIds = (listed: unknown, expected: readonly string[]): boolean =>
+  Array.isArray(listed) &&
+  listed.every((id) => typeof id === 'string') &&
+  JSON.stringify([...listed].sort()) === JSON.stringify([...expected].sort());
 
 const corrupt = (message: string): never => {
   throw new Corrupted(message);
@@ -227,6 +237,8 @@ export const verifyEvidence = (logPath: string, expectedHash?: string): Verdict 
     const jobsEnded = new Set<string>();
     let sessionEnded = false;
     let partial = false;
+    // The scope in force, by its hash: each refresh says which it replaced.
+    let scopeHash: string | null = null;
     for (const line of lines) {
       const seq = entries + 1;
       if (line === TOO_LONG) corrupt(`entry ${seq} is longer than ${MAX_ENTRY_BYTES} bytes`);
@@ -259,8 +271,21 @@ export const verifyEvidence = (logPath: string, expectedHash?: string): Verdict 
           else if (engagement?.sha256 !== copy.sha256) {
             corrupt("the engagement's copy is not the file the session read");
           }
+          if (entry.scope === undefined || scopeHashOf(entry.scope) !== entry.scopeSha256) {
+            corrupt(`entry ${seq}: its scope is not the one its hash names`);
+          }
+          scopeHash = entry.scopeSha256 as string;
           break;
         }
+        case 'scope.refreshed':
+          if (entry.beforeSha256 !== scopeHash) {
+            corrupt(`entry ${seq} refreshes a scope other than the one in force`);
+          }
+          if (entry.scope === undefined || scopeHashOf(entry.scope) !== entry.afterSha256) {
+            corrupt(`entry ${seq}: its scope is not the one its hash names`);
+          }
+          scopeHash = entry.afterSha256 as string;
+          break;
         case 'tool.started':
           if (callId === null || started.has(callId)) corrupt(`entry ${seq} reuses a call id`);
           started.add(callId as string);
@@ -304,10 +329,35 @@ export const verifyEvidence = (logPath: string, expectedHash?: string): Verdict 
           break;
         }
         case 'session.ended':
+          // What the end says was left open is worked out again from the entries before it.
+          if (
+            !sameIds(
+              entry.callsWithoutOutcome,
+              [...started].filter((id) => !ended.has(id)),
+            )
+          ) {
+            corrupt(`entry ${seq} does not list the calls left without an outcome`);
+          }
+          if (
+            !sameIds(
+              entry.jobsWithoutEnd,
+              [...jobsStarted].filter((id) => !jobsEnded.has(id)),
+            )
+          ) {
+            corrupt(`entry ${seq} does not list the jobs left without an end`);
+          }
           sessionEnded = true;
           break;
-        default:
+        case 'scope.refresh.failed':
+        case 'network.stopped':
+        case 'window.ended':
+        case 'proxy.authorized':
+        case 'proxy.refused':
+        case 'proxy.refused.omitted':
+        case 'preservation.incomplete':
           break;
+        default:
+          corrupt(`entry ${seq} is of a type the host does not write`);
       }
       for (const output of outputsOf(entry)) {
         const copies = output.copies;

@@ -13,6 +13,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { stableStringify } from '../../src/providers/canonical-json.ts';
 import {
   type EvidenceEntry,
   type EvidenceFs,
@@ -220,15 +221,36 @@ describe('the credentials taken out of what is recorded', () => {
 });
 
 // A log written as the host writes one, with the engagement's copy beside it.
-const session = (entries: EvidenceEntry[], engagement = '{"scope":{}}') => {
+const SCOPE = { allow: [{ network: '198.51.100.7/32' }], deny: [] };
+const scopeHash = (scope: unknown) => sha256(stableStringify(scope));
+
+// A log as the host writes it: its start with the engagement read and the scope in force, and an
+// end, when one is given, that lists nothing left open unless it says otherwise.
+const session = (
+  entries: EvidenceEntry[],
+  engagement = '{"scope":{}}',
+  start: Record<string, unknown> = {},
+) => {
   const path = join(scratch(), '20261120T120000Z-1.jsonl');
   const companion = companionOf(path);
   mkdirSync(companion);
   writeFileSync(join(companion, 'engagement.json'), engagement);
   const fd = openSync(path, 'wx', 0o600);
   const log = new EvidenceLog({ fd, onFailure: () => undefined });
-  log.append({ type: 'session.started', engagement: { sha256: sha256(engagement) } });
-  for (const entry of entries) log.append(entry);
+  log.append({
+    type: 'session.started',
+    engagement: { sha256: sha256(engagement) },
+    scope: SCOPE,
+    scopeSha256: scopeHash(SCOPE),
+    ...start,
+  });
+  for (const entry of entries) {
+    log.append(
+      entry.type === 'session.ended'
+        ? { callsWithoutOutcome: [], jobsWithoutEnd: [], ...entry }
+        : entry,
+    );
+  }
   closeSync(fd);
   return { path, companion, finalHash: log.lastHash };
 };
@@ -472,6 +494,64 @@ describe('the verification of an evidence log', () => {
     expect(verifyEvidence(path).reasons).toEqual([
       `entry 2 is longer than ${MAX_ENTRY_BYTES} bytes`,
     ]);
+  });
+
+  test('follows the scope from its start through each refresh, by its hash', () => {
+    const next = { allow: [{ network: '203.0.113.9/32', ports: [443] }], deny: [] };
+    const refreshed = (fields: Record<string, unknown>) =>
+      ({
+        type: 'scope.refreshed',
+        changes: [],
+        beforeSha256: scopeHash(SCOPE),
+        afterSha256: scopeHash(next),
+        scope: next,
+        ...fields,
+      }) as EvidenceEntry;
+    expect(verifyEvidence(session([refreshed({}), { type: 'session.ended' }]).path).status).toBe(
+      'complete',
+    );
+    expect(
+      verifyEvidence(session([refreshed({ beforeSha256: scopeHash(next) })]).path).reasons,
+    ).toEqual(['entry 2 refreshes a scope other than the one in force']);
+    expect(
+      verifyEvidence(session([refreshed({ scope: { ...next, deny: ['0.0.0.0/0'] } })]).path)
+        .reasons,
+    ).toEqual(['entry 2: its scope is not the one its hash names']);
+    expect(verifyEvidence(session([], undefined, { scope: next }).path).reasons).toEqual([
+      'entry 1: its scope is not the one its hash names',
+    ]);
+  });
+
+  test('works out again what the end of the session says was left open', () => {
+    const left = (fields: Record<string, unknown>) =>
+      verifyEvidence(
+        session([
+          { type: 'tool.started', callId: 'c1' },
+          { type: 'job.started', jobId: 'j1', callId: 'c1' },
+          { type: 'session.ended', ...fields },
+        ]).path,
+      );
+    expect(left({ callsWithoutOutcome: ['c1'], jobsWithoutEnd: ['j1'] })).toMatchObject({
+      status: 'incomplete',
+      reasons: [
+        'calls started without an outcome recorded: c1',
+        'jobs started without an end recorded: j1',
+      ],
+    });
+    expect(left({ jobsWithoutEnd: ['j1'] }).reasons).toEqual([
+      'entry 4 does not list the calls left without an outcome',
+    ]);
+    expect(left({ callsWithoutOutcome: ['c1'], jobsWithoutEnd: ['j1', 'j1'] }).reasons).toEqual([
+      'entry 4 does not list the jobs left without an end',
+    ]);
+  });
+
+  test('takes an entry of a type the host does not write as corrupted', () => {
+    const { path } = session([{ type: 'tool.approved', callId: 'c1' }, { type: 'session.ended' }]);
+    expect(verifyEvidence(path)).toMatchObject({
+      status: 'corrupted',
+      reasons: ['entry 2 is of a type the host does not write'],
+    });
   });
 
   test('reads a copy only beside the log, by name, and never through a link', () => {
