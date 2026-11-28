@@ -46,7 +46,7 @@ import {
 import type { AgentEndReason, AgentEventListener, CompactReason } from './events.ts';
 import { generateWithRetry } from './retry.ts';
 import { DISCOVERED_INSTRUCTIONS_HEADER } from './system-prompt.ts';
-import { executeToolCall } from './tool-executor.ts';
+import { type EngagementWindow, executeToolCall, type ToolBackend } from './tool-broker.ts';
 
 export interface LoopLimits {
   maxSteps: number;
@@ -69,8 +69,14 @@ export interface TurnDependencies {
   provider: Provider;
   conversation: Conversation;
   tools: ReadonlyMap<string, Tool>;
+  // Where the tool calls run once authorized. Required, so no caller runs tools outside the
+  // backend the session chose.
+  toolBackend: ToolBackend;
   // Read before every request and every tool call, so a mode change takes effect immediately.
   mode: () => ExecutionMode;
+  engagement?: EngagementWindow;
+  // Which agent this is, for the evidence log: main, or a subagent's id.
+  agent?: string;
   cwd: string;
   systemPrompt: () => string;
   // Text sent at the start of the first user message of every request, such as the project
@@ -97,6 +103,8 @@ export interface RuntimeNotice {
   data?: string;
   // Shown to the user in place of `text`, when the note as written is meant for the model only.
   display?: string;
+  // The user was told already, when it happened: the note goes to the model alone.
+  shown?: boolean;
 }
 
 // Which limit ended a turn with `budget`.
@@ -107,6 +115,8 @@ export interface TurnResult {
   message?: string;
   // Set when the reason is `budget`.
   limit?: TurnLimit;
+  // Set when the turn ended with `error` because its tool backend was lost.
+  backendLost?: true;
   usage: UsageInfo;
   steps: number;
 }
@@ -279,7 +289,10 @@ const executeToolCalls = async (
       mode: deps.mode(),
       cwd: deps.cwd,
       signal,
+      backend: deps.toolBackend,
       newInstructions: unseenBeforeWrite,
+      ...(deps.engagement === undefined ? {} : { engagement: deps.engagement }),
+      ...(deps.agent === undefined ? {} : { agent: deps.agent }),
     });
     let content = result.content;
     const attached = await discover(result.touchedPaths ?? []);
@@ -330,6 +343,7 @@ export const runTurn = async (
     endReason: AgentEndReason,
     endMessage?: string,
     endLimit?: TurnLimit,
+    backendLost?: true,
   ): TurnResult => {
     // A task stopped by its time limit ends at a limit, like the step limit, not as an interrupt.
     const timedOut = endReason === 'aborted' && signal.reason instanceof TimeLimitReached;
@@ -345,6 +359,7 @@ export const runTurn = async (
       reason,
       ...(message === undefined ? {} : { message }),
       ...(limit === undefined ? {} : { limit }),
+      ...(backendLost === undefined || reason !== 'error' ? {} : { backendLost }),
       usage,
       steps,
     };
@@ -418,7 +433,7 @@ export const runTurn = async (
     const notices = deps.notices?.() ?? [];
     for (const notice of notices) {
       conversation.appendUser(agentNote(notice.text), notice.data);
-      emit({ type: 'notice', text: notice.display ?? notice.text });
+      if (notice.shown !== true) emit({ type: 'notice', text: notice.display ?? notice.text });
     }
     if (notices.length > 0) batchPending = true;
     return notices.length;
@@ -624,6 +639,14 @@ export const runTurn = async (
     }
     await deps.checkpoint?.();
     if (signal.aborted) return end('aborted');
+    // A lost backend refuses every later call, so the turn ends instead of spending its remaining
+    // steps on refusals.
+    const lost = deps.toolBackend.failure?.() ?? null;
+    if (lost !== null) {
+      const message = `the tool sandbox stopped: ${lost}`;
+      emit({ type: 'error', message });
+      return end('error', message, undefined, true);
+    }
     overflowRecovered = false;
   }
 

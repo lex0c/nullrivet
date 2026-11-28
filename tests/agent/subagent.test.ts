@@ -1,4 +1,7 @@
 import { afterAll, describe, expect, test } from 'bun:test';
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   createAgent,
   nextNotices,
@@ -16,6 +19,7 @@ import {
   SubagentRegistry,
   type SubagentRuntime,
 } from '../../src/agent/subagent.ts';
+import { IN_PROCESS_BACKEND, type ToolBackend } from '../../src/agent/tool-broker.ts';
 import type { InstructionsLoader } from '../../src/instructions/agents-loader.ts';
 import type { GenerateRequest, StreamEvent } from '../../src/providers/types.ts';
 import { FENCE, fenced } from '../../src/sanitize/fence.ts';
@@ -84,6 +88,7 @@ const runtimeFor = (
   effort: () => undefined,
   cwd: '/tmp',
   tools: [fakeTool('read_file', 'read')],
+  toolBackend: IN_PROCESS_BACKEND,
   instructions: null,
   stallMs: 5_000,
   maxSteps: MAX_STEPS,
@@ -129,6 +134,7 @@ describe('delegate', () => {
         : textTurn('done');
     });
     const agent = await createAgent({
+      toolBackend: IN_PROCESS_BACKEND,
       provider,
       tools: [fakeTool('read_file', 'read'), fakeTool('bash', 'exec')],
       mode: 'auto',
@@ -169,6 +175,43 @@ describe('delegate', () => {
     expect(agent.hasBackgroundEvents()).toBe(false);
   });
 
+  test("runs the parent's and the subagent's tool calls through the agent's backend, delegate excepted", async () => {
+    const ran: string[] = [];
+    const recording: ToolBackend = {
+      execute: (tool, input, context) => {
+        ran.push(tool.name);
+        return IN_PROCESS_BACKEND.execute(tool, input, context);
+      },
+    };
+    let parentCalls = 0;
+    let childCalls = 0;
+    const provider = routedProvider((req) => {
+      if (isChild(req)) {
+        childCalls += 1;
+        return childCalls === 1
+          ? toolTurn([{ id: 'r1', name: 'read_file', args: {} }])
+          : textTurn('report');
+      }
+      parentCalls += 1;
+      return parentCalls === 1
+        ? toolTurn([{ id: 'b1', name: 'bash', args: {} }, delegateCall('d1')])
+        : textTurn('done');
+    });
+    const agent = await createAgent({
+      provider,
+      tools: [fakeTool('read_file', 'read'), fakeTool('bash', 'exec')],
+      toolBackend: recording,
+      mode: 'auto',
+      cwd: '/tmp',
+      instructions: null,
+      delegation: true,
+    });
+    await agent.run('go');
+    expect(await waitUntil(() => agent.hasBackgroundEvents())).toBe(true);
+    // delegate acts on the agent, so it runs in process; the subagent's read goes to the backend.
+    expect(ran).toEqual(['bash', 'read_file']);
+  });
+
   test('the tool result names the subagent, and says when it waits for a slot', async () => {
     const gate = Promise.withResolvers<void>();
     const provider = routedProvider(async (_req, signal) => {
@@ -186,6 +229,79 @@ describe('delegate', () => {
     expect(second.meta).toMatchObject({ queued: true });
     gate.resolve();
     expect(await waitUntil(() => registry.pendingEvents().length === 2)).toBe(true);
+  });
+
+  test('under a sandbox, refuses a directory outside the project, also through a link', async () => {
+    const base = await realpath(await mkdtemp(join(tmpdir(), 'nullrivet-delegate-')));
+    try {
+      const project = join(base, 'project');
+      await mkdir(join(project, 'src'), { recursive: true });
+      await mkdir(join(base, 'outside'));
+      await writeFile(join(base, 'outside', 'file'), 'host file\n');
+      await symlink(join(base, 'outside'), join(project, 'linked'));
+      const provider = routedProvider(() => textTurn('report'));
+      const registry = new SubagentRegistry(
+        runtimeFor(provider, { cwd: project, sandbox: { profile: 'inspect', root: project } }),
+      );
+      const tool = createDelegateTool(registry);
+      const call = (cwd: string) =>
+        tool.execute({ title: 't', objective: 'o', cwd }, toolContext());
+      // Every refusal is the same, so neither a path outside the project nor one reached through a
+      // link tells whether it exists or what it is.
+      for (const cwd of [
+        join(base, 'outside'),
+        join(base, 'missing'),
+        join(project, 'linked'),
+        join(project, 'linked', 'file'),
+        join(project, 'linked', 'missing'),
+        join(project, 'missing'),
+      ]) {
+        const refused = await call(cwd);
+        expect(refused.meta?.errorCode).toBe('sandbox.outside');
+        expect(refused.content).toContain(`Use a directory inside ${project}.`);
+      }
+      expect((await call(join(project, 'src'))).content).toStartWith('Started subagent ');
+      expect(await waitUntil(() => registry.pendingEvents().length === 1)).toBe(true);
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  test('a subagent whose backend is lost reports sandbox_lost, not a provider error', async () => {
+    let lost: string | null = null;
+    const backend: ToolBackend = {
+      execute: async () => {
+        lost = 'the worker exited';
+        return { content: 'partial', isError: false };
+      },
+      failure: () => lost,
+    };
+    const provider = routedProvider(() => toolTurn([{ id: 'r1', name: 'read_file', args: {} }]));
+    const registry = new SubagentRegistry(runtimeFor(provider, { toolBackend: backend }));
+    registry.start(spec);
+    expect(await waitUntil(() => registry.pendingEvents().length === 1)).toBe(true);
+    expect(registry.pendingEvents()[0]).toMatchObject({
+      status: 'failed',
+      reason: 'sandbox_lost',
+      detail: 'the tool sandbox stopped: the worker exited',
+    });
+  });
+
+  test('a provider failure stays a provider failure while the backend is lost by another call', async () => {
+    const backend: ToolBackend = {
+      execute: IN_PROCESS_BACKEND.execute,
+      failure: () => 'the worker exited',
+    };
+    const provider = routedProvider(() => {
+      throw Object.assign(new Error('bad gateway'), { status: 401 });
+    });
+    const registry = new SubagentRegistry(runtimeFor(provider, { toolBackend: backend }));
+    registry.start(spec);
+    expect(await waitUntil(() => registry.pendingEvents().length === 1)).toBe(true);
+    expect(registry.pendingEvents()[0]).toMatchObject({
+      status: 'failed',
+      reason: 'provider_error',
+    });
   });
 
   test('a call interrupted before the subagent starts starts nothing', async () => {
@@ -216,6 +332,7 @@ describe('delegate', () => {
       return parentCalls === 1 ? toolTurn([delegateCall('d1')]) : textTurn('done');
     });
     const agent = await createAgent({
+      toolBackend: IN_PROCESS_BACKEND,
       provider,
       tools: [fakeTool('read_file', 'read')],
       mode: 'auto',
@@ -538,6 +655,7 @@ describe('the agent and its subagents', () => {
     });
     const make = (limits: { maxSteps: number; timeLimitMs?: number }) =>
       createAgent({
+        toolBackend: IN_PROCESS_BACKEND,
         provider,
         tools: [fakeTool('read_file', 'read')],
         mode: 'auto',
@@ -585,6 +703,7 @@ describe('the agent and its subagents', () => {
         : textTurn('done');
     });
     const agent = await createAgent({
+      toolBackend: IN_PROCESS_BACKEND,
       provider,
       tools: [fakeTool('read_file', 'read')],
       mode: 'auto',
@@ -629,6 +748,7 @@ describe('the agent and its subagents', () => {
     const run = async (delegation?: boolean) => {
       const provider = createMockProvider([textTurn('ok')]);
       const agent = await createAgent({
+        toolBackend: IN_PROCESS_BACKEND,
         provider,
         tools: [],
         mode: 'auto',
@@ -757,6 +877,7 @@ describe('batches of background notices', () => {
         : textTurn('noted');
     });
     const agent = await createAgent({
+      toolBackend: IN_PROCESS_BACKEND,
       provider,
       tools: [fakeTool('read_file', 'read')],
       mode: 'auto',

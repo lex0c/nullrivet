@@ -4,13 +4,14 @@ import { contextBudget } from '../context/budget.ts';
 import type { InstructionFile, InstructionsLoader } from '../instructions/agents-loader.ts';
 import type { Provider, ProviderEffort } from '../providers/types.ts';
 import {
+  type BackgroundJobs,
   createJobTools,
   describeJobEvent,
   type JobEvent,
   JobRegistry,
   type JobSession,
 } from '../tools/jobs.ts';
-import type { ExecutionMode } from '../tools/policy.ts';
+import type { ExecutionMode, SandboxScope } from '../tools/policy.ts';
 import { MAX_TIMER_DELAY_MS } from '../tools/process.ts';
 import type { Tool } from '../tools/types.ts';
 import { type CompactionOutcome, compactConversation } from './compactor.ts';
@@ -33,6 +34,7 @@ import {
   subagentDataBytes,
 } from './subagent.ts';
 import { buildSystemPrompt, localDate, renderProjectContext } from './system-prompt.ts';
+import { type AgentEngagement, IN_PROCESS_BACKEND, type ToolBackend } from './tool-broker.ts';
 
 export const DEFAULT_MAX_STEPS = 200;
 export const DEFAULT_STALL_MS = 120_000;
@@ -41,6 +43,15 @@ export const MAX_TIME_LIMIT_MS = MAX_TIMER_DELAY_MS;
 export interface AgentOptions {
   provider: Provider;
   tools: readonly Tool[];
+  // Where the tool calls of this agent and of its subagents run. Required, so that a session with
+  // a sandbox profile cannot run its tools in this process by omission.
+  toolBackend: ToolBackend;
+  // Set when toolBackend is a sandbox: the system prompts state its limits, and delegate refuses
+  // to start a subagent outside its project.
+  sandbox?: SandboxScope;
+  // Set in a sandbox of the security profile: the engagement's scope, stated in the system
+  // prompts, and its window, which the broker holds the tools that start commands to.
+  engagement?: AgentEngagement;
   mode: ExecutionMode;
   cwd: string;
   // Null disables AGENTS.md loading.
@@ -97,8 +108,14 @@ export interface Agent {
   backgroundStarts(): number;
   // What runs in the background now: jobs, and subagents running or waiting for a slot.
   backgroundWork(): BackgroundWork;
+  // Queues a note from the runtime for the model, such as a change the user made to the session
+  // between turns. It goes with the next request and starts no turn of its own; clearing the
+  // conversation drops it.
+  notify(notice: RuntimeNotice): void;
   readonly conversation: Conversation;
   readonly bootWarnings: readonly string[];
+  // The sandbox the tools run in, fixed for the agent's life; undefined when they run in process.
+  readonly sandbox: SandboxScope | undefined;
   mode: ExecutionMode;
   effort: ProviderEffort | undefined;
   provider: Provider;
@@ -199,6 +216,16 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
     options.timeLimitMs === undefined
       ? undefined
       : Math.min(options.timeLimitMs, MAX_TIME_LIMIT_MS);
+  const toolBackend = options.toolBackend;
+  // Jobs run where the tools do: in a registry of this process with the in-process backend, or in
+  // the backend itself, which reports them. Any other backend would leave their commands outside it.
+  if (
+    options.backgroundJobs !== undefined &&
+    toolBackend !== IN_PROCESS_BACKEND &&
+    toolBackend.jobs === undefined
+  ) {
+    throw new Error('background jobs need a tool backend that runs them');
+  }
   const subagents =
     options.delegation !== true
       ? null
@@ -207,6 +234,9 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
           effort: () => agent.effort,
           cwd: options.cwd,
           tools: options.tools,
+          toolBackend,
+          ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
+          ...(options.engagement === undefined ? {} : { engagement: options.engagement }),
           instructions: options.instructions,
           stallMs: options.stallMs ?? DEFAULT_STALL_MS,
           maxSteps,
@@ -214,11 +244,17 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
           isGitRepo: isInsideGitRepo,
         });
   const delegate = subagents === null ? [] : [createDelegateTool(subagents)];
-  let jobs: JobRegistry | null = null;
+  let jobs: BackgroundJobs | null = null;
   const jobTools: Tool[] = [];
   if (options.backgroundJobs !== undefined) {
-    jobs = new JobRegistry();
-    jobTools.push(...createJobTools(jobs, options.backgroundJobs));
+    if (toolBackend.jobs !== undefined) {
+      jobs = toolBackend.jobs;
+      jobTools.push(...createJobTools(null, options.backgroundJobs));
+    } else {
+      const registry = new JobRegistry();
+      jobs = registry;
+      jobTools.push(...createJobTools(registry, options.backgroundJobs));
+    }
   }
   const tools = new Map(
     [...options.tools, ...delegate, ...jobTools].map((tool) => [tool.name, tool]),
@@ -232,6 +268,7 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
   }
   const isGitRepo = await isInsideGitRepo(options.cwd);
   let running = false;
+  const notes: RuntimeNotice[] = [];
 
   const systemPrompt = (): string =>
     buildSystemPrompt({
@@ -241,6 +278,8 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
       date: localDate(),
       isGitRepo,
       ...(subagents === null ? {} : { delegation: { maxRunning: subagents.maxRunning } }),
+      ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
+      ...(options.engagement === undefined ? {} : { engagement: options.engagement.scope() }),
     });
   // Rendered when the instructions are loaded, not for every request.
   let projectContextText = renderProjectContext(bootInstructions);
@@ -269,7 +308,9 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
           provider: agent.provider,
           conversation,
           tools,
+          toolBackend,
           mode: () => agent.mode,
+          ...(options.engagement === undefined ? {} : { engagement: options.engagement.window }),
           cwd: options.cwd,
           systemPrompt,
           projectContext,
@@ -279,16 +320,16 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
           instructions: options.instructions,
           limits,
           ...(agent.effort === undefined ? {} : { effort: agent.effort }),
-          ...(jobs === null && subagents === null
-            ? {}
-            : {
-                notices: () =>
-                  nextNotices(
-                    jobs,
-                    subagents,
-                    reportDataBudget(agent.provider.capabilities.context_window),
-                  ),
-              }),
+          notices: () => [
+            ...notes.splice(0),
+            ...(jobs === null && subagents === null
+              ? []
+              : nextNotices(
+                  jobs,
+                  subagents,
+                  reportDataBudget(agent.provider.capabilities.context_window),
+                )),
+          ],
           emit: runOptions.onEvent ?? (() => undefined),
           signal,
         },
@@ -306,6 +347,7 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
   const agent: Agent = {
     conversation,
     bootWarnings,
+    sandbox: options.sandbox,
     mode: options.mode,
     effort: options.effort,
     provider: options.provider,
@@ -330,6 +372,7 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
 
     clear(): void {
       conversation.clear();
+      notes.length = 0;
       // Boot instructions are sent with every request; the ones attached to tool results of the
       // discarded conversation must be attached again when needed.
       options.instructions?.retainOnly(new Set(bootInstructions.map((file) => file.path)));
@@ -406,6 +449,10 @@ export const createAgent = async (options: AgentOptions): Promise<Agent> => {
 
     backgroundStarts(): number {
       return (jobs?.startedCount ?? 0) + (subagents?.startedCount ?? 0);
+    },
+
+    notify(notice: RuntimeNotice): void {
+      notes.push(notice);
     },
 
     backgroundWork(): BackgroundWork {

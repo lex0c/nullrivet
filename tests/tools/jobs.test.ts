@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import {
   createJobTools,
   describeJobEvent,
+  type JobEvent,
   JobRegistry,
   MAX_RUNNING_JOBS,
 } from '../../src/tools/jobs.ts';
@@ -467,5 +468,24 @@ describe('job events', () => {
     expect(ids).toHaveLength(50);
     expect(ids).toContain(pending.id);
     expect(drain().map((e) => e.jobId)).toEqual([pending.id]);
+  });
+
+  test('a clock set back while a job runs gives a duration of zero, not a negative one', async () => {
+    const handed: JobEvent[] = [];
+    registry = new JobRegistry(logs, {
+      started: () => undefined,
+      occurred: (event) => handed.push(event),
+      shown: () => undefined,
+    });
+    tools = new Map(createJobTools(registry, 'interactive').map((tool) => [tool.name, tool]));
+    const realNow = Date.now;
+    const { id } = await start({ command: 'sleep 0.2' });
+    Date.now = () => realNow() - 60_000;
+    try {
+      expect(await ended(id)).toBe(true);
+    } finally {
+      Date.now = realNow;
+    }
+    expect(handed).toMatchObject([{ type: 'job.finished', jobId: id, durationMs: 0 }]);
   });
 });

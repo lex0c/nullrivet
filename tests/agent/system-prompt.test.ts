@@ -59,4 +59,89 @@ describe('buildSystemPrompt', () => {
     expect(before(prompt('readonly'))).toBe(before(prompt('auto')));
     expect(before(prompt('auto')).length).toBeGreaterThan(1_000);
   });
+
+  test('under a sandbox, states its limits instead of the full access of the user', () => {
+    const sandboxed = (mode: 'auto' | 'readonly') =>
+      buildSystemPrompt({
+        cwd: '/work',
+        mode,
+        platform: 'linux',
+        date: '2026-01-02',
+        isGitRepo: true,
+        sandbox: { profile: 'inspect', root: '/work' },
+      });
+    const auto = sandboxed('auto');
+    expect(auto).not.toContain('There is no sandbox');
+    expect(auto).toContain('inside the sandbox described below');
+    expect(auto).toContain('# Sandbox: inspect');
+    expect(auto).toContain(
+      'The project directory "/work" and the system directories are read-only',
+    );
+    expect(auto).toContain('There is no network');
+    expect(auto).not.toContain('Background jobs');
+    expect(auto).not.toContain('paths outside it are accessible');
+    expect(sandboxed('readonly')).toContain('# Sandbox: inspect');
+    expect(prompt('auto')).toContain('There is no sandbox');
+    expect(prompt('auto')).not.toContain('# Sandbox');
+  });
+
+  test('in the security sandbox, says the project is written in memory and the network is the scope', () => {
+    const text = buildSystemPrompt({
+      cwd: '/work',
+      mode: 'auto',
+      platform: 'linux',
+      date: '2026-01-02',
+      isGitRepo: false,
+      sandbox: { profile: 'security', root: '/work' },
+      engagement: ['Authorized, over TCP and UDP, and ICMP echo:', '- 203.0.113.0/28, ports 443'],
+    });
+    expect(text).toContain('# Sandbox: security');
+    expect(text).toContain('is writable, but in memory');
+    expect(text).toContain('The network is limited to the engagement scope below.');
+    expect(text).not.toContain('There is no network');
+    expect(text).toContain('commands are refused');
+  });
+
+  test('states the engagement scope as given, and that the kernel refuses the rest', () => {
+    const text = buildSystemPrompt({
+      cwd: '/work',
+      mode: 'auto',
+      platform: 'linux',
+      date: '2026-01-02',
+      isGitRepo: false,
+      engagement: ['Authorized, over TCP and UDP, and ICMP echo:', '- 203.0.113.0/28, ports 443'],
+    });
+    expect(text).toContain('# Engagement scope');
+    expect(text).toContain('- 203.0.113.0/28, ports 443');
+    expect(text).toContain('a refusal means out of scope');
+    expect(text).toContain('there is no DNS');
+    expect(
+      buildSystemPrompt({
+        cwd: '/w',
+        mode: 'auto',
+        platform: 'linux',
+        date: 'd',
+        isGitRepo: false,
+      }),
+    ).not.toContain('# Engagement scope');
+  });
+
+  test('in the workspace sandbox, says the project is writable, applied by the user, .git never', () => {
+    const text = buildSystemPrompt({
+      cwd: '/work',
+      mode: 'auto',
+      platform: 'linux',
+      date: '2026-01-02',
+      isGitRepo: true,
+      sandbox: { profile: 'workspace', root: '/work' },
+    });
+    expect(text).toContain('# Sandbox: workspace');
+    expect(text).toContain(
+      'The project directory "/work" is writable, but your changes stay in the sandbox',
+    );
+    expect(text).toContain('When the user applies or discards them during a session');
+    expect(text).toContain('Changes under .git are never applied: do not commit');
+    expect(text).toContain('The system directories are read-only');
+    expect(text).not.toContain('and the system directories are read-only');
+  });
 });

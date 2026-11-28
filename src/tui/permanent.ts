@@ -1,4 +1,5 @@
 import wrapAnsi from 'wrap-ansi';
+import { formatApplyReport, formatChanges, type Paint } from '../sandbox/changeset/summary.ts';
 import { stripAnsi } from '../sanitize/ansi.ts';
 import { terminalText } from '../sanitize/display.ts';
 import { readFileDiff } from '../tools/line-diff.ts';
@@ -93,6 +94,26 @@ const noticeLines = (
   ];
 };
 
+// The summary of the changes, whose paths and lines are escaped already, wrapped to the frame.
+const changesLines = (text: string, caps: Capabilities): string[] => {
+  const width = Math.max(10, frameWidth(caps));
+  return [
+    '',
+    ...text
+      .trimEnd()
+      .split('\n')
+      .flatMap((line) => wrapAnsi(line, width, { hard: true, trim: false }).split('\n'))
+      .map(padFrame),
+  ];
+};
+
+const changesPaint = (caps: Capabilities): Paint => ({
+  added: (text) => paint(caps, 'success', text),
+  removed: (text) => paint(caps, 'error', text),
+  attention: (text) => paint(caps, 'warn', text),
+  dim: (text) => paint(caps, 'secondary', text),
+});
+
 // Lines written to the scrollback for an item. Content rows carry the frame margin; tool heads
 // start at the margin column so their glyph hangs in the gutter.
 export const formatPermanent = (item: PermanentItem, caps: Capabilities): string[] => {
@@ -101,6 +122,7 @@ export const formatPermanent = (item: PermanentItem, caps: Capabilities): string
       const identity = [
         terminalText(item.model),
         item.mode,
+        ...(item.sandbox === undefined ? [] : [`${item.sandbox} sandbox`]),
         ...(item.effort === undefined ? [] : [`effort ${item.effort}`]),
       ].join(' · ');
       const lines = [
@@ -141,5 +163,9 @@ export const formatPermanent = (item: PermanentItem, caps: Capabilities): string
       return ['', padFrame(turnEndLine(item, caps))];
     case 'notice':
       return noticeLines(item, caps);
+    case 'changes':
+      return changesLines(formatChanges(item.entries, changesPaint(caps)), caps);
+    case 'applied':
+      return changesLines(formatApplyReport(item.report, changesPaint(caps)), caps);
   }
 };

@@ -101,6 +101,88 @@ describe('InstructionsLoader', () => {
     expect(files.map((f) => f.content)).toEqual(['real rules']);
   });
 
+  test('loads an AGENTS.md that links to a file inside its repository', async () => {
+    const app = await repo('app');
+    await write(join(app, 'CLAUDE.md'), 'root rules');
+    await symlink('CLAUDE.md', join(app, 'AGENTS.md'));
+    await write(join(app, 'shared.md'), 'shared rules');
+    await mkdir(join(app, 'pkg'));
+    await symlink('../shared.md', join(app, 'pkg', 'AGENTS.md'));
+    const loader = new InstructionsLoader({ home: root });
+    const { files, warnings } = await loader.discover([join(app, 'pkg')]);
+    expect(files.map((f) => f.content)).toEqual(['root rules', 'shared rules']);
+    expect(warnings).toEqual([]);
+  });
+
+  test('refuses an AGENTS.md that links outside its repository, once, with a warning', async () => {
+    await write(join(root, 'outside', 'id_rsa'), 'private key');
+    const app = await repo('app');
+    await symlink('../outside/id_rsa', join(app, 'AGENTS.md'));
+    // A chain of links is judged by its final target.
+    const lib = await repo('lib');
+    await symlink('../outside/id_rsa', join(lib, 'CLAUDE.md'));
+    await symlink('CLAUDE.md', join(lib, 'AGENTS.md'));
+    const loader = new InstructionsLoader({ home: root });
+    const first = await loader.discover([app, lib]);
+    expect(first.files).toEqual([]);
+    expect(first.warnings).toEqual([
+      `${join(app, 'AGENTS.md')} was not loaded: it links to ${join(root, 'outside', 'id_rsa')}, outside ${app}`,
+      `${join(lib, 'AGENTS.md')} was not loaded: it links to ${join(root, 'outside', 'id_rsa')}, outside ${lib}`,
+    ]);
+    expect(await loader.discover([app])).toEqual({ files: [], warnings: [] });
+  });
+
+  test('outside a repository, an AGENTS.md may link only inside its own directory', async () => {
+    const home = join(root, 'home');
+    await write(join(home, 'projects', 'notes.md'), 'parent file');
+    await write(join(home, 'projects', 'tool', 'rules.md'), 'tool rules');
+    await symlink('rules.md', join(home, 'projects', 'tool', 'AGENTS.md'));
+    await write(join(home, 'projects', 'other', 'x'), '');
+    await symlink('../notes.md', join(home, 'projects', 'other', 'AGENTS.md'));
+    const loader = new InstructionsLoader({ home });
+    const tool = await loader.discover([join(home, 'projects', 'tool')]);
+    expect(tool.files.map((f) => f.content)).toEqual(['tool rules']);
+    const other = await loader.discover([join(home, 'projects', 'other')]);
+    expect(other.files).toEqual([]);
+    expect(other.warnings[0]).toContain('was not loaded: it links to');
+  });
+
+  describe('confined to a sandbox root', () => {
+    test('ignores paths outside the root, also once their links are resolved', async () => {
+      const app = await repo('app');
+      await write(join(app, 'AGENTS.md'), 'app rules');
+      const other = await repo('other');
+      await write(join(other, 'AGENTS.md'), 'other rules');
+      await symlink(other, join(app, 'linked'));
+      const loader = new InstructionsLoader({ home: root, root: app });
+      expect((await loader.discover([join(other, 'x.ts')])).files).toEqual([]);
+      expect((await loader.discover([join(app, 'linked', 'x.ts')])).files).toEqual([]);
+      expect((await loader.discover([join(app, 'x.ts')])).files.map((f) => f.content)).toEqual([
+        'app rules',
+      ]);
+      expect(await loader.governing([join(other, 'x.ts')])).toEqual([]);
+    });
+
+    test('stops the walk at the root, inside a larger repository', async () => {
+      const mono = await repo('mono');
+      await write(join(mono, 'AGENTS.md'), 'repository rules');
+      await write(join(mono, 'pkg', 'AGENTS.md'), 'package rules');
+      const loader = new InstructionsLoader({ home: root, root: join(mono, 'pkg') });
+      const { files } = await loader.discover([join(mono, 'pkg', 'src', 'a.ts')]);
+      expect(files.map((f) => f.content)).toEqual(['package rules']);
+    });
+
+    test('keeps the root when reloading', async () => {
+      const app = await repo('app');
+      await write(join(app, 'AGENTS.md'), 'app rules');
+      const other = await repo('other');
+      await write(join(other, 'AGENTS.md'), 'other rules');
+      const loader = new InstructionsLoader({ home: root, root: app });
+      expect((await loader.reload([other])).files).toEqual([]);
+      expect((await loader.fork().discover([other])).files).toEqual([]);
+    });
+  });
+
   test('truncates large files and enforces the total limit', async () => {
     const a = await repo('a');
     const b = await repo('b');

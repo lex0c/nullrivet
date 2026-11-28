@@ -5,8 +5,10 @@ import { join } from 'node:path';
 import { type Agent, createAgent } from '../../src/agent/agent.ts';
 import { Conversation } from '../../src/agent/conversation.ts';
 import type { AgentEvent } from '../../src/agent/events.ts';
+import { IN_PROCESS_BACKEND } from '../../src/agent/tool-broker.ts';
 import { InstructionsLoader } from '../../src/instructions/agents-loader.ts';
 import type { GenerateRequest } from '../../src/providers/types.ts';
+import { JobProjection } from '../../src/sandbox/job-projection.ts';
 import { FENCE } from '../../src/sanitize/fence.ts';
 import { removeOutputFiles } from '../../src/tools/output-files.ts';
 import {
@@ -29,6 +31,7 @@ const silentProvider = () => {
 describe('time limit', () => {
   test('a task that runs past its time limit ends at a limit, not as an interrupt', async () => {
     const agent = await createAgent({
+      toolBackend: IN_PROCESS_BACKEND,
       provider: silentProvider(),
       tools: [],
       mode: 'auto',
@@ -50,6 +53,7 @@ describe('time limit', () => {
 
   test('an interrupt before the limit is still an interrupt', async () => {
     const agent = await createAgent({
+      toolBackend: IN_PROCESS_BACKEND,
       provider: silentProvider(),
       tools: [],
       mode: 'auto',
@@ -65,6 +69,7 @@ describe('time limit', () => {
 
   test('a limit too large for a timer does not stop the task at once', async () => {
     const agent = await createAgent({
+      toolBackend: IN_PROCESS_BACKEND,
       provider: createMockProvider([textTurn('one')]),
       tools: [],
       mode: 'auto',
@@ -77,6 +82,7 @@ describe('time limit', () => {
 
   test('the limit applies to each task separately', async () => {
     const agent = await createAgent({
+      toolBackend: IN_PROCESS_BACKEND,
       provider: createMockProvider([textTurn('one'), textTurn('two')]),
       tools: [],
       mode: 'auto',
@@ -94,6 +100,7 @@ describe('piped input', () => {
   test('is sent as a fenced block after the prompt', async () => {
     const provider = createMockProvider([textTurn('ok')]);
     const agent = await createAgent({
+      toolBackend: IN_PROCESS_BACKEND,
       provider,
       tools: [],
       mode: 'auto',
@@ -117,6 +124,7 @@ describe('project instructions of the working directory', () => {
       await writeFile(join(project, 'AGENTS.md'), 'use tabs');
       const provider = createMockProvider([textTurn('ok')]);
       const agent = await createAgent({
+        toolBackend: IN_PROCESS_BACKEND,
         provider,
         tools: [],
         mode: 'auto',
@@ -145,6 +153,7 @@ describe('checkpoint', () => {
       textTurn('done'),
     ]);
     const agent = await createAgent({
+      toolBackend: IN_PROCESS_BACKEND,
       provider,
       tools: [
         {
@@ -170,6 +179,7 @@ describe('checkpoint', () => {
 
   test('is called after a manual compaction', async () => {
     const agent = await createAgent({
+      toolBackend: IN_PROCESS_BACKEND,
       provider: createMockProvider([]),
       tools: [],
       mode: 'auto',
@@ -186,6 +196,7 @@ describe('checkpoint', () => {
 
   test('is called when a turn is interrupted, with the conversation still consistent', async () => {
     const agent = await createAgent({
+      toolBackend: IN_PROCESS_BACKEND,
       provider: silentProvider(),
       tools: [],
       mode: 'auto',
@@ -215,6 +226,7 @@ describe('mode switch', () => {
   test('a switch between prompts is announced once, with the next prompt', async () => {
     const provider = createMockProvider([textTurn('one'), textTurn('two'), textTurn('three')]);
     const agent = await createAgent({
+      toolBackend: IN_PROCESS_BACKEND,
       provider,
       tools: [],
       mode: 'readonly',
@@ -237,6 +249,7 @@ describe('mode switch', () => {
     ]);
     let agent: Agent | undefined;
     agent = await createAgent({
+      toolBackend: IN_PROCESS_BACKEND,
       provider,
       tools: [
         {
@@ -263,6 +276,7 @@ describe('mode switch', () => {
   test('a cleared conversation starts without a note', async () => {
     const provider = createMockProvider([textTurn('one'), textTurn('two')]);
     const agent = await createAgent({
+      toolBackend: IN_PROCESS_BACKEND,
       provider,
       tools: [],
       mode: 'readonly',
@@ -283,6 +297,7 @@ describe('mode switch', () => {
     earlier.setRequestMode('readonly');
     const provider = createMockProvider([textTurn('done')]);
     const agent = await createAgent({
+      toolBackend: IN_PROCESS_BACKEND,
       provider,
       tools: [],
       mode: 'auto',
@@ -306,6 +321,7 @@ describe('background jobs', () => {
   test('the job tools are offered in auto mode only', async () => {
     const provider = createMockProvider([textTurn('done'), textTurn('fine')]);
     const agent = await createAgent({
+      toolBackend: IN_PROCESS_BACKEND,
       provider,
       tools: [],
       mode: 'auto',
@@ -328,6 +344,7 @@ describe('background jobs', () => {
       ...Array.from({ length: 50 }, () => textTurn('noted')),
     ]);
     const agent = await createAgent({
+      toolBackend: IN_PROCESS_BACKEND,
       provider,
       tools: [],
       mode: 'auto',
@@ -352,6 +369,7 @@ describe('background jobs', () => {
   test('a turn on job events starts nothing when none are pending', async () => {
     const provider = createMockProvider([]);
     const agent = await createAgent({
+      toolBackend: IN_PROCESS_BACKEND,
       provider,
       tools: [],
       mode: 'auto',
@@ -371,6 +389,7 @@ describe('background jobs', () => {
       textTurn('noted'),
     ]);
     const agent = await createAgent({
+      toolBackend: IN_PROCESS_BACKEND,
       provider,
       tools: [],
       mode: 'auto',
@@ -401,6 +420,7 @@ describe('background jobs', () => {
       textTurn('started'),
     ]);
     const agent = await createAgent({
+      toolBackend: IN_PROCESS_BACKEND,
       provider,
       tools: [],
       mode: 'auto',
@@ -432,6 +452,7 @@ describe('background jobs', () => {
   const readyPatternDescription = async (): Promise<string> => {
     const provider = createMockProvider([textTurn('ok')]);
     const agent = await createAgent({
+      toolBackend: IN_PROCESS_BACKEND,
       provider,
       tools: [],
       mode: 'auto',
@@ -451,6 +472,7 @@ describe('background jobs', () => {
     const description = async (session: 'interactive' | 'one-shot'): Promise<string> => {
       const provider = createMockProvider([textTurn('ok')]);
       const agent = await createAgent({
+        toolBackend: IN_PROCESS_BACKEND,
         provider,
         tools: [],
         mode: 'auto',
@@ -475,5 +497,81 @@ describe('background jobs', () => {
     const oneShot = await description('one-shot');
     expect(oneShot).toContain('nullrivet exits when you finish, which stops running jobs');
     expect(oneShot).not.toContain('end your turn');
+  });
+});
+
+describe('tool backend', () => {
+  test('background jobs are refused with a backend that does not run them', async () => {
+    const backend = { execute: IN_PROCESS_BACKEND.execute };
+    await expect(
+      createAgent({
+        provider: createMockProvider([]),
+        tools: [],
+        toolBackend: backend,
+        mode: 'auto',
+        cwd: '/tmp',
+        instructions: null,
+        backgroundJobs: 'interactive',
+      }),
+    ).rejects.toThrow('background jobs need a tool backend that runs them');
+    const agent = await createAgent({
+      provider: createMockProvider([]),
+      tools: [],
+      toolBackend: backend,
+      mode: 'auto',
+      cwd: '/tmp',
+      instructions: null,
+    });
+    expect(agent.backgroundWork()).toEqual({ jobs: 0, subagents: 0, queuedSubagents: 0 });
+  });
+
+  test('with a backend that runs the jobs, the agent offers their tools and reports their events', async () => {
+    const jobs = new JobProjection();
+    const received: string[] = [];
+    const backend = {
+      execute: async (tool: { name: string }) => {
+        received.push(tool.name);
+        return { content: 'started in the backend', isError: false };
+      },
+      jobs,
+    };
+    const provider = createMockProvider([
+      toolTurn([{ id: 'b1', name: 'bash_background', args: { command: 'sleep 1' } }]),
+      textTurn('started'),
+      textTurn('noted'),
+    ]);
+    const agent = await createAgent({
+      provider,
+      tools: [],
+      toolBackend: backend,
+      mode: 'auto',
+      cwd: '/tmp',
+      instructions: null,
+      backgroundJobs: 'one-shot',
+    });
+    await agent.run('start it');
+    expect(provider.calls[0]?.req.tools?.map((t) => t.name)).toContain('bash_background');
+    expect(received).toEqual(['bash_background']);
+    const id = '0123456789abcdef-1';
+    const log = { parts: [], savedBytes: 0, receivedBytes: 0 };
+    expect(jobs.receive({ type: 'job.started', jobId: id })).toBeNull();
+    expect(agent.backgroundWork().jobs).toBe(1);
+    const event = {
+      type: 'job.finished' as const,
+      jobId: id,
+      at: Date.now(),
+      durationMs: 1000,
+      status: 'completed' as const,
+      exitCode: 0,
+      signal: null,
+      log,
+    };
+    expect(jobs.receive({ type: 'job.event', seq: 1, event })).toBeNull();
+    expect(agent.hasBackgroundEvents()).toBe(true);
+    expect(agent.backgroundWork().jobs).toBe(0);
+    await agent.runOnBackgroundEvents();
+    const last = provider.calls.at(-1)?.req.messages.at(-1)?.content;
+    expect(JSON.stringify(last)).toContain(`Background job ${id} completed with exit code 0`);
+    expect(agent.hasBackgroundEvents()).toBe(false);
   });
 });

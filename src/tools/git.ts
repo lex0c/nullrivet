@@ -29,13 +29,20 @@ type Subcommand = (typeof SUBCOMMANDS)[number];
 // Repository configuration is data from the repository and can make read commands execute
 // programs: fsmonitor hooks, pagers, external diff tools, textconv and clean/smudge filters,
 // signature verification, lazy fetches through a transport. Each vector is disabled here so the
-// tool stays free of side effects, which is what makes it safe to expose in readonly mode.
+// tool stays free of side effects, which is what makes it safe to expose in readonly mode. A
+// format with signature placeholders, %G?, verifies signatures whatever log.showSignature says,
+// with the program the repository names: every signature program is one that does nothing, and
+// log and show take their format from the command line.
 export const HARDENING_CONFIG = [
   'core.fsmonitor=false',
   'core.hooksPath=/dev/null',
   'core.pager=cat',
   'protocol.allow=never',
   'log.showSignature=false',
+  'gpg.program=/bin/false',
+  'gpg.openpgp.program=/bin/false',
+  'gpg.x509.program=/bin/false',
+  'gpg.ssh.program=/bin/false',
   'diff.external=',
   'status.submoduleSummary=false',
   'diff.submodule=short',
@@ -177,7 +184,9 @@ const buildInvocation = (subcommand: Subcommand, input: Record<string, unknown>)
           'log',
           ...NO_DRIVERS,
           `--max-count=${count}`,
-          ...(optionalBoolean(input, 'oneline') === true ? ['--oneline'] : ['--date=iso']),
+          ...(optionalBoolean(input, 'oneline') === true
+            ? ['--oneline']
+            : ['--pretty=medium', '--date=iso']),
           ...(ref === undefined ? [] : [ref]),
           '--',
           ...paths,
@@ -192,6 +201,7 @@ const buildInvocation = (subcommand: Subcommand, input: Record<string, unknown>)
         args: [
           'show',
           ...NO_DRIVERS,
+          '--pretty=medium',
           ...(optionalBoolean(input, 'stat') === true ? ['--stat'] : []),
           ref,
           ...(path === undefined ? [] : ['--', path]),
@@ -336,13 +346,21 @@ export const gitTool: Tool = {
         );
       }
       if (run.exitCode !== 0) {
-        return { ...toolError('git.failed', failureDetail(run, stderrSpool)), touchedPaths };
+        return {
+          ...toolError('git.failed', failureDetail(run, stderrSpool)),
+          touchedPaths,
+          ...(outputFiles.hashing ? { outputs: [stderrSpool.capture('stderr')] } : {}),
+        };
       }
+      // The outputs the result shows: the output of a command that succeeded, the error output of
+      // one that failed.
+      const content = formatOutput(subcommand, run, spool);
       return {
-        content: formatOutput(subcommand, run, spool),
+        content,
         isError: false,
         meta: { subcommand, cwd, durationMs: run.durationMs, stdoutBytes: run.stdoutBytes },
         touchedPaths,
+        ...(outputFiles.hashing ? { outputs: [spool.capture('stdout')] } : {}),
       };
     } finally {
       // Discards what the result does not show: the output of a failed command, and the error

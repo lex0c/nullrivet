@@ -34,3 +34,106 @@ describe('--timeout', () => {
     expect(parseCli(['go'], {}, '/tmp').timeLimitMs).toBeUndefined();
   });
 });
+
+describe('--sandbox', () => {
+  test('takes a known profile, from the flag before the environment', () => {
+    expect(parseCli(['--sandbox', 'inspect', 'go'], {}, '/tmp').sandbox).toBe('inspect');
+    expect(parseCli(['go'], { NULLRIVET_SANDBOX: 'inspect' }, '/tmp').sandbox).toBe('inspect');
+    expect(parseCli(['go'], {}, '/tmp').sandbox).toBeUndefined();
+  });
+
+  test('refuses any other profile, naming the source', () => {
+    expect(() => parseCli(['--sandbox', 'lab', 'go'], {}, '/tmp')).toThrow(
+      "--sandbox must be inspect, workspace or security, got 'lab'",
+    );
+    expect(() => parseCli(['go'], { NULLRIVET_SANDBOX: 'none' }, '/tmp')).toThrow(
+      "NULLRIVET_SANDBOX must be inspect, workspace or security, got 'none'",
+    );
+  });
+});
+
+describe('--engagement', () => {
+  test('goes with the security profile, which needs it', () => {
+    const config = parseCli(
+      ['--sandbox', 'security', '--engagement', 'scope.json', 'go'],
+      {},
+      '/tmp',
+    );
+    expect(config.sandbox).toBe('security');
+    expect(config.engagement).toBe('scope.json');
+    expect(parseCli(['go'], {}, '/tmp').engagement).toBeUndefined();
+  });
+
+  test('is required by the security profile, and refused by any other', () => {
+    expect(() => parseCli(['--sandbox', 'security', 'go'], {}, '/tmp')).toThrow(
+      '--sandbox security needs --engagement <file>, which sets its scope',
+    );
+    expect(() => parseCli(['go'], { NULLRIVET_SANDBOX: 'security' }, '/tmp')).toThrow(
+      '--sandbox security needs --engagement <file>',
+    );
+    // Printing help, the version or the models needs no engagement, whatever the environment names.
+    for (const argv of [['--help'], ['--version'], ['--list-models']]) {
+      expect(() => parseCli(argv, { NULLRIVET_SANDBOX: 'security' }, '/tmp')).not.toThrow();
+    }
+    for (const argv of [
+      ['--engagement', 'scope.json', 'go'],
+      ['--sandbox', 'inspect', '--engagement', 'scope.json', 'go'],
+    ]) {
+      expect(() => parseCli(argv, {}, '/tmp')).toThrow(
+        '--engagement needs --sandbox security, whose network it scopes',
+      );
+    }
+  });
+});
+
+describe('--vm', () => {
+  test("runs the security profile in a virtual machine, with the host's kernel or the one named", () => {
+    const base = ['--sandbox', 'security', '--engagement', 'scope.json'];
+    expect(parseCli([...base, 'go'], {}, '/tmp')).toMatchObject({ vm: false, vmKernel: undefined });
+    expect(parseCli([...base, '--vm', 'go'], {}, '/tmp')).toMatchObject({
+      vm: true,
+      vmKernel: undefined,
+    });
+    expect(parseCli([...base, '--vm', '--vm-kernel', 'vmlinuz', 'go'], {}, '/tmp')).toMatchObject({
+      vm: true,
+      vmKernel: 'vmlinuz',
+    });
+  });
+
+  test('is refused by any other profile, and --vm-kernel without it', () => {
+    for (const argv of [
+      ['--vm', 'go'],
+      ['--sandbox', 'inspect', '--vm', 'go'],
+    ]) {
+      expect(() => parseCli(argv, {}, '/tmp')).toThrow(
+        '--vm needs --sandbox security, whose commands it runs in a virtual machine',
+      );
+    }
+    expect(() =>
+      parseCli(
+        ['--sandbox', 'security', '--engagement', 'scope.json', '--vm-kernel', 'k', 'go'],
+        {},
+        '/tmp',
+      ),
+    ).toThrow('--vm-kernel needs --vm, whose guest it boots');
+  });
+});
+
+describe('--apply', () => {
+  test('is off unless given, and works with the workspace profile from the flag or the environment', () => {
+    expect(parseCli(['--sandbox', 'workspace', 'go'], {}, '/tmp').apply).toBe(false);
+    expect(parseCli(['--sandbox', 'workspace', '--apply', 'go'], {}, '/tmp').apply).toBe(true);
+    expect(parseCli(['--apply', 'go'], { NULLRIVET_SANDBOX: 'workspace' }, '/tmp').apply).toBe(
+      true,
+    );
+  });
+
+  test('is refused without the workspace profile', () => {
+    for (const argv of [
+      ['--apply', 'go'],
+      ['--sandbox', 'inspect', '--apply', 'go'],
+    ]) {
+      expect(() => parseCli(argv, {}, '/tmp')).toThrow('--apply needs --sandbox workspace');
+    }
+  });
+});

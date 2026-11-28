@@ -94,13 +94,14 @@ does not settle it. Any remaining text is settled when a tool call starts or the
   can hold escape sequences. `/clear` keeps the history. It lives in memory and, when a session
   file is attached, in that file.
 - `Shift+Tab` switches the execution mode between `auto` and `readonly`, also while a task runs:
-  the executor reads the mode before every tool call, so the switch applies from the next one. It
-  does not stop or undo a call already running: a command started in `auto` runs to its end. Each
-  switch prints a line in the scrollback, the only record of which mode the tool calls around it
-  ran in. The status line shows the mode, with the `Shift+Tab` hint when no task runs and the
-  interrupt hint while one does, so the latter stays visible in narrow terminals. With no task
-  running and subagents in the background, the hint says that `Esc` cancels them instead. With the
-  command list open, `Shift+Tab` completes the selected command, like `Tab`.
+  the tool broker reads the mode before every tool call, so the switch applies from the next one.
+  It does not stop or undo a call already running: a command started in `auto` runs to its end.
+  Each switch prints a line in the scrollback, the only record of which mode the tool calls around
+  it ran in. The status line shows the mode, followed by the sandbox profile when the tools run in
+  one (`inspect sandbox`, `workspace sandbox`, `security sandbox`), with the `Shift+Tab` hint when no task runs and the interrupt hint while
+  one does, so the latter stays visible in narrow terminals. With no task running and subagents in
+  the background, the hint says that `Esc` cancels them instead. With the command list open,
+  `Shift+Tab` completes the selected command, like `Tab`.
 - The right side of the status line starts with the background work, in green: `2 jobs` running,
   and `3 subagents`, or `4+1 subagents` when one waits for a slot. Each part appears only while
   there is such work, also between tasks, and it is the last part dropped in a narrow terminal.
@@ -137,6 +138,21 @@ output from the event itself: the note names the log.
   dropped.
 - Only the interactive session continues on its own; a one-shot run ends with its task.
 
+## Questions
+
+A command can ask a question that only the next line answers, as `/apply` and `/discard` do with
+`--sandbox workspace`: `Apply 3 changes to the project? Type apply 7F2C to confirm; anything else
+cancels.` The question is printed as a warning line, and the next line submitted, whatever it
+says, is its answer: a prompt or a command typed then is an answer too, and an empty line, `Esc`
+or `Ctrl+C` cancels. The code is drawn when the question is asked, so nothing typed or pasted
+before it can confirm it. Answers are not kept in the prompt history. While a question waits,
+no automatic turn starts; a running task goes on.
+
+What the sandbox changed is written to the scrollback as a summary: each path with its change,
+the lines added and removed, modes, link targets and the excerpt of up to ten diffs, with the
+files that run without being invoked marked. After an application, a report lists what was
+applied and what was not, with the reason.
+
 ## Interrupting and exiting
 
 - `Esc` or `Ctrl+C` during a task aborts it. The abort reaches the HTTP request and every
@@ -153,6 +169,13 @@ output from the event itself: the note names the log.
 - `Ctrl+C` on an empty prompt with no task running arms an exit; a second `Ctrl+C` within two
   seconds exits with code 0, since nothing is interrupted. Typing anything disarms it. Leaving
   while a task is still stopping, or on a signal from outside, exits with 130.
+- With `--sandbox workspace`, exiting discards the changes not applied. `/exit` and `Ctrl+D` show
+  them first and ask: `apply <code>` applies them and exits, `discard` discards them and exits,
+  and any other answer keeps the session. The first `Ctrl+C` counts them, and the status line says
+  how many the second discards (`Press Ctrl+C again to exit and discard 3 changes`); while the
+  sandbox is being replaced, after `/apply` or `/discard`, it does not arm the exit. A signal from
+  outside discards them without asking; a report of an application that had already run then goes
+  to stderr.
 - On exit the live region is erased, the cursor is shown, raw mode, bracketed paste and the
   extended key mode are turned off, and every remaining process group is killed. The scrollback
   is left as it is.

@@ -1,13 +1,28 @@
+import { isAbsolute, relative } from 'node:path';
 import type { Agent } from '../agent/agent.ts';
 import { errorMessage } from '../errors.ts';
 import type { ResolveResult } from '../providers/resolve.ts';
 import type { ProviderEffort } from '../providers/types.ts';
+import type { ApplyReport, ChangeEntry } from '../sandbox/changeset/summary.ts';
+import type { RefreshReport } from '../sandbox/security.ts';
 import { resolvePath } from '../tools/paths.ts';
-import { type ExecutionMode, isExecutionMode } from '../tools/policy.ts';
+import { type ExecutionMode, isExecutionMode, type SandboxProfile } from '../tools/policy.ts';
 import { EFFORT_LEVELS } from './args.ts';
 import { SessionFile, type SessionLink } from './session-file.ts';
+import {
+  confirmationCode,
+  type Preview,
+  sessionFileError,
+  type WorkspaceSession,
+} from './workspace-session.ts';
 
 export type NoticeLevel = 'info' | 'warning' | 'error';
+
+// What /scope needs of a security sandbox.
+export interface SecurityCommands {
+  scope(): string[];
+  refresh(): Promise<RefreshReport | { error: string }>;
+}
 
 export interface SlashContext {
   agent: Agent;
@@ -22,6 +37,18 @@ export interface SlashContext {
   session: SessionLink;
   // Base for relative paths, as for the tools.
   cwd: string;
+  // Set in a session of the workspace sandbox, whose changes the operator reviews and applies.
+  workspace?: WorkspaceSession;
+  // Set in a session of the security sandbox: its scope, which the operator can refresh.
+  security?: SecurityCommands;
+  // Asks the operator a question, answered by the next line submitted; null when it is cancelled.
+  ask: (question: string) => Promise<string | null>;
+  // Reads the AGENTS.md files again once no task runs: they may have changed in the project.
+  reloadInstructionsWhenIdle: () => void;
+  // Writes what the sandbox changed, or what applying it did, to the scrollback.
+  show: (
+    item: { kind: 'changes'; entries: ChangeEntry[] } | { kind: 'applied'; report: ApplyReport },
+  ) => void;
 }
 
 export interface SlashCommand {
@@ -31,6 +58,8 @@ export interface SlashCommand {
   usage?: string;
   // Commands that change the conversation or the model cannot run while a turn is in progress.
   idleOnly?: boolean;
+  // Offered only in a session of this sandbox profile.
+  profile?: SandboxProfile;
   run(args: string, ctx: SlashContext): Promise<void> | void;
 }
 
@@ -59,18 +88,74 @@ const describeInstructions = (agent: Agent): string => {
   ].join('\n');
 };
 
+const plural = (count: number, one: string, many: string): string =>
+  `${count} ${count === 1 ? one : many}`;
+
+const stoppedJobs = (jobs: number): string =>
+  jobs === 0 ? '' : ` and stop ${plural(jobs, 'background job', 'background jobs')}`;
+
+const workspaceOf = (ctx: SlashContext): WorkspaceSession => {
+  if (ctx.workspace === undefined) {
+    throw new Error('this session does not run in the workspace sandbox');
+  }
+  return ctx.workspace;
+};
+
+// The entries at `path`, under it, or holding it, as a directory the sandbox created does.
+const entriesAt = (entries: readonly ChangeEntry[], path: string): ChangeEntry[] =>
+  entries.filter(
+    (entry) =>
+      path === '' ||
+      entry.path === path ||
+      entry.path.startsWith(`${path}/`) ||
+      (entry.kind === 'directory' && path.startsWith(`${entry.path}/`)),
+  );
+
+// Applies the changes `preview` showed, and reports what was done. `last`: the session ends.
+const applyPreview = async (ctx: SlashContext, preview: Preview, last: boolean): Promise<void> => {
+  const applied = await workspaceOf(ctx).apply(preview, last);
+  if (applied.report !== null) ctx.show({ kind: 'applied', report: applied.report });
+  if (applied.failure !== null) ctx.notice('error', applied.failure);
+  for (const warning of applied.warnings) ctx.notice('warning', warning);
+  if (last) return;
+  // The instructions are read from the project, which now holds what was applied.
+  if (applied.instructionsChanged) {
+    if (ctx.agent.running) {
+      ctx.reloadInstructionsWhenIdle();
+      ctx.notice(
+        'info',
+        'AGENTS.md files of the project may have changed: the instructions are read again once the task ends.',
+      );
+    } else {
+      const reloaded = await ctx.agent.reloadInstructions();
+      for (const warning of reloaded.warnings) ctx.notice('warning', warning);
+      ctx.notice(
+        'info',
+        'AGENTS.md files of the project may have changed: the instructions were read again.',
+      );
+    }
+  }
+  if (applied.stopped === null) {
+    ctx.notice('info', 'A new sandbox runs on the project as it is now.');
+  } else {
+    ctx.notice(
+      'error',
+      `No sandbox runs: ${applied.stopped}. No tool can run for the rest of the session.`,
+    );
+  }
+};
+
 export const SLASH_COMMANDS: readonly SlashCommand[] = [
   {
     name: 'help',
     description: 'List the available commands',
     run(_args, ctx) {
-      const heads = SLASH_COMMANDS.map((c) =>
+      const commands = commandsFor(sessionProfile(ctx));
+      const heads = commands.map((c) =>
         c.usage === undefined ? `/${c.name}` : `/${c.name} ${c.usage}`,
       );
       const width = Math.max(...heads.map((h) => h.length));
-      const rows = SLASH_COMMANDS.map(
-        (c, i) => `  ${(heads[i] ?? '').padEnd(width)}  ${c.description}`,
-      );
+      const rows = commands.map((c, i) => `  ${(heads[i] ?? '').padEnd(width)}  ${c.description}`);
       ctx.notice(
         'info',
         [
@@ -204,6 +289,13 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
         ctx.notice('error', opened.error);
         return;
       }
+      if (ctx.workspace !== undefined) {
+        const refused = await sessionFileError(opened.file.path, ctx.workspace.root);
+        if (refused !== null) {
+          ctx.notice('error', refused);
+          return;
+        }
+      }
       // Attaching never overwrites another conversation; continuing one is done at startup.
       if (opened.data !== null) {
         ctx.notice(
@@ -262,27 +354,199 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     },
   },
   {
+    name: 'changes',
+    description: 'Show what the sandbox changed in the project',
+    usage: '[path]',
+    profile: 'workspace',
+    run(args, ctx) {
+      const workspace = workspaceOf(ctx);
+      const preview = workspace.preview();
+      if ('error' in preview) {
+        ctx.notice('error', preview.error);
+        return;
+      }
+      if (args.length === 0) {
+        ctx.show({ kind: 'changes', entries: preview.entries });
+        return;
+      }
+      const path = relative(workspace.root, resolvePath(args, ctx.cwd));
+      if (path === '..' || path.startsWith('../') || isAbsolute(path)) {
+        ctx.notice('error', `${args} is outside the project.`);
+        return;
+      }
+      const entries = entriesAt(preview.entries, path);
+      if (entries.length === 0) {
+        ctx.notice('info', `The sandbox changed nothing at ${args}.`);
+        return;
+      }
+      ctx.show({ kind: 'changes', entries });
+    },
+  },
+  {
+    name: 'apply',
+    description: "Apply the sandbox's changes to the project",
+    profile: 'workspace',
+    async run(_args, ctx) {
+      const workspace = workspaceOf(ctx);
+      const preview = workspace.preview();
+      if ('error' in preview) {
+        ctx.notice('error', preview.error);
+        return;
+      }
+      if (preview.entries.length > 0) ctx.show({ kind: 'changes', entries: preview.entries });
+      if (preview.pending === 0) {
+        ctx.notice('info', 'The sandbox holds no changes to apply.');
+        return;
+      }
+      const code = confirmationCode();
+      const answer = await ctx.ask(
+        `Apply ${plural(preview.pending, 'change', 'changes')} to the project${stoppedJobs(workspace.runningJobs())}? Type apply ${code} to confirm; anything else cancels.`,
+      );
+      if (answer !== `apply ${code}`) {
+        ctx.notice('info', 'Nothing was applied.');
+        return;
+      }
+      await applyPreview(ctx, preview, false);
+    },
+  },
+  {
+    name: 'discard',
+    description: "Discard the sandbox's changes and start it again",
+    profile: 'workspace',
+    async run(_args, ctx) {
+      const workspace = workspaceOf(ctx);
+      if (!workspace.active) {
+        ctx.notice('error', `No sandbox runs: ${workspace.failure() ?? 'it stopped'}.`);
+        return;
+      }
+      const preview = workspace.preview();
+      if ('error' in preview) {
+        ctx.notice('warning', preview.error);
+      } else if (preview.pending === 0) {
+        ctx.notice('info', 'The sandbox holds no changes to discard.');
+        return;
+      } else {
+        ctx.show({ kind: 'changes', entries: preview.entries });
+      }
+      const code = confirmationCode();
+      const what =
+        'error' in preview ? "the sandbox's changes" : plural(preview.pending, 'change', 'changes');
+      const answer = await ctx.ask(
+        `Discard ${what}${stoppedJobs(workspace.runningJobs())}? Type discard ${code} to confirm; anything else cancels.`,
+      );
+      if (answer !== `discard ${code}`) {
+        ctx.notice('info', 'Nothing was discarded.');
+        return;
+      }
+      const discarded = await workspace.discard('error' in preview ? null : preview);
+      for (const warning of discarded.warnings) ctx.notice('warning', warning);
+      if (discarded.stopped === null) {
+        ctx.notice(
+          'info',
+          'The changes were discarded. A new sandbox runs on the project as it is.',
+        );
+      } else {
+        ctx.notice(
+          'error',
+          `The changes were discarded, and no sandbox runs: ${discarded.stopped}. No tool can run for the rest of the session.`,
+        );
+      }
+    },
+  },
+  {
+    name: 'scope',
+    description: "Show the engagement's scope, or resolve its names again with refresh",
+    usage: '[refresh]',
+    profile: 'security',
+    async run(args, ctx) {
+      const security = ctx.security;
+      if (security === undefined)
+        throw new Error('this session does not run in the security sandbox');
+      const verb = args.trim();
+      if (verb === '') {
+        ctx.notice('info', security.scope().join('\n'));
+        return;
+      }
+      if (verb !== 'refresh') {
+        ctx.notice('error', 'Usage: /scope, or /scope refresh to resolve its names again.');
+        return;
+      }
+      const report = await security.refresh();
+      if ('error' in report) {
+        ctx.notice('error', `The scope was not refreshed: ${report.error}`);
+        return;
+      }
+      if (report.changes.length === 0) {
+        ctx.notice('info', 'The names of the scope resolve to the same addresses as before.');
+        return;
+      }
+      // Host names and addresses the host validated and resolved.
+      const changed = report.changes.map(
+        ({ host, added, removed }) =>
+          `${host}: ${[...added.map((a) => `+${a}`), ...removed.map((a) => `-${a}`)].join(', ')}`,
+      );
+      ctx.notice('info', `The scope was refreshed:\n${changed.join('\n')}`);
+      ctx.agent.notify({
+        text: `The operator resolved the names of the engagement again; its scope changed:\n${changed.join('\n')}\nThe scope in force is in the system prompt.`,
+      });
+    },
+  },
+  {
     name: 'exit',
     description: 'Exit nullrivet',
-    run(_args, ctx) {
+    async run(_args, ctx) {
+      const workspace = ctx.workspace;
+      if (workspace?.active === true) {
+        // Exiting discards the sandbox's changes: the operator decides first.
+        const preview = workspace.preview();
+        if ('error' in preview) {
+          const answer = await ctx.ask(
+            `${preview.error}. Type discard to exit and discard the sandbox's changes; anything else keeps the session.`,
+          );
+          if (answer !== 'discard') {
+            ctx.notice('info', 'The session goes on.');
+            return;
+          }
+        } else if (preview.pending > 0) {
+          ctx.show({ kind: 'changes', entries: preview.entries });
+          const code = confirmationCode();
+          const answer = await ctx.ask(
+            `The sandbox holds ${plural(preview.pending, 'change', 'changes')} the project does not have. Type apply ${code} to apply them and exit, or discard to discard them and exit; anything else keeps the session.`,
+          );
+          if (answer === `apply ${code}`) {
+            await applyPreview(ctx, preview, true);
+          } else if (answer !== 'discard') {
+            ctx.notice('info', 'The session goes on.');
+            return;
+          }
+        }
+      }
       ctx.exit();
     },
   },
 ];
 
-export const findCommand = (name: string): SlashCommand | undefined =>
-  SLASH_COMMANDS.find((c) => c.name === name);
+// The profile whose commands a session offers, from what it was given.
+const sessionProfile = (ctx: SlashContext): SandboxProfile | undefined =>
+  ctx.workspace !== undefined ? 'workspace' : ctx.security !== undefined ? 'security' : undefined;
+
+const commandsFor = (profile: SandboxProfile | undefined): SlashCommand[] =>
+  SLASH_COMMANDS.filter((c) => c.profile === undefined || c.profile === profile);
+
+// `profile`: the sandbox the session runs in, whose commands it offers too.
+export const findCommand = (name: string, profile?: SandboxProfile): SlashCommand | undefined =>
+  commandsFor(profile).find((c) => c.name === name);
 
 // Suggestions while the user is still typing the command name.
-export const suggestCommands = (input: string): SlashCommand[] => {
+export const suggestCommands = (input: string, profile?: SandboxProfile): SlashCommand[] => {
   const match = /^\/([a-z]*)$/.exec(input);
   if (match === null) return [];
   const prefix = match[1] ?? '';
-  return SLASH_COMMANDS.filter((c) => c.name.startsWith(prefix));
+  return commandsFor(profile).filter((c) => c.name.startsWith(prefix));
 };
 
 export const runSlash = async (parsed: ParsedSlash, ctx: SlashContext): Promise<void> => {
-  const command = findCommand(parsed.name);
+  const command = findCommand(parsed.name, sessionProfile(ctx));
   if (command === undefined) {
     ctx.notice('error', `Unknown command /${parsed.name}; type /help for the list.`);
     return;

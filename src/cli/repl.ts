@@ -4,6 +4,9 @@ import type { AgentEvent } from '../agent/events.ts';
 import { errorMessage } from '../errors.ts';
 import { formatTokens } from '../format.ts';
 import type { ResolveResult } from '../providers/resolve.ts';
+import { formatApplyReport, formatChanges, type Paint } from '../sandbox/changeset/summary.ts';
+import { terminalText } from '../sanitize/display.ts';
+import type { SandboxProfile } from '../tools/policy.ts';
 import { applyKey, type InputState, inputWithText } from '../tui/input-editor.ts';
 import { createKeyParser, type KeyEvent } from '../tui/keys.ts';
 import { formatPermanent } from '../tui/permanent.ts';
@@ -32,11 +35,14 @@ import { type SessionFile, SessionLink } from './session-file.ts';
 import {
   describeModeChange,
   findCommand,
+  type ParsedSlash,
   parseSlash,
   runSlash,
+  type SecurityCommands,
   type SlashContext,
   suggestCommands,
 } from './slash.ts';
+import type { WorkspaceSession } from './workspace-session.ts';
 
 // A lone ESC byte is ambiguous until no continuation arrives: it is either the Escape key or the
 // start of an escape sequence split across reads.
@@ -60,6 +66,17 @@ export interface ReplOptions {
   stdin: NodeJS.ReadStream;
   stdout: NodeJS.WriteStream;
   env: Record<string, string | undefined>;
+  // The sandbox the tools run in, for the status line and the banner.
+  sandbox?: SandboxProfile;
+  // Set for the workspace sandbox: its changes, which the session reviews, applies and discards.
+  workspace?: WorkspaceSession;
+  // Set for the security sandbox: its scope, which /scope shows and refreshes.
+  security?: SecurityCommands;
+  // Facts the operator is told at the start, such as the scope of an engagement.
+  notes?: readonly string[];
+  // Given the session's way to show a notice, once it can, for what happens while it runs, such as
+  // the end of an engagement's window.
+  showNotices?: (show: (level: 'info' | 'warning', text: string) => void) => void;
 }
 
 export const formatStats = (status: StatusState): string => {
@@ -74,6 +91,13 @@ export const formatStats = (status: StatusState): string => {
     `Requests: ${t.requests}`,
     `Tokens: ${formatTokens(t.input)} input, ${formatTokens(t.output)} output, ${formatTokens(t.cacheRead)} cache read, ${formatTokens(t.cacheWrite)} cache write`,
   ].join('\n');
+};
+
+const PLAIN: Paint = {
+  added: (text) => text,
+  removed: (text) => text,
+  attention: (text) => text,
+  dim: (text) => text,
 };
 
 const isCtrlC = (key: KeyEvent): boolean => key.kind === 'char' && key.ctrl && key.char === 'c';
@@ -97,6 +121,7 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
     let state: TuiState = createInitialState({
       model: agent.provider.id,
       mode: agent.mode,
+      ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
       effort: agent.effort,
       cwd: options.cwd,
       home: homedir(),
@@ -108,6 +133,29 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
     let exitTimer: ReturnType<typeof setTimeout> | null = null;
     let escTimer: ReturnType<typeof setTimeout> | null = null;
     let closed = false;
+    const workspace = options.workspace;
+    // The sandbox whose commands the session offers.
+    const offered =
+      workspace !== undefined
+        ? 'workspace'
+        : options.security !== undefined
+          ? 'security'
+          : undefined;
+    // The project's AGENTS.md files may have changed while a task ran: they are read again, as
+    // /instructions reload does, as soon as neither a task nor a command runs.
+    let instructionsStale = false;
+    const reloadIfStale = (): void => {
+      if (!instructionsStale || closed || turn !== null || commandRunning) return;
+      instructionsStale = false;
+      void runCommand({ name: 'instructions', args: 'reload' });
+    };
+    // The question a command waits on: the next line submitted answers it, whatever it says.
+    let answering: ((answer: string | null) => void) | null = null;
+    const cancelQuestion = (): void => {
+      const answer = answering;
+      answering = null;
+      answer?.(null);
+    };
 
     const render = (): void => {
       if (!closed) screen.render(composeLive(state, caps, Date.now()));
@@ -124,8 +172,13 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       scheduler.request();
     };
 
-    const notice = (level: 'info' | 'warning' | 'error', text: string): void =>
-      dispatch({ type: 'notice', level, text });
+    // A command still running when the session closed, as an application of the sandbox's changes
+    // can be, reports its warnings, errors and results on stderr once the terminal is restored.
+    const notice = (level: 'info' | 'warning' | 'error', text: string): void => {
+      if (!closed) dispatch({ type: 'notice', level, text });
+      else if (level !== 'info')
+        process.stderr.write(`nullrivet: ${level}: ${terminalText(text)}\n`);
+    };
 
     // Warnings about the session file go to the interface while it is open, and to stderr once
     // the terminal has been restored (the last save happens on the way out).
@@ -179,6 +232,7 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       if (closed) return;
       closed = true;
       const steps: (() => void)[] = [
+        () => cancelQuestion(),
         () => stopBackgroundEvents(),
         () => stopSubagentActivity(),
         () => autoContinue.dispose(),
@@ -233,6 +287,28 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       stats: () => formatStats(state.status),
       session,
       cwd: options.cwd,
+      ...(workspace === undefined ? {} : { workspace }),
+      ...(options.security === undefined ? {} : { security: options.security }),
+      reloadInstructionsWhenIdle: () => {
+        instructionsStale = true;
+      },
+      ask: (question) =>
+        new Promise((resolveAnswer) => {
+          cancelQuestion();
+          notice('warning', question);
+          answering = resolveAnswer;
+        }),
+      show: (item) => {
+        if (!closed) {
+          screen.print(formatPermanent(item, caps));
+          return;
+        }
+        process.stderr.write(
+          item.kind === 'changes'
+            ? formatChanges(item.entries, PLAIN)
+            : formatApplyReport(item.report, PLAIN),
+        );
+      },
       compact: async (instructions) => {
         // Registered as the running turn so Esc and Ctrl+C interrupt it and prompts wait for it.
         const controller = new AbortController();
@@ -292,6 +368,7 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
         .finally(() => {
           if (turn === controller) turn = null;
           scheduler.request();
+          reloadIfStale();
           autoContinue.poke();
         });
     };
@@ -353,12 +430,12 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
     });
 
     const updateSlash = (value: string): void => {
-      const items = suggestCommands(value).map((c) => ({
+      const items = suggestCommands(value, offered).map((c) => ({
         name: c.name,
         description: c.description,
       }));
       const typed = /^\/([a-z]+)\s*$/.exec(value);
-      const usage = typed?.[1] === undefined ? undefined : findCommand(typed[1])?.usage;
+      const usage = typed?.[1] === undefined ? undefined : findCommand(typed[1], offered)?.usage;
       if (items.length === 0 && usage === undefined) {
         if (state.slash !== null) dispatch({ type: 'slash', menu: null });
         return;
@@ -376,8 +453,30 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       if (input.value.length === 0) autoContinue.poke();
     };
 
+    const runCommand = async (parsed: ParsedSlash): Promise<void> => {
+      commandRunning = true;
+      try {
+        await runSlash(parsed, slashContext);
+      } finally {
+        commandRunning = false;
+      }
+      syncStatus();
+      reloadIfStale();
+      autoContinue.poke();
+    };
+
     const submit = async (raw: string): Promise<void> => {
       const text = raw.trim();
+      if (answering !== null) {
+        // An answer, even an empty one, which cancels. It holds a confirmation code, so it is
+        // not kept in the history.
+        const answer = answering;
+        answering = null;
+        history.stopBrowsing();
+        dispatch({ type: 'submit', text });
+        answer(text);
+        return;
+      }
       if (text.length === 0) return;
       if (commandRunning) {
         notice('warning', 'A command is still running. Try again when it finishes.');
@@ -385,7 +484,7 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       }
       const parsed = parseSlash(raw);
       if (parsed !== null) {
-        if (findCommand(parsed.name) === undefined) {
+        if (findCommand(parsed.name, offered) === undefined) {
           // The input is kept so the text is not lost when it was meant as a prompt.
           notice(
             'error',
@@ -395,14 +494,7 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
         }
         history.add(raw.trimEnd());
         dispatch({ type: 'submit', text });
-        commandRunning = true;
-        try {
-          await runSlash(parsed, slashContext);
-        } finally {
-          commandRunning = false;
-        }
-        syncStatus();
-        autoContinue.poke();
+        await runCommand(parsed);
         return;
       }
       if (turn !== null) {
@@ -466,7 +558,19 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       return true;
     };
 
+    // Exiting discards the changes of the workspace sandbox, so the exit command asks first.
+    const requestExit = (): void => {
+      if (workspace === undefined) finish(0);
+      else if (!commandRunning) void runCommand({ name: 'exit', args: '' });
+    };
+
     const onKey = (key: KeyEvent): void => {
+      if (answering !== null && (isCtrlC(key) || isNamedKey(key, 'escape'))) {
+        history.stopBrowsing();
+        setInput({ value: '', cursor: 0 });
+        cancelQuestion();
+        return;
+      }
       if (isCtrlC(key)) {
         if (turn !== null) {
           // A turn that does not settle after an interrupt (a process that ignores signals, a
@@ -476,11 +580,21 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
         } else if (state.input.value.length > 0) {
           history.stopBrowsing();
           setInput({ value: '', cursor: 0 });
+        } else if (workspace?.busy === true) {
+          // Leaving now would cut the application or the discard short.
+          notice('info', 'The sandbox is being replaced; exit once it is done.');
         } else if (state.exitArmedAt !== null) {
           // Nothing is interrupted: leaving an idle session this way is as deliberate as /exit.
           finish(0);
         } else {
-          dispatch({ type: 'exit-arm', now: Date.now() });
+          // The changes the exit would discard, counted when the exit is armed. Refusals, such as
+          // those of .git, are never applied, and do not count.
+          let discards = 0;
+          if (workspace?.active === true) {
+            const preview = workspace.preview();
+            discards = 'error' in preview ? -1 : preview.pending;
+          }
+          dispatch({ type: 'exit-arm', now: Date.now(), discards });
           if (exitTimer !== null) clearTimeout(exitTimer);
           exitTimer = setTimeout(() => {
             dispatch({ type: 'exit-disarm' });
@@ -494,7 +608,7 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       if (handlePopoverKey(key)) return;
       if (recall(key)) return;
       if (isShiftTab(key)) {
-        // Also while a task runs: the executor reads the mode before every tool call, so the
+        // Also while a task runs: the tool broker reads the mode before every tool call, so the
         // switch applies from the next one, as with /permission. The notice records the switch
         // in the scrollback, the only record of which mode the tool calls around it ran in.
         agent.mode = agent.mode === 'auto' ? 'readonly' : 'auto';
@@ -518,7 +632,7 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
         return;
       }
       if (result.cancelInput === 'eof') {
-        if (turn === null) finish(0);
+        if (turn === null) requestExit();
         return;
       }
       if (result.next.value !== state.input.value) history.stopBrowsing();
@@ -550,6 +664,7 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
           version: options.version,
           model: agent.provider.id,
           mode: agent.mode,
+          ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
           effort: agent.effort,
           cwd: options.cwd,
           home: homedir(),
@@ -559,6 +674,8 @@ export const runRepl = (options: ReplOptions): Promise<number> =>
       ),
     );
     for (const warning of options.warnings) notice('warning', warning);
+    for (const note of options.notes ?? []) notice('info', note);
+    options.showNotices?.(notice);
     if (session.path !== null) {
       notice(
         'info',

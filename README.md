@@ -11,9 +11,9 @@ inspecting git repositories.
   ([saved output](docs/TOOLS.md#saved-output)). Commands the agent runs and the model provider may
   keep their own records.
 - **Two execution modes.** `auto` runs every tool without confirmation; `readonly` exposes only
-  read tools and is enforced by the executor, not just by the prompt.
+  read tools and is enforced by the tool broker, not just by the prompt.
 - **Not confined to a directory.** `--cwd` is only the starting point. Tools can reach any path the
-  operating system allows.
+  operating system allows, unless they run in the [sandbox](#sandbox).
 - **Project instructions.** Existing `AGENTS.md` files are read and applied to the directories they
   govern.
 - **Pipe-friendly.** Plain answers on stdout, diagnostics on stderr, or NDJSON events with `--json`.
@@ -101,6 +101,11 @@ it until end of file, so programs that start nullrivet without piping anything s
 | `-m, --model <id>` | Model as `<family>/<model>`, e.g. `openrouter/deepseek/deepseek-v4-flash`. Required unless `NULLRIVET_MODEL` is set. |
 | `-e, --effort <level>` | Reasoning effort: `low`, `medium`, `high`, `xhigh`, `max`. Ignored by models without reasoning. |
 | `-p, --permission <mode>` | `auto` (default) or `readonly`. |
+| `--sandbox <profile>` | Run the tools in a sandbox. Linux with Bubblewrap installed in a system directory; the profile is `inspect` (Bubblewrap 0.8 or later), `workspace` or `security` (0.10 or later). See [Sandbox](#sandbox). |
+| `--engagement <file>` | With `--sandbox security`, which requires it: the engagement file, which sets what the sandbox may reach and when. |
+| `--vm` | With `--sandbox security`: run the commands in a virtual machine with a kernel of its own, inside the same sandbox. Linux x86-64 with KVM, QEMU, and a kernel the user can read. |
+| `--vm-kernel <file>` | With `--vm`: the guest's kernel, whose modules must be installed; the host's own otherwise. |
+| `--apply` | With `--sandbox workspace` and a task: apply the task's changes to the project if the task finishes. Without it, they are shown and discarded. The interactive session uses `/apply` instead. |
 | `-C, --cwd <dir>` | Starting directory for relative paths, commands and `AGENTS.md` lookup. It does not restrict file access. |
 | `--json` | Emit agent events as NDJSON on stdout. |
 | `--no-agents` | Do not load `AGENTS.md` files. |
@@ -110,6 +115,8 @@ it until end of file, so programs that start nullrivet without piping anything s
 | `--context-window <n>` | Override the model's context window, in tokens. |
 | `--max-output <n>` | Override the model's output token limit. |
 | `--list-models` | List the models of the built-in catalog and exit. See [Models](#models). |
+| `--verify-evidence <file>` | Check an evidence log of `--sandbox security` and the copies beside it, print its final hash, and exit: 0 when complete, 4 when consistent but incomplete, 1 when corrupted. |
+| `--expected-hash <sha256>` | With `--verify-evidence`: the final hash kept apart from the log, which the log's must be. |
 | `-h, --help` | Show help. |
 | `-v, --version` | Show the version. |
 
@@ -128,6 +135,7 @@ Flags take precedence over environment variables, which take precedence over the
 | `NULLRIVET_MODEL` | Default model id. |
 | `NULLRIVET_EFFORT` | Default reasoning effort. |
 | `NULLRIVET_PERMISSION` | Default execution mode. |
+| `NULLRIVET_SANDBOX` | Default sandbox profile. |
 | `NULLRIVET_MAX_STEPS` | Default step limit, per task and per subagent. |
 | `NULLRIVET_TIMEOUT` | Default time limit per task and per subagent (without it, 30 minutes per subagent). |
 | `NULLRIVET_<FAMILY>_BASE_URL` | Endpoint of a provider family, e.g. `NULLRIVET_OPENAI_BASE_URL`. |
@@ -163,6 +171,8 @@ the Bun runtime reads when nullrivet starts:
 | `1` | The task failed (provider error, unrecoverable stream error). |
 | `2` | Invalid usage or configuration (bad flag, unknown model, missing credentials). |
 | `3` | A limit was reached: step limit, time limit, output limit, or the conversation no longer fits the context window. |
+| `4` | With `--sandbox workspace --apply`: the task finished, and some or all of its changes were not applied (a conflict with a change made on the host during the task, a refusal, or changes that could not be read); the project holds those reported as applied. |
+| `5` | With `--sandbox workspace --apply`: applying the changes stopped part-way, on a failure or on a change made on the host during the application itself; the project holds those reported as applied. |
 | `130` | Interrupted. |
 
 In one-shot mode, `Ctrl+C` aborts the task, terminates every process it started and exits with
@@ -186,8 +196,8 @@ the tokens spent. The older part of a long conversation is summarized automatica
 | `Shift+Tab` | Switch between `auto` and `readonly`, also while a task runs; it applies from the next tool call and does not stop one already running. |
 | `Esc` or `Ctrl+C` while a task runs | Interrupt the task; running commands are terminated. A second `Ctrl+C` exits if the task does not stop. |
 | `Ctrl+C` on a non-empty prompt | Clear the prompt. |
-| `Ctrl+C` twice on an empty prompt | Exit (code 0). |
-| `Ctrl+D` on an empty prompt | Exit (code 0). |
+| `Ctrl+C` twice on an empty prompt | Exit (code 0). With `--sandbox workspace`, the changes not applied are discarded; the first press says how many. |
+| `Ctrl+D` on an empty prompt | Exit (code 0), as `/exit` does. |
 | `↑`/`↓` | Recall earlier prompts and commands: `↑` from the first line of the input, then `↑`/`↓` walk the history; `↓` past the newest brings back what you were typing. |
 | `Tab`, `↑`/`↓` with the command list open | Complete and choose a command. |
 
@@ -204,7 +214,11 @@ the tokens spent. The older part of a long conversation is summarized automatica
 | `/instructions [reload]` | List the loaded `AGENTS.md` files, or read them again. |
 | `/stats` | Show the token usage since nullrivet started. |
 | `/session [file\|off]` | Show the session file, start saving to a new file, or stop saving. See [Sessions](#sessions). |
-| `/exit` | Exit. |
+| `/exit` | Exit. With `--sandbox workspace` and changes not applied, it asks first whether to apply or discard them. |
+| `/changes [path]` | With `--sandbox workspace`: show what the sandbox changed, or the changes at a path. |
+| `/apply` | With `--sandbox workspace`: show the changes and apply them once you type the code the question shows. |
+| `/discard` | With `--sandbox workspace`: discard the changes, after the same kind of confirmation. |
+| `/scope [refresh]` | With `--sandbox security`: show the engagement's scope, or resolve its names again and put the new addresses in force. |
 
 `/model`, `/compact`, `/clear` and `/session` cannot be used while a task runs. An unknown command
 is not sent; to send a prompt that starts with `/`, begin it with a space.
@@ -233,8 +247,78 @@ modes: only the main agent changes files or runs commands.
 
 `auto` is **not a sandbox**: commands run with your privileges, and anything the agent reads (files,
 command output, `AGENTS.md`) can carry prompt injection. Run nullrivet as an unprivileged user, and
-in a container or VM for risky work ([trust boundaries](docs/ARCHITECTURE.md#trust-boundaries)).
-`readonly` prevents changes made through nullrivet's tools, not the reading of sensitive files.
+in a container or VM for risky work ([trust boundaries](docs/ARCHITECTURE.md#trust-boundaries)), or
+use the [sandbox](#sandbox). `readonly` prevents changes made through nullrivet's tools, not the
+reading of sensitive files.
+
+### Sandbox
+
+`--sandbox inspect` runs the tools that touch files, commands and the network in a worker process
+inside [Bubblewrap](https://github.com/containers/bubblewrap), on Linux, for work on code you do
+not trust, such as reviewing an unknown repository:
+
+- The project (the repository around the working directory, or the directory itself) and the
+  system directories are read-only. The home directory and `/tmp` are temporary and empty of your
+  files; nothing written there reaches your machine.
+- No network, no host processes, no host environment: provider keys and other variables stay
+  outside, and the tools see a minimal environment.
+- Sockets other than IP (Unix, vsock and the rest) and the kernel keyrings are out of reach, and
+  processes left behind end with the session.
+
+The execution mode still applies inside: `readonly` with `inspect` only reads. Background jobs run
+inside the sandbox too, with their logs in its `/tmp`. Its resources are limited, so that a command
+that exhausts them leaves your machine usable: with systemd's user manager, the sandbox runs in a
+cgroup of its own, with at most 4096 processes and threads, three quarters of the memory and no
+swap, and a lower CPU priority; without it, only the number of processes is limited, and a warning
+says so. A sandbox that cannot start stops the session with the reason; nullrivet never falls back
+to running the tools without it.
+
+`--sandbox workspace` is the same sandbox with the project writable through an overlay: the agent
+edits, builds and tests as usual, and nothing reaches the project while it works. With a task on the
+command line, when the task ends, the changes are listed on stderr (files added, modified and
+removed, lines changed, modes, links), with files that run without being invoked, such as `.envrc`
+or CI workflows, marked. Without `--apply` they are then discarded; with it, they are applied if the
+task finished, each file whole or not at all, and a file you changed during the task is left as you
+made it and reported (exit code 4). `.git` is never changed. `Ctrl+C` after the task finished and
+before the changes are applied discards them; once applying has started, it runs to its end. The
+overlay lives in your runtime directory (`$XDG_RUNTIME_DIR`), which the profile requires on a tmpfs.
+
+In an interactive session, `/changes` shows the changes so far, `/apply` applies them after you
+type the code its question shows, and `/discard` throws them away; either one starts a new sandbox
+on the project as it is then, and stops the background jobs. Exiting asks what to do with changes
+not applied.
+
+```sh
+nullrivet --sandbox workspace "fix the failing test"            # shows the changes, discards them
+nullrivet --sandbox workspace --apply "fix the failing test"    # applies them if the task finishes
+nullrivet --sandbox workspace                                   # interactive: /changes, /apply, /discard
+```
+
+`--sandbox security --engagement <file>` is for authorized security work: the sandbox's network
+reaches the destinations the engagement file authorizes, networks and host names with their ports,
+within its time window, and nothing else; the kernel refuses the rest at once, and there is no DNS,
+only an `/etc/hosts` with the file's names. The session states the scope at the start, and the
+model is told it. Outside the window, commands are refused; at its end, the network closes for good,
+and the running commands and jobs are stopped. The project is writable through an overlay kept in
+memory, discarded at exit. The profile needs nftables, passt and systemd's user manager, whose
+cgroup limits it requires. `/scope refresh` resolves the names again. With
+`"evidence": { "dir": "./evidence" }` in the engagement file, the host records each call, its
+outputs and the network's events in a hash-chained log, and gives the operator its final hash at
+the end; `--verify-evidence` checks it. The evidence directory holds the findings as produced, so it
+is sensitive.
+
+With `--vm`, the commands run in a KVM guest booted from the host's own kernel, QEMU taking the
+worker's place inside the same sandbox: its files, network, scope and limits stay those of the
+profile, and the guest's kernel stands between the commands and the host's. It suits samples and
+tools of unknown origin. On distributions that keep the kernel readable by root alone, as Ubuntu
+does, make it readable or name another with `--vm-kernel`.
+
+```sh
+nullrivet --sandbox security --engagement acme.json "scan the web server in scope"
+nullrivet --sandbox security --engagement acme.json --vm "analyze the sample in ./samples"
+```
+
+Details, the engagement file and what remains planned: [docs/SANDBOX.md](docs/SANDBOX.md).
 
 ## Tools
 
@@ -291,6 +375,7 @@ nullrivet --json --permission readonly "List the TODOs in src" | jq -c 'select(.
 | `context:compact:start` | `reason` (`auto`, `manual`, `overflow`) |
 | `context:compact` | `reason`, `strategy` (`llm`, `fallback`), `before`, `after` (estimated tokens) |
 | `notice` | `text`: a runtime note added for the model, such as a background job that ended |
+| `info` | `message`: a fact the operator is told, such as the scope of an engagement at the start or the end of its window |
 | `warning` | `message` |
 | `error` | `message` |
 | `agent:end` | `reason` (`done`, `aborted`, `error`, `budget`), `message` |
@@ -311,8 +396,8 @@ nullrivet --session ci.json "Fix the first failure"   # same conversation, next 
 - The file is written atomically after each step, compaction and task, and when you leave the
   interactive session; a crash loses at most the step in progress.
 - Continuing uses the session's last model and effort unless the invocation sets them. The
-  execution mode always comes from the invocation: pass `--permission readonly` again to keep a
-  session read-only.
+  execution mode and the sandbox always come from the invocation: pass `--permission readonly` or
+  `--sandbox inspect` again to keep them. Continuing without them prints a warning.
 - `/session <file>` saves to a new file from then on, and the previous file keeps the conversation
   so far; `/session off` stops saving; `/session` shows the state. `/clear` stops saving too.
 - The file also keeps the prompt history, one-shot prompts included, so `↑` recalls them when the
@@ -348,6 +433,8 @@ as CI does. Evaluations against real models: [docs/EVALS.md](docs/EVALS.md).
 - [docs/MODELS.md](docs/MODELS.md): model resolution, the catalog, discovery and provider settings.
 - [docs/TUI.md](docs/TUI.md): the interactive interface: rendering, streaming Markdown, keys.
 - [docs/EVALS.md](docs/EVALS.md): evaluations against real models.
+- [docs/SANDBOX.md](docs/SANDBOX.md): the `inspect`, `workspace` and `security` sandboxes, the
+  ChangeSet, the network scope of an engagement, and what remains planned.
 
 ## License
 

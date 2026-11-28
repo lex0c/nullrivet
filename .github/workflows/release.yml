@@ -76,6 +76,13 @@ jobs:
       - run: chmod +x "dist/nullrivet-$TARGET"
         env:
           TARGET: ${{ matrix.target }}
+      # As in CI: the sandbox tests must run against each Linux executable, not be skipped.
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          echo NULLRIVET_TEST_REQUIRE_SANDBOX=1 >> "$GITHUB_ENV"
       - run: bun test tests/e2e
         env:
           NULLRIVET_EXECUTABLE: dist/nullrivet-${{ matrix.target }}

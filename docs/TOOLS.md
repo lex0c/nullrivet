@@ -21,7 +21,27 @@ Common behavior:
 
 - **Paths** are absolute or relative to the starting directory; `~` is expanded. Paths outside
   the starting directory, `..` and symlinks are allowed on purpose. Access is limited only by
-  operating system permissions.
+  operating system permissions, or, with a sandbox, by what it exposes: with `--sandbox inspect`,
+  the project read-only, a temporary home and `/tmp`, no network; with `--sandbox workspace`, the
+  same with the project writable through an overlay, whose changes reach the project only when
+  the user applies them; with `--sandbox security`, the project writable in memory and discarded
+  at exit, and the network of an engagement's scope ([SANDBOX.md](SANDBOX.md)). Background jobs
+  then run in the sandbox, with their logs in its `/tmp`.
+- **Engagement window.** With `--sandbox security`, outside the engagement's window the tool broker
+  refuses the tools that start commands, `bash` and `bash_background`, with
+  `engagement.window`, before they reach the sandbox; at its end, the calls of these tools still
+  running are cancelled and the background jobs stopped. The others, `git`, `glob` and `grep`
+  included, which run fixed programs, stay available; so do `bash_jobs` and `bash_kill`.
+- **Names through the proxy.** When the engagement file marks names `"via": "proxy"`, the commands
+  of `bash` and `bash_background` get `HTTP_PROXY`, `HTTPS_PROXY` and their lower-case forms, which
+  name the proxy with the session's credential, and `NO_PROXY` with what is reached directly. Those
+  names reach the sandbox through the proxy alone ([SANDBOX.md](SANDBOX.md)).
+- **Sandbox restarts.** In an interactive session with `--sandbox workspace`, applying or
+  discarding the changes stops the sandbox and starts a new one on the project as it is then. A
+  call running at that moment ends with `sandbox.restarted`; calls made meanwhile wait for the new
+  sandbox, and one interrupted while it waits ends with `tool.cancelled` without running.
+  Background jobs end with the old sandbox and are reported as lost. A sandbox that stops on its
+  own, or a new one that does not start, ends every later call with `sandbox.lost`.
 - **Arguments** come from the model and are validated by each tool. Invalid arguments come back as
   an `input.invalid` error result.
 - **Errors** come back to the model as text of the form `error [<code>]: <message>`, followed by a
@@ -186,7 +206,9 @@ Runs a command with `bash -c`.
   [Saved output](#saved-output)). The result ends with the exit code, or with a note that the
   command timed out or was aborted, followed by a line naming the files of each saved stream.
 - **Exit status.** A non-zero exit code is reported but is not a tool error: a failing test run is
-  information the model needs. A timeout or abort is a tool error.
+  information the model needs. A timeout or abort is a tool error. A command killed by a real-time
+  signal (34 to 64) is reported with exit code 0: the process API of Bun 1.4.4 reports it so, and
+  only signals 1 to 31 are named.
 - **Credentials.** The API keys nullrivet uses (`OPENROUTER_API_KEY` and the keys of the other
   supported providers) and every `NULLRIVET_*` variable are removed from the command's
   environment, so a command produced by prompt injection cannot read them. Everything else in the
@@ -278,11 +300,11 @@ subagent's report reaches the model later, as data.
   request, as for [background jobs](#background-jobs). The note holds only what the runtime
   observed: the id, the status (`completed`, `failed`, `cancelled` or `budget`), the reason when it
   stopped early (`cancelled`, `time_limit`, `step_limit`, `context_full`, `output_limit`,
-  `provider_error`, `internal_error`), the steps, tool errors and tokens. The title, any message
-  that came with the stop and the report follow as data, fenced like piped stdin: they are text
-  from models and services, not from the runtime. The session shows a line with the subagent's
-  title and the same facts. While the session is idle, a report starts a turn of its own. Files
-  may have changed since the subagent read them.
+  `provider_error`, `sandbox_lost`, `internal_error`), the steps, tool errors and tokens. The
+  title, any message that came with the stop and the report follow as data, fenced like piped
+  stdin: they are text from models and services, not from the runtime. The session shows a line
+  with the subagent's title and the same facts. While the session is idle, a report starts a turn
+  of its own. Files may have changed since the subagent read them.
 - **Batches.** Each request carries new report data up to a quarter of the context window
   (at least 2 KiB) and at most 32 KiB, and always at least one report; the others wait for the
   next step or turn. The data of one report stays within that budget with everything it holds: the
@@ -356,7 +378,8 @@ that had already ended is left as it was.
   earlier run, still in a resumed session, does not name a job of this one; it is reported as
   `job.unknown`.
 - **States.** `running`, then `completed` (exit code 0), `failed` (another exit code, or a signal
-  nobody asked for), `stopped` (`bash_kill`) or `timed_out` (`max_runtime_ms`). The first ending is
+  nobody asked for; a real-time signal is reported as exit code 0, as for `bash`), `stopped`
+  (`bash_kill`) or `timed_out` (`max_runtime_ms`). The first ending is
   final: a stop or a time limit that arrives after the job ended on its own does not change it.
 - **Log.** stdout and stderr go to one file, in the order they were written, saved like
   [saved output](#saved-output) in parts of up to 10 MiB. The limits are 64 MiB per job and 256 MiB

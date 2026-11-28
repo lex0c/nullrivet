@@ -131,7 +131,7 @@ describe('reduce', () => {
   });
 
   test('typing disarms a pending exit', () => {
-    const armed = run([{ type: 'exit-arm', now: 10 }]).state;
+    const armed = run([{ type: 'exit-arm', discards: 0, now: 10 }]).state;
     expect(armed.exitArmedAt).toBe(10);
     expect(
       run([{ type: 'input', input: { value: 'x', cursor: 1 } }], armed).state.exitArmedAt,

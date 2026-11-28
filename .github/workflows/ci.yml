@@ -30,7 +30,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15, macos-15-intel]
+        include:
+          # Ubuntu 26.04 ships Bubblewrap 0.11, with the overlay options the workspace profile
+          # uses: the overlay tests must run there, on both architectures. The user's service
+          # manager is started there, so the sandbox runs in a cgroup with its limits.
+          # The virtual machine tests run on x86-64, whose runners have KVM.
+          - os: ubuntu-latest
+            overlays: true
+            cgroups: true
+            vm: true
+          - os: ubuntu-26.04-arm
+            overlays: true
+            cgroups: true
+          # Ubuntu 24.04 ships Bubblewrap 0.9, without them: the inspect profile is tested there,
+          # and the overlay tests are skipped. Without the user's service manager, the sandbox
+          # limits its processes by RLIMIT_NPROC alone.
+          - os: ubuntu-24.04
+          - os: macos-15
+          - os: macos-15-intel
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
@@ -41,10 +58,54 @@ jobs:
         with:
           bun-version: 1.4.4
       - run: bun install --frozen-lockfile
-      - run: bun test
+      # The sandbox tests need Bubblewrap and unprivileged user namespaces, which Ubuntu's
+      # AppArmor policy restricts by default, and the network tests nftables and passt. With
+      # NULLRIVET_TEST_REQUIRE_SANDBOX and NULLRIVET_TEST_REQUIRE_NETWORK set, a sandbox or a
+      # network that cannot start fails those tests instead of skipping them.
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap nftables passt
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          # pasta relays ICMP echo with echo sockets of the host, which this range allows.
+          sudo sysctl -w net.ipv4.ping_group_range="0 2147483647"
+          echo NULLRIVET_TEST_REQUIRE_SANDBOX=1 >> "$GITHUB_ENV"
+          echo NULLRIVET_TEST_REQUIRE_NETWORK=1 >> "$GITHUB_ENV"
+      - if: matrix.overlays
+        run: echo NULLRIVET_TEST_REQUIRE_OVERLAY=1 >> "$GITHUB_ENV"
+      # A runner does not start the user's service manager: lingering starts it, and
+      # dbus-user-session gives it the bus systemd-run reaches it by. With
+      # NULLRIVET_TEST_REQUIRE_CGROUP set, a manager that cannot hold the limits fails the cgroup
+      # tests instead of skipping them.
+      - if: matrix.cgroups
+        run: |
+          sudo apt-get install -y --no-install-recommends dbus-user-session
+          sudo loginctl enable-linger "$USER"
+          runtime="/run/user/$(id -u)"
+          for _ in $(seq 100); do [ -S "$runtime/bus" ] && break; sleep 0.1; done
+          echo "XDG_RUNTIME_DIR=$runtime" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=$runtime/bus" >> "$GITHUB_ENV"
+          echo NULLRIVET_TEST_REQUIRE_CGROUP=1 >> "$GITHUB_ENV"
+      # The virtual machine tests need KVM, QEMU, and a kernel the user can read with its modules,
+      # 9p's among them. /dev/kvm is given to the group kvm alone, as a host would keep it, and the
+      # user joins it; Ubuntu keeps its kernel readable by root alone. A process does not gain a
+      # group it joined after it started, so the tests run through sudo as the same user, which
+      # reads the groups again. With NULLRIVET_TEST_REQUIRE_VM set, a guest that cannot start fails
+      # those tests instead of skipping them.
+      - if: matrix.vm
+        run: |
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 "linux-modules-extra-$(uname -r)"
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0660"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo usermod -aG kvm "$USER"
+          sudo chmod 0644 "/boot/vmlinuz-$(uname -r)"
+          echo NULLRIVET_TEST_REQUIRE_VM=1 >> "$GITHUB_ENV"
+          echo "AS_USER=sudo --preserve-env -u $USER -- env PATH=$PATH" >> "$GITHUB_ENV"
+      - run: $AS_USER bun test
       # The end-to-end tests again, against the compiled executable, which resolves its embedded
       # modules differently from the sources.
       - run: bun run build
-      - run: bun test tests/e2e
+      - run: $AS_USER bun test tests/e2e
         env:
           NULLRIVET_EXECUTABLE: dist/nullrivet

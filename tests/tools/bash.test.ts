@@ -98,10 +98,17 @@ describe('bash tool', () => {
 
   test('agent credentials are removed from the child environment', () => {
     const env = buildChildEnv(
-      { PATH: '/usr/bin', OPENROUTER_API_KEY: 'secret', NULLRIVET_MODEL: 'x', HOME: '/home/u' },
+      {
+        PATH: '/usr/bin',
+        OPENROUTER_API_KEY: 'secret',
+        ANTHROPIC_AUTH_TOKEN: 'token',
+        NULLRIVET_MODEL: 'x',
+        HOME: '/home/u',
+      },
       'true',
     );
     expect(env.OPENROUTER_API_KEY).toBeUndefined();
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
     expect(env.NULLRIVET_MODEL).toBeUndefined();
     expect(env.PATH).toBe('/usr/bin');
     expect(env.HOME).toBe('/home/u');

@@ -45,7 +45,7 @@ export type JobStatus = 'running' | 'completed' | 'failed' | 'stopped' | 'timed_
 type FinishedStatus = Exclude<JobStatus, 'running'>;
 
 // What happened to a job, for the model. Kept apart from its text so other consumers can use the
-// same events.
+// same events. `job.lost` is written by the host, for a job whose sandbox stopped before it ended.
 export type JobEvent =
   | { type: 'job.ready'; jobId: string; at: number; afterMs: number; log: SavedOutput }
   | {
@@ -57,7 +57,32 @@ export type JobEvent =
       exitCode: number | null;
       signal: NodeJS.Signals | null;
       log: SavedOutput | null;
-    };
+    }
+  | { type: 'job.lost'; jobId: string; at: number };
+
+// The background jobs an agent reads, whether a registry of this process or a projection of the
+// jobs a sandbox runs. Every member answers at once: the agent and the interactive session read
+// them between other steps, with no await between a check and what it decides.
+export interface BackgroundJobs extends PendingEventSource<JobEvent> {
+  // How many jobs were started; a turn that leaves it unchanged started none.
+  readonly startedCount: number;
+  // Calls `listener`, in a microtask of its own, whenever a job becomes ready or ends.
+  onEvent(listener: () => void): () => void;
+  hasPendingEvents(): boolean;
+  // Stops reporting the events of the current jobs, pending and future.
+  dropEvents(): void;
+  running(): number;
+}
+
+// Called by a registry as things happen, before anything waiting on them resumes, so a sandboxed
+// worker can send each fact to the host in the order it occurred.
+export interface JobHooks {
+  // With the id of the call that started the job, when the call had one.
+  started(jobId: string, callId?: string): void;
+  occurred(event: JobEvent): void;
+  // A tool showed the job to the model, with every event it had so far.
+  shown(jobId: string): void;
+}
 
 export class JobError extends Error {
   constructor(
@@ -127,6 +152,10 @@ class Job {
   finish: JobFinish | null = null;
   readyDelivered = false;
   finishDelivered = false;
+  // Handed to the registry's hooks as started.
+  startAnnounced = false;
+  // The id of the call that started it, when the call had one.
+  callId: string | undefined;
   // The end of the previous chunk, so a ready pattern split between two chunks is found.
   private readyCarry = Buffer.alloc(0);
   // Callbacks of waits in progress, removed when they run or when the wait gives up, so a job
@@ -139,8 +168,12 @@ class Job {
     readonly cwd: string,
     readonly log: OutputSpool,
     readonly readyPattern: string | null,
-    // Called when an event (ready, finished) becomes pending.
-    private readonly announce: () => void,
+    // Called when the job becomes ready or ends: `occurred` before anything waiting on it resumes,
+    // `announce` after.
+    private readonly events: {
+      occurred(kind: 'ready' | 'finished'): void;
+      announce(): void;
+    },
   ) {}
 
   get status(): JobStatus {
@@ -162,13 +195,16 @@ class Job {
   onOutput(chunk: Buffer): void {
     this.log.push(chunk);
     this.recent.push(chunk);
-    if (this.readyPattern === null || this.readyAt !== null) return;
+    // A job that failed while its pipes were still open can receive output after its end; it does
+    // not become ready then, since its end already settled it.
+    if (this.readyPattern === null || this.readyAt !== null || this.finish !== null) return;
     const window = Buffer.concat([this.readyCarry, chunk]);
     if (stripAnsi(window.toString('utf8')).includes(this.readyPattern)) {
       this.readyAt = Date.now();
       this.readyCarry = Buffer.alloc(0);
+      this.events.occurred('ready');
       this.notify('ready');
-      this.announce();
+      this.events.announce();
       return;
     }
     const keep = Buffer.byteLength(this.readyPattern) - 1 + READY_ESCAPE_ROOM_BYTES;
@@ -199,9 +235,10 @@ class Job {
   ): void {
     if (this.finish !== null) return;
     this.finish = { at: Date.now(), status, exitCode, signal, log };
+    this.events.occurred('finished');
     this.notify('ready');
     this.notify('exit');
-    this.announce();
+    this.events.announce();
   }
 
   private notify(until: 'exit' | 'ready'): void {
@@ -210,6 +247,35 @@ class Job {
     for (const callback of callbacks) callback();
   }
 }
+
+// Times come from the wall clock, which can be set back while a job runs. A negative duration is
+// reported as zero: the host refuses one from a sandboxed worker and stops the sandbox.
+const elapsedSince = (startedAt: number, at: number): number => Math.max(0, at - startedAt);
+
+// The event of a job that became ready. Its log is described as it is when the event is made: in
+// this process, when the note is written; in a sandboxed worker, when the job became ready.
+const readyEvent = (job: Job): JobEvent => ({
+  type: 'job.ready',
+  jobId: job.id,
+  at: job.readyAt ?? job.startedAt,
+  afterMs: elapsedSince(job.startedAt, job.readyAt ?? job.startedAt),
+  log: job.log.snapshot(),
+});
+
+const finishedEvent = (job: Job): JobEvent => {
+  const finish = job.finish;
+  if (finish === null) throw new Error(`job ${job.id} has not finished`);
+  return {
+    type: 'job.finished',
+    jobId: job.id,
+    at: finish.at,
+    durationMs: elapsedSince(job.startedAt, finish.at),
+    status: finish.status,
+    exitCode: finish.exitCode,
+    signal: finish.signal,
+    log: finish.log,
+  };
+};
 
 // Marks every event the job has had so far as delivered.
 const deliverAll = (job: Job): void => {
@@ -258,6 +324,9 @@ const describeGrowingLog = (log: SavedOutput): string =>
 // or the command: notes are trusted by the model, and command output is not. It points to the log,
 // which read_file and grep read in either mode, not to bash_jobs, which readonly does not offer.
 export const describeJobEvent = (event: JobEvent): string => {
+  if (event.type === 'job.lost') {
+    return `Background job ${event.jobId} ended when the tool sandbox stopped; its log is no longer available.`;
+  }
   if (event.type === 'job.ready') {
     return `Background job ${event.jobId} is ready: its ready_pattern appeared in its output after ${formatJobDuration(event.afterMs)}. ${describeGrowingLog(event.log)}`;
   }
@@ -268,11 +337,13 @@ export const describeJobEvent = (event: JobEvent): string => {
 export interface JobStartOptions {
   command: string;
   cwd: string;
+  // The id of the call that starts the job, which its start is reported with.
+  callId?: string;
   maxRuntimeMs?: number;
   readyPattern?: string;
 }
 
-export class JobRegistry implements PendingEventSource<JobEvent> {
+export class JobRegistry implements BackgroundJobs {
   // Ids carry a random prefix of this registry, so an id from an earlier process, still in a
   // resumed conversation, does not name a job of this one.
   private readonly prefix = randomBytes(8).toString('hex');
@@ -283,7 +354,13 @@ export class JobRegistry implements PendingEventSource<JobEvent> {
   private starting = 0;
   private readonly listeners = new Set<() => void>();
 
-  constructor(private readonly logs: OutputFiles = jobLogs) {}
+  // With hooks, each fact is handed to them as it happens and counts as delivered here once
+  // handed over: whoever receives the facts reports them, so this registry only keeps the jobs
+  // for its tools and forgets finished ones as usual.
+  constructor(
+    private readonly logs: OutputFiles = jobLogs,
+    private readonly hooks: JobHooks | null = null,
+  ) {}
 
   // How many jobs this registry has started, counting those whose process failed to start.
   get startedCount(): number {
@@ -320,6 +397,26 @@ export class JobRegistry implements PendingEventSource<JobEvent> {
     this.prune();
   }
 
+  private announceStart(job: Job): void {
+    if (this.hooks === null || job.startAnnounced) return;
+    job.startAnnounced = true;
+    this.hooks.started(job.id, job.callId);
+  }
+
+  private occurred(job: Job, kind: 'ready' | 'finished'): void {
+    if (this.hooks === null) return;
+    // Output can in principle arrive before the start is recorded; the start goes first.
+    this.announceStart(job);
+    if (kind === 'ready') {
+      this.hooks.occurred(readyEvent(job));
+      job.readyDelivered = true;
+      return;
+    }
+    this.hooks.occurred(finishedEvent(job));
+    deliverAll(job);
+    this.prune();
+  }
+
   private announce(): void {
     for (const listener of this.listeners) {
       queueMicrotask(() => {
@@ -353,14 +450,18 @@ export class JobRegistry implements PendingEventSource<JobEvent> {
       throw new JobError('job.log_failed', `the job was not started: its log failed: ${reason}`);
     }
     this.sequence += 1;
-    const job = new Job(
+    const job: Job = new Job(
       `${this.prefix}-${this.sequence}`,
       options.command,
       options.cwd,
       log,
       options.readyPattern ?? null,
-      () => this.announce(),
+      {
+        occurred: (kind) => this.occurred(job, kind),
+        announce: () => this.announce(),
+      },
     );
+    job.callId = options.callId;
     try {
       job.handle = await startProcess({
         file: 'bash',
@@ -383,6 +484,7 @@ export class JobRegistry implements PendingEventSource<JobEvent> {
       (error: unknown) => job.fail(error),
     );
     this.jobs.set(job.id, job);
+    this.announceStart(job);
     return job;
   }
 
@@ -440,26 +542,9 @@ export class JobRegistry implements PendingEventSource<JobEvent> {
       // A job that has ended is reported by its end alone: that it became ready is no longer news.
       const finishPending = job.finish !== null && !job.finishDelivered;
       if (job.readyAt !== null && !job.readyDelivered && !finishPending) {
-        events.push({
-          type: 'job.ready',
-          jobId: job.id,
-          at: job.readyAt,
-          afterMs: job.readyAt - job.startedAt,
-          log: job.log.snapshot(),
-        });
+        events.push(readyEvent(job));
       }
-      if (job.finish !== null && finishPending) {
-        events.push({
-          type: 'job.finished',
-          jobId: job.id,
-          at: job.finish.at,
-          durationMs: job.finish.at - job.startedAt,
-          status: job.finish.status,
-          exitCode: job.finish.exitCode,
-          signal: job.finish.signal,
-          log: job.finish.log,
-        });
-      }
+      if (finishPending) events.push(finishedEvent(job));
     }
     return events.sort((a, b) => a.at - b.at);
   }
@@ -478,6 +563,7 @@ export class JobRegistry implements PendingEventSource<JobEvent> {
 
   // Records the events a report to the model showed, so no note repeats them.
   markShown(job: Job): void {
+    this.hooks?.shown(job.id);
     deliverAll(job);
     this.prune();
   }
@@ -580,8 +666,14 @@ const AFTER_START: Record<JobSession, string> = {
   'one-shot': ' You are told when it ends.',
 };
 
-// The tools that start, inspect and stop the background jobs of one registry.
-export const createJobTools = (registry: JobRegistry, session: JobSession): Tool[] => [
+// Where the job tools run when the jobs live elsewhere, as in a sandboxed worker: the broker sends
+// their calls to the backend, so this is reached only by mistake.
+const unavailable = (): ToolResult =>
+  toolError('job.unavailable', 'background jobs run in the sandbox, not in this process');
+
+// The tools that start, inspect and stop the background jobs of one registry. With no registry,
+// only their definitions, for a session whose jobs run in its sandbox.
+export const createJobTools = (registry: JobRegistry | null, session: JobSession): Tool[] => [
   {
     name: 'bash_background',
     description: [
@@ -611,7 +703,9 @@ export const createJobTools = (registry: JobRegistry, session: JobSession): Tool
       required: ['command'],
     },
     effect: 'exec',
+    startsCommands: true,
     async execute(input, ctx): Promise<ToolResult> {
+      if (registry === null) return unavailable();
       const command = requireNonEmptyString(input, 'command');
       const maxRuntimeMs = optionalInteger(input, 'max_runtime_ms', {
         min: 100,
@@ -625,6 +719,7 @@ export const createJobTools = (registry: JobRegistry, session: JobSession): Tool
         job = await registry.start({
           command,
           cwd: resolved.cwd,
+          ...(ctx.callId === undefined ? {} : { callId: ctx.callId }),
           ...(maxRuntimeMs === undefined ? {} : { maxRuntimeMs }),
           ...(readyPattern === undefined ? {} : { readyPattern }),
         });
@@ -661,6 +756,7 @@ export const createJobTools = (registry: JobRegistry, session: JobSession): Tool
     },
     effect: 'exec',
     async execute(input, ctx): Promise<ToolResult> {
+      if (registry === null) return unavailable();
       const id = optionalString(input, 'id');
       const waitMs = optionalInteger(input, 'wait_ms', { min: 0, max: BASH_MAX_TIMEOUT_MS });
       const until = untilArgument(input);
@@ -721,6 +817,7 @@ export const createJobTools = (registry: JobRegistry, session: JobSession): Tool
     },
     effect: 'exec',
     async execute(input, ctx): Promise<ToolResult> {
+      if (registry === null) return unavailable();
       const id = requireNonEmptyString(input, 'id');
       let job: Job;
       try {

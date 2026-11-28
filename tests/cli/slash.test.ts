@@ -1,11 +1,27 @@
 import { describe, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type Agent, createAgent } from '../../src/agent/agent.ts';
+import { IN_PROCESS_BACKEND } from '../../src/agent/tool-broker.ts';
 import { PromptHistory } from '../../src/cli/prompt-history.ts';
 import { SessionLink } from '../../src/cli/session-file.ts';
-import { parseSlash, runSlash, type SlashContext, suggestCommands } from '../../src/cli/slash.ts';
+import {
+  findCommand,
+  parseSlash,
+  runSlash,
+  type SlashContext,
+  suggestCommands,
+} from '../../src/cli/slash.ts';
+import type { WorkspaceSession } from '../../src/cli/workspace-session.ts';
+import { InstructionsLoader } from '../../src/instructions/agents-loader.ts';
 import type { ResolveResult } from '../../src/providers/resolve.ts';
 import { createMockProvider } from '../helpers/mock-provider.ts';
 
@@ -18,13 +34,18 @@ interface Harness {
   compacted: number;
 }
 
-const harness = async (resolve?: (id: string) => ResolveResult, cwd = '/tmp'): Promise<Harness> => {
+const harness = async (
+  resolve?: (id: string) => ResolveResult,
+  cwd = '/tmp',
+  instructions: InstructionsLoader | null = null,
+): Promise<Harness> => {
   const agent = await createAgent({
+    toolBackend: IN_PROCESS_BACKEND,
     provider: createMockProvider([]),
     tools: [],
     mode: 'auto',
     cwd,
-    instructions: null,
+    instructions,
   });
   const h: Harness = {
     agent,
@@ -55,6 +76,9 @@ const harness = async (resolve?: (id: string) => ResolveResult, cwd = '/tmp'): P
       new PromptHistory(),
     ),
     cwd,
+    ask: async () => null,
+    show: () => undefined,
+    reloadInstructionsWhenIdle: () => undefined,
   };
   return h;
 };
@@ -80,6 +104,17 @@ describe('parseSlash', () => {
 });
 
 describe('suggestCommands', () => {
+  test('offers the commands of a sandbox in its sessions only', () => {
+    expect(suggestCommands('/ap').map((c) => c.name)).toEqual([]);
+    expect(suggestCommands('/ap', 'workspace').map((c) => c.name)).toEqual(['apply']);
+    expect(findCommand('discard')).toBeUndefined();
+    expect(findCommand('changes', 'workspace')?.usage).toBe('[path]');
+    expect(findCommand('scope')).toBeUndefined();
+    expect(findCommand('scope', 'workspace')).toBeUndefined();
+    expect(findCommand('scope', 'security')?.usage).toBe('[refresh]');
+    expect(findCommand('apply', 'security')).toBeUndefined();
+  });
+
   test('filters by the typed prefix while the name is incomplete', () => {
     expect(suggestCommands('/e').map((c) => c.name)).toEqual(['effort', 'exit']);
     expect(suggestCommands('/').length).toBeGreaterThan(5);
@@ -151,6 +186,83 @@ describe('runSlash', () => {
   });
 });
 
+describe('/apply', () => {
+  test('reads the AGENTS.md files again once an application changed them', async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'nullrivet-slash-apply-')));
+    try {
+      writeFileSync(join(dir, 'AGENTS.md'), 'old rules');
+      const h = await harness(undefined, dir, new InstructionsLoader());
+      expect(h.agent.instructions().map((file) => file.content)).toEqual(['old rules']);
+      // A workspace whose application writes AGENTS.md, as the ChangeSet would.
+      h.ctx.workspace = {
+        root: dir,
+        active: true,
+        busy: false,
+        runningJobs: () => 0,
+        preview: () => ({
+          entries: [{ path: 'AGENTS.md', change: 'modified', kind: 'file' }],
+          shown: new Set<string>(),
+          pending: 1,
+        }),
+        apply: async () => {
+          writeFileSync(join(dir, 'AGENTS.md'), 'new rules');
+          return {
+            report: { applied: ['AGENTS.md'], notApplied: [], stopped: null },
+            failure: null,
+            instructionsChanged: true,
+            stopped: null,
+            warnings: [],
+          };
+        },
+      } as unknown as WorkspaceSession;
+      h.ctx.ask = async (question) => `apply ${/apply ([0-9A-F]{4})/.exec(question)?.[1]}`;
+      await run(h, '/apply');
+      expect(h.agent.instructions().map((file) => file.content)).toEqual(['new rules']);
+      expect(h.notices.map((notice) => notice.text)).toContain(
+        'AGENTS.md files of the project may have changed: the instructions were read again.',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('/apply during a task', () => {
+  test('reads the AGENTS.md files again once the task ends, not while it runs', async () => {
+    const h = await harness();
+    let stale = 0;
+    // The agent runs a task.
+    h.ctx.agent = Object.defineProperty(Object.create(h.agent), 'running', { value: true });
+    h.ctx.reloadInstructionsWhenIdle = () => {
+      stale += 1;
+    };
+    h.ctx.workspace = {
+      root: '/tmp',
+      active: true,
+      busy: false,
+      runningJobs: () => 0,
+      preview: () => ({
+        entries: [{ path: 'AGENTS.md', change: 'modified', kind: 'file' }],
+        shown: new Set<string>(),
+        pending: 1,
+      }),
+      apply: async () => ({
+        report: { applied: ['AGENTS.md'], notApplied: [], stopped: null },
+        failure: null,
+        instructionsChanged: true,
+        stopped: null,
+        warnings: [],
+      }),
+    } as unknown as WorkspaceSession;
+    h.ctx.ask = async (question) => `apply ${/apply ([0-9A-F]{4})/.exec(question)?.[1]}`;
+    await run(h, '/apply');
+    expect(stale).toBe(1);
+    expect(h.notices.map((notice) => notice.text)).toContain(
+      'AGENTS.md files of the project may have changed: the instructions are read again once the task ends.',
+    );
+  });
+});
+
 describe('/session', () => {
   const sessionDir = (): string => mkdtempSync(join(tmpdir(), 'nullrivet-slash-session-'));
 
@@ -166,6 +278,23 @@ describe('/session', () => {
       expect(h.notices.at(-1)?.text).toBe(`Saving this session to ${join(dir, 'saved.json')}.`);
       await run(h, '/session');
       expect(h.notices.at(-1)?.text).toContain(`Session file: ${join(dir, 'saved.json')}`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('in the workspace sandbox, refuses a file in the project, under its overlay', async () => {
+    const dir = realpathSync(sessionDir());
+    try {
+      const h = await harness(undefined, dir);
+      // The command reads the project's path only.
+      h.ctx.workspace = { root: dir } as unknown as WorkspaceSession;
+      await run(h, '/session saved.json');
+      expect(existsSync(join(dir, 'saved.json'))).toBe(false);
+      expect(h.notices.at(-1)).toEqual({
+        level: 'error',
+        text: `the session file ${join(dir, 'saved.json')} is in the project, which the workspace sandbox does not change while it runs; save it outside the project`,
+      });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

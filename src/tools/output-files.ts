@@ -1,3 +1,4 @@
+import { createHash, type Hash } from 'node:crypto';
 import * as nodeFs from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -8,6 +9,7 @@ import {
 } from '../context/output-reduction.ts';
 import { errorMessage } from '../errors.ts';
 import { BINARY_SCAN_BYTES, binaryOffset, isNotFoundError, MAX_FILE_BYTES } from './file-io.ts';
+import type { CapturedOutput } from './types.ts';
 
 // Output reduced before it reaches the model is saved whole to files the model can read back
 // with read_file and grep. Each file is at most MAX_FILE_BYTES, the size those tools accept, so a
@@ -15,6 +17,14 @@ import { BINARY_SCAN_BYTES, binaryOffset, isNotFoundError, MAX_FILE_BYTES } from
 // memory, so each output and the whole process have a limit. Files are never removed while the
 // process runs, so a path given to the model stays valid until it exits.
 const OUTPUT_LIMIT_BYTES = 64 * 1024 * 1024;
+
+// How many parts an output of `limitBytes` can take. A part ends before it is full only when the
+// next piece does not fit in it, and that piece then goes into the next part, so any two parts in a
+// row hold more than a whole part.
+export const maxOutputParts = (limitBytes: number, partBytes: number): number =>
+  2 * Math.ceil(limitBytes / partBytes) + 1;
+
+export const MAX_OUTPUT_PARTS = maxOutputParts(OUTPUT_LIMIT_BYTES, MAX_FILE_BYTES);
 const TOTAL_LIMIT_BYTES = 512 * 1024 * 1024;
 // Only whole lines are written, so parts end at line boundaries; the incomplete last line waits in
 // memory for its newline up to this size, and longer lines are written in pieces.
@@ -54,6 +64,9 @@ export interface SavedOutput {
   interrupted?: string;
   // A part has a NUL byte where read_file and grep look for one, so they refuse it as binary.
   binary?: boolean;
+  // The SHA-256 of every byte received, and of the bytes saved, for the evidence log.
+  receivedSha256?: string;
+  savedSha256?: string;
 }
 
 export interface FinishOptions {
@@ -76,6 +89,8 @@ export interface OutputSpool {
   // Only the first call has an effect; later calls return the same result. Null when nothing was
   // saved: keep was false or the output was empty.
   finish(options: FinishOptions): SavedOutput | null;
+  // What came and what was saved, with their hashes, and the parts kept once finished.
+  capture(stream: CapturedOutput['stream']): CapturedOutput;
 }
 
 export class OutputFiles {
@@ -87,6 +102,9 @@ export class OutputFiles {
   private readonly root: () => string;
   private dir: string | null = null;
   private sequence = 0;
+  // Whether spools hash what they receive and save, for an evidence log: off otherwise, since it
+  // costs two passes over every byte.
+  hashing = false;
   // Bytes written to files of this process and not removed since.
   private usedBytes = 0;
 
@@ -127,9 +145,19 @@ export class OutputFiles {
   private openInDirectory(name: string): { path: string; fd: number } {
     // Resolved because TMPDIR can be relative, and the tools the model passes the path to resolve
     // relative paths against the session directory, not the process directory.
-    this.dir ??= this.fs.mkdtempSync(join(resolve(this.root()), 'nullrivet-'));
-    const path = join(this.dir, name);
+    const path = join(this.directory(), name);
     return { path, fd: this.fs.openSync(path, 'wx', 0o600) };
+  }
+
+  // The directory, created now if it does not exist yet, for a sandbox that has to expose it
+  // before the first file is written.
+  directory(): string {
+    this.dir ??= this.fs.mkdtempSync(join(resolve(this.root()), 'nullrivet-'));
+    return this.dir;
+  }
+
+  hashOutputs(): void {
+    this.hashing = true;
   }
 
   availableBytes(): number {
@@ -157,6 +185,10 @@ export class OutputFiles {
 class Spool implements OutputSpool {
   private received = 0;
   private saved = 0;
+  // Over every byte pushed, before any limit stops the saving, and over every byte written; only
+  // when the store hashes, for an evidence log.
+  private readonly receivedHash: Hash | null;
+  private readonly savedHash: Hash | null;
   private pending: Buffer[] = [];
   private pendingBytes = 0;
   private opened = false;
@@ -176,7 +208,10 @@ class Spool implements OutputSpool {
     private readonly store: OutputFiles,
     private readonly label: OutputLabel,
     private readonly thresholdBytes: number,
-  ) {}
+  ) {
+    this.receivedHash = store.hashing ? createHash('sha256') : null;
+    this.savedHash = store.hashing ? createHash('sha256') : null;
+  }
 
   start(): boolean {
     if (this.finished || this.stopReason !== undefined) return false;
@@ -192,12 +227,36 @@ class Spool implements OutputSpool {
       receivedBytes: this.received,
       ...(this.stopReason === undefined ? {} : { stopReason: this.stopReason }),
       ...(this.binary ? { binary: true } : {}),
+      ...this.hashes(),
+    };
+  }
+
+  capture(stream: CapturedOutput['stream']): CapturedOutput {
+    const { receivedSha256 = '', savedSha256 = '' } = this.hashes();
+    return {
+      stream,
+      receivedBytes: this.received,
+      receivedSha256,
+      savedBytes: this.saved,
+      savedSha256,
+      parts: this.result === null ? [] : [...this.result.parts],
+      ...(this.stopReason === undefined ? {} : { stopReason: this.stopReason }),
+      ...(this.result?.interrupted === undefined ? {} : { interrupted: this.result.interrupted }),
+    };
+  }
+
+  private hashes(): { receivedSha256?: string; savedSha256?: string } {
+    if (this.receivedHash === null || this.savedHash === null) return {};
+    return {
+      receivedSha256: this.receivedHash.copy().digest('hex'),
+      savedSha256: this.savedHash.copy().digest('hex'),
     };
   }
 
   push(chunk: Buffer): void {
     if (this.finished || chunk.length === 0) return;
     this.received += chunk.length;
+    this.receivedHash?.update(chunk);
     if (this.stopReason !== undefined) return;
     try {
       if (this.opened) {
@@ -249,6 +308,7 @@ class Spool implements OutputSpool {
       ...(this.stopReason === undefined ? {} : { stopReason: this.stopReason }),
       ...(options.interrupted === undefined ? {} : { interrupted: options.interrupted }),
       ...(this.binary ? { binary: true } : {}),
+      ...this.hashes(),
     };
     return this.result;
   }
@@ -344,6 +404,7 @@ class Spool implements OutputSpool {
       while (offset < bytes.length) {
         const written = this.store.fs.writeSync(fd, bytes, offset, bytes.length - offset);
         if (written <= 0) throw new Error('no bytes were written');
+        this.savedHash?.update(bytes.subarray(offset, offset + written));
         offset += written;
         this.saved += written;
         this.partSizes[this.partSizes.length - 1] = this.currentPartSize() + written;

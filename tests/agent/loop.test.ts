@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { Conversation } from '../../src/agent/conversation.ts';
 import type { AgentEvent } from '../../src/agent/events.ts';
 import { runTurn, type TurnDependencies } from '../../src/agent/loop.ts';
+import { IN_PROCESS_BACKEND } from '../../src/agent/tool-broker.ts';
 import { assembleHistory, emptySummary, SUMMARY_OPEN } from '../../src/context/compaction.ts';
 import { InstructionsLoader } from '../../src/instructions/agents-loader.ts';
 import { ContextOverflowError, StaleReasoningError } from '../../src/providers/errors.ts';
@@ -67,6 +68,7 @@ const harness = (
       provider,
       conversation: new Conversation(),
       tools: new Map(tools.map((t) => [t.name, t])),
+      toolBackend: IN_PROCESS_BACKEND,
       mode: () => mode,
       cwd: options.cwd ?? '/tmp',
       systemPrompt: () => `system for ${mode}`,
@@ -153,6 +155,32 @@ describe('runTurn', () => {
     const results = toolResults(h.provider.calls[1]?.req.messages.at(-1));
     expect(results[0]).toMatchObject({ is_error: true });
     expect((results[0] as { content: string }).content).toContain('policy.denied');
+  });
+
+  test('ends the turn with an error once the tool backend is lost, without another request', async () => {
+    const h = harness([
+      toolTurn([{ id: 't1', name: 'read_file', args: {} }]),
+      textTurn('not requested'),
+    ]);
+    let lost: string | null = null;
+    h.deps.toolBackend = {
+      execute: async () => {
+        lost = 'the worker exited';
+        return { content: 'partial', isError: false };
+      },
+      failure: () => lost,
+    };
+    const result = await runTurn('read', h.deps);
+    expect(result).toMatchObject({
+      reason: 'error',
+      message: 'the tool sandbox stopped: the worker exited',
+      backendLost: true,
+    });
+    expect(h.provider.calls).toHaveLength(1);
+    expect(h.events).toContainEqual({
+      type: 'error',
+      message: 'the tool sandbox stopped: the worker exited',
+    });
   });
 
   test('a mode change during the turn applies to the next tool call', async () => {
@@ -424,6 +452,17 @@ describe('runTurn', () => {
     expect(h.events.filter((e) => e.type === 'notice')).toEqual([
       { type: 'notice', text: 'job x ended' },
     ]);
+  });
+
+  test('a notice the user was told already reaches the model alone', async () => {
+    const h = harness([textTurn('done')]);
+    const pending = [[{ text: 'the window ended', shown: true }]];
+    h.deps.notices = () => pending.shift() ?? [];
+    await runTurn('go', h.deps);
+    expect(JSON.stringify(h.provider.calls[0]?.req.messages)).toContain(
+      '<agent-note>the window ended</agent-note>',
+    );
+    expect(h.events.filter((e) => e.type === 'notice')).toEqual([]);
   });
 
   test('a notice with data adds the data fenced right after the note', async () => {

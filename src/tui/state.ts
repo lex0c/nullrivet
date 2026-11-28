@@ -1,5 +1,6 @@
 import type { AgentEndReason, AgentEvent, BackgroundWork, CompactReason } from '../agent/events.ts';
-import type { ExecutionMode } from '../tools/policy.ts';
+import type { ApplyReport, ChangeEntry } from '../sandbox/changeset/summary.ts';
+import type { ExecutionMode, SandboxProfile } from '../tools/policy.ts';
 import type { InputState } from './input-editor.ts';
 import { splitSettledMarkdown } from './markdown-stream.ts';
 
@@ -16,6 +17,8 @@ export interface UsageTotals {
 export interface StatusState {
   model: string;
   mode: ExecutionMode;
+  // Fixed for the session, shown next to the mode.
+  sandbox?: SandboxProfile;
   effort: string | undefined;
   cwd: string;
   home: string;
@@ -70,6 +73,8 @@ export interface TuiState {
   turn: TurnState | null;
   // When Ctrl+C was pressed on an empty, idle prompt; a second press before it expires exits.
   exitArmedAt: number | null;
+  // The changes in the sandbox that exiting then discards; -1 when they could not be counted.
+  exitDiscards: number;
   compacting: { reason: CompactReason; since: number } | null;
   subagents: BackgroundSubagent[];
 }
@@ -81,6 +86,7 @@ export type PermanentItem =
       version: string;
       model: string;
       mode: ExecutionMode;
+      sandbox?: SandboxProfile;
       effort: string | undefined;
       cwd: string;
       home: string;
@@ -98,7 +104,10 @@ export type PermanentItem =
       durationMs: number;
     }
   | { kind: 'turn-end'; reason: AgentEndReason; message: string | undefined; durationMs: number }
-  | { kind: 'notice'; level: NoticeLevel; text: string };
+  | { kind: 'notice'; level: NoticeLevel; text: string }
+  // What the sandbox of a workspace session changed, and what applying it did.
+  | { kind: 'changes'; entries: ChangeEntry[] }
+  | { kind: 'applied'; report: ApplyReport };
 
 export type Action =
   | { type: 'input'; input: InputState }
@@ -108,7 +117,7 @@ export type Action =
   | { type: 'status'; patch: Partial<Omit<StatusState, 'totals'>> }
   | { type: 'notice'; level: NoticeLevel; text: string }
   | { type: 'interrupting' }
-  | { type: 'exit-arm'; now: number }
+  | { type: 'exit-arm'; now: number; discards: number }
   | { type: 'exit-disarm' }
   | { type: 'compact-cancelled' };
 
@@ -138,6 +147,7 @@ export const createInitialState = (
   },
   turn: null,
   exitArmedAt: null,
+  exitDiscards: 0,
   compacting: null,
   subagents: [],
 });
@@ -349,9 +359,12 @@ export const reduce = (state: TuiState, action: Action): Reduction => {
         ? { state, permanent: [] }
         : { state: { ...state, turn: { ...state.turn, interrupting: true } }, permanent: [] };
     case 'exit-arm':
-      return { state: { ...state, exitArmedAt: action.now }, permanent: [] };
+      return {
+        state: { ...state, exitArmedAt: action.now, exitDiscards: action.discards },
+        permanent: [],
+      };
     case 'exit-disarm':
-      return { state: { ...state, exitArmedAt: null }, permanent: [] };
+      return { state: { ...state, exitArmedAt: null, exitDiscards: 0 }, permanent: [] };
     case 'compact-cancelled':
       return { state: { ...state, compacting: null }, permanent: [] };
   }

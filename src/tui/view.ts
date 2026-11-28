@@ -135,12 +135,25 @@ const footerRow = (state: TuiState, caps: Capabilities): string => {
   const work = state.status.background;
   let left: string;
   if (state.exitArmedAt !== null) {
-    left = paint(caps, 'warn', 'Press Ctrl+C again to exit');
+    const discards = state.exitDiscards;
+    left = paint(
+      caps,
+      'warn',
+      discards === 0
+        ? 'Press Ctrl+C again to exit'
+        : discards < 0
+          ? "Press Ctrl+C again to exit and discard the sandbox's changes"
+          : `Press Ctrl+C again to exit and discard ${discards} ${discards === 1 ? 'change' : 'changes'}`,
+    );
   } else {
-    const mode =
+    const execution =
       state.status.mode === 'auto'
         ? paint(caps, 'warn', 'auto mode on')
         : paint(caps, 'accent', 'readonly mode on');
+    const mode =
+      state.status.sandbox === undefined
+        ? execution
+        : `${execution}${sep}${paint(caps, 'success', `${state.status.sandbox} sandbox`)}`;
     // While a task runs, the interrupt hint takes the place of the mode hint so it stays visible
     // in narrow terminals. With no task running, Esc cancels the subagents, if any.
     left =

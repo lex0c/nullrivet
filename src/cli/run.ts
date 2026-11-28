@@ -2,27 +2,31 @@ import { stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import packageJson from '../../package.json' with { type: 'json' };
 import { createAgent } from '../agent/agent.ts';
-import type { AgentEndReason } from '../agent/events.ts';
+import { IN_PROCESS_BACKEND } from '../agent/tool-broker.ts';
 import { headTailSummary } from '../context/output-reduction.ts';
+import { errorMessage } from '../errors.ts';
 import { InstructionsLoader } from '../instructions/agents-loader.ts';
 import { MODEL_CATALOG } from '../providers/catalog.ts';
 import type { FetchLike } from '../providers/discovery.ts';
 import { type ModelOverrides, resolveModel } from '../providers/resolve.ts';
+import { sandboxProject } from '../sandbox/bwrap.ts';
+import { formatVerdict, verifyEvidence } from '../sandbox/evidence-verify.ts';
+import type { SecurityNotice } from '../sandbox/security.ts';
+import { SandboxSession } from '../sandbox/session.ts';
+import { type StartedSandbox, type StartedWorkspace, startSandbox } from '../sandbox/start.ts';
+import { isLiveWorkspaceDirectory, removeWorkspaceDirectory } from '../sandbox/workspace.ts';
 import { BUILTIN_TOOLS } from '../tools/index.ts';
+import type { JobSession } from '../tools/jobs.ts';
+import { outputFiles } from '../tools/output-files.ts';
 import { parseCli, USAGE, UsageError } from './args.ts';
+import { EVIDENCE_EXIT_CODES, EXIT_CODES } from './exit-codes.ts';
 import { formatModelList } from './list-models.ts';
 import { createJsonSink, createPlainSink } from './output.ts';
 import { PromptHistory } from './prompt-history.ts';
 import { runRepl } from './repl.ts';
 import { type SessionData, SessionFile, SessionLink } from './session-file.ts';
-
-export const EXIT_CODES: Record<AgentEndReason | 'usage', number> = {
-  done: 0,
-  error: 1,
-  usage: 2,
-  budget: 3,
-  aborted: 130,
-};
+import { finishWorkspace } from './workspace-changes.ts';
+import { sessionFileError, WorkspaceSession } from './workspace-session.ts';
 
 // Piped input can be arbitrarily large; it is reduced like tool output before entering the prompt.
 const STDIN_MAX_BYTES = 128 * 1024;
@@ -79,6 +83,12 @@ export const runCli = async (io: CliIO): Promise<number> => {
     io.stdout(formatModelList(MODEL_CATALOG, io.env));
     return 0;
   }
+  if (config.verifyEvidence !== undefined) {
+    // Against where nullrivet was started, as the other paths of the command line.
+    const verdict = verifyEvidence(resolve(io.cwd, config.verifyEvidence), config.expectedHash);
+    io.stdout(`${formatVerdict(verdict)}\n`);
+    return EVIDENCE_EXIT_CODES[verdict.status];
+  }
 
   const sink = config.json
     ? createJsonSink(io.stdout)
@@ -95,8 +105,14 @@ export const runCli = async (io: CliIO): Promise<number> => {
       : composePrompt(config.prompt, await io.readStdin());
   if (io.signal.aborted) return fail('aborted while reading stdin', EXIT_CODES.aborted);
   const interactive = prompt.length === 0 && io.terminal !== null && !config.json;
+  const jobSession: JobSession = interactive ? 'interactive' : 'one-shot';
   if (prompt.length === 0 && !interactive) {
     return fail('no prompt given; pass the task as an argument or on stdin');
+  }
+  if (interactive && config.apply) {
+    return fail(
+      '--apply applies the changes of a task given on the command line; in the interactive session, /apply applies them',
+    );
   }
 
   const cwd = resolve(io.cwd, config.cwd);
@@ -122,83 +138,247 @@ export const runCli = async (io: CliIO): Promise<number> => {
     return fail('no model selected; pass --model <family>/<model> or set NULLRIVET_MODEL');
   }
   const effort = config.effort ?? resumed?.effort;
-  // Overrides from the command line describe the model chosen there, not models switched to later.
-  const resolveWith = (id: string, overrides: ModelOverrides) =>
-    resolveModel(id, {
-      env: io.env,
-      overrides,
-      signal: io.signal,
-      ...(io.fetch === undefined ? {} : { fetch: io.fetch }),
-    });
-  const resolved = await resolveWith(model, {
-    ...(config.contextWindow === undefined ? {} : { contextWindow: config.contextWindow }),
-    ...(config.maxOutput === undefined ? {} : { maxOutput: config.maxOutput }),
-  }).catch((error: unknown) => {
-    if (io.signal.aborted) return null;
-    throw error;
-  });
-  if (resolved === null) return fail('aborted', EXIT_CODES.aborted);
-  if (!resolved.ok) return fail(resolved.error);
-
-  const agent = await createAgent({
-    provider: resolved.provider,
-    tools: BUILTIN_TOOLS,
-    backgroundJobs: interactive ? 'interactive' : 'one-shot',
-    // Subagents run in the background and report when the session is free to listen; a one-shot
-    // run ends with its task, so its main agent does the work itself.
-    delegation: interactive,
-    mode: config.mode,
-    cwd,
-    instructions: config.agentsMd ? new InstructionsLoader() : null,
-    ...(effort === undefined ? {} : { effort }),
-    ...(config.maxSteps === undefined ? {} : { maxSteps: config.maxSteps }),
-    ...(config.timeLimitMs === undefined ? {} : { timeLimitMs: config.timeLimitMs }),
-  });
-  const warnings = [...resolved.warnings, ...agent.bootWarnings];
-  if (resumed !== null) {
-    agent.conversation.restore(resumed.conversation);
-    if (resumed.mode === 'readonly' && config.mode === 'auto') {
-      warnings.push(
-        'this session was last run in readonly mode and continues in auto mode; pass --permission readonly to keep it read-only',
+  // The sandbox starts before the model is resolved, so a session that cannot have one stops
+  // before any request leaves the machine. Subagent reports are written by this process and read
+  // by the tools, so their directory is exposed read-only.
+  let sandbox: StartedSandbox | null = null;
+  // What the security sandbox says of its window and its network: to the operator, and to the
+  // model once the agent runs.
+  let tellSecurity: SecurityNotice = (level, text) => sink.notice(level, text);
+  if (config.sandbox === 'workspace' && session !== null) {
+    // Checked before anything starts.
+    const project = await sandboxProject(cwd, io.env);
+    const refused =
+      'error' in project ? null : await sessionFileError(session.file.path, project.root);
+    if (refused !== null) return fail(refused);
+  }
+  if (config.sandbox !== undefined) {
+    let reports: string;
+    try {
+      reports = outputFiles.directory();
+    } catch (error) {
+      return fail(
+        `cannot create the directory for saved output: ${errorMessage(error)}`,
+        EXIT_CODES.error,
       );
     }
-    if (resumed.cwd !== cwd) {
-      warnings.push(`this session was last run in ${resumed.cwd}; it continues in ${cwd}`);
+    const started = await startSandbox(
+      config.sandbox,
+      cwd,
+      io.env,
+      [reports],
+      jobSession,
+      config.engagement === undefined
+        ? undefined
+        : {
+            // Relative to where nullrivet was started, like any other path given on the command
+            // line.
+            path: resolve(io.cwd, config.engagement),
+            notice: (level, text) => tellSecurity(level, text),
+            ...(config.vm
+              ? {
+                  vm:
+                    config.vmKernel === undefined
+                      ? {}
+                      : { kernel: resolve(io.cwd, config.vmKernel) },
+                }
+              : {}),
+            signal: io.signal,
+          },
+    );
+    if ('error' in started) {
+      return fail(started.error, io.signal.aborted ? EXIT_CODES.aborted : EXIT_CODES.error);
+    }
+    sandbox = started;
+  }
+  // An interactive session applies or discards the workspace's changes as it goes, and starts a
+  // new sandbox each time.
+  const restartable =
+    interactive && sandbox?.workspace !== undefined && sandbox.relaunch !== undefined
+      ? new SandboxSession(
+          { backend: sandbox.backend, workspace: sandbox.workspace },
+          sandbox.relaunch,
+        )
+      : null;
+  const workCwd = sandbox?.cwd ?? cwd;
+  try {
+    // Overrides from the command line describe the model chosen there, not models switched to
+    // later.
+    const resolveWith = (id: string, overrides: ModelOverrides) =>
+      resolveModel(id, {
+        env: io.env,
+        overrides,
+        signal: io.signal,
+        ...(io.fetch === undefined ? {} : { fetch: io.fetch }),
+      });
+    const resolved = await resolveWith(model, {
+      ...(config.contextWindow === undefined ? {} : { contextWindow: config.contextWindow }),
+      ...(config.maxOutput === undefined ? {} : { maxOutput: config.maxOutput }),
+    }).catch((error: unknown) => {
+      if (io.signal.aborted) return null;
+      throw error;
+    });
+    if (resolved === null) return fail('aborted', EXIT_CODES.aborted);
+    if (!resolved.ok) return fail(resolved.error);
+
+    const security = sandbox?.security;
+    const agent = await createAgent({
+      provider: resolved.provider,
+      tools: BUILTIN_TOOLS,
+      toolBackend: restartable ?? sandbox?.backend ?? IN_PROCESS_BACKEND,
+      // In a sandboxed session, the jobs run in the sandbox, which reports them to the agent.
+      backgroundJobs: jobSession,
+      ...(sandbox === null ? {} : { sandbox: sandbox.scope }),
+      ...(security === undefined
+        ? {}
+        : { engagement: { scope: () => security.scope(), window: security } }),
+      // Subagents run in the background and report when the session is free to listen; a one-shot
+      // run ends with its task, so its main agent does the work itself.
+      delegation: interactive,
+      mode: config.mode,
+      cwd: workCwd,
+      instructions: config.agentsMd
+        ? new InstructionsLoader(sandbox === null ? {} : { root: sandbox.scope.root })
+        : null,
+      ...(effort === undefined ? {} : { effort }),
+      ...(config.maxSteps === undefined ? {} : { maxSteps: config.maxSteps }),
+      ...(config.timeLimitMs === undefined ? {} : { timeLimitMs: config.timeLimitMs }),
+    });
+    const warnings = [...resolved.warnings, ...agent.bootWarnings, ...(sandbox?.warnings ?? [])];
+    // The scope the engagement authorizes, as the operator is to check it.
+    const notes = sandbox?.security === undefined ? [] : [sandbox.security.scope().join('\n')];
+    // Shown when it happens, by the interactive session once it runs; the model reads it with its
+    // next request.
+    let show: SecurityNotice = (level, text) => sink.notice(level, text);
+    if (sandbox?.security !== undefined) {
+      tellSecurity = (level, text) => {
+        show(level, text);
+        agent.notify({ text, shown: true });
+      };
+    }
+    if (resumed !== null) {
+      agent.conversation.restore(resumed.conversation);
+      if (resumed.mode === 'readonly' && config.mode === 'auto') {
+        warnings.push(
+          'this session was last run in readonly mode and continues in auto mode; pass --permission readonly to keep it read-only',
+        );
+      }
+      if (resumed.sandbox !== undefined && config.sandbox === undefined) {
+        warnings.push(
+          `this session last ran its tools in the ${resumed.sandbox} sandbox and continues without one; pass --sandbox ${resumed.sandbox} to keep them in a sandbox`,
+        );
+      }
+      if (resumed.cwd !== workCwd) {
+        warnings.push(`this session was last run in ${resumed.cwd}; it continues in ${workCwd}`);
+      }
+    }
+
+    const history = new PromptHistory(resumed?.history ?? []);
+    if (interactive && io.terminal !== null) {
+      // Awaited inside the try, so the sandbox is closed when the session ends, not when it starts.
+      return await runRepl({
+        agent,
+        version: packageJson.version,
+        cwd: workCwd,
+        ...(config.sandbox === undefined ? {} : { sandbox: config.sandbox }),
+        ...(restartable === null || sandbox === null
+          ? {}
+          : {
+              workspace: new WorkspaceSession(
+                sandbox.scope.root,
+                restartable,
+                (notice) => agent.notify(notice),
+                () => agent.instructions().map((file) => file.path),
+              ),
+            }),
+        ...(sandbox?.security === undefined ? {} : { security: sandbox.security }),
+        resolveModel: (id) => resolveWith(id, {}),
+        warnings,
+        notes,
+        showNotices: (notice) => {
+          show = notice;
+        },
+        sessionFile: session?.file ?? null,
+        resumedMessages: resumed === null ? null : resumed.conversation.messages.length,
+        history,
+        signal: io.signal,
+        stdin: io.terminal.stdin,
+        stdout: io.terminal.stdout,
+        env: io.env,
+      });
+    }
+
+    for (const warning of warnings) sink.notice('warning', warning);
+    for (const note of notes) sink.notice('info', note);
+    if (session !== null) {
+      // The prompt of a one-shot run joins the history, so it can be recalled when the session is
+      // continued interactively.
+      history.add(config.prompt);
+      new SessionLink(agent, workCwd, (message) => sink.notice('warning', message), history).attach(
+        session.file,
+      );
+    }
+    const result = await agent.run(prompt, {
+      signal: io.signal,
+      onEvent: (e) => sink.event(e),
+      ...(input === undefined ? {} : { input }),
+    });
+    let code = EXIT_CODES[result.reason];
+    if (sandbox?.workspace !== undefined) {
+      // The worker and its jobs stop first: the changes are read once nothing writes them.
+      await sandbox.backend.close();
+      // An interrupt that came after the task finished, while the worker stopped, still keeps the
+      // changes out of the project.
+      const interrupted = config.apply && result.reason === 'done' && io.signal.aborted;
+      code = finishWorkspace(sandbox.workspace, {
+        apply: config.apply,
+        done: result.reason === 'done',
+        interrupted,
+        code: interrupted ? EXIT_CODES.aborted : code,
+        report: (event) => sink.changes(event),
+      });
+      // The application runs to its end, and an interrupt sent during it is handled only after
+      // it. Handled here, before the run ends, it only aborts what is already done: the exit code
+      // and the report are the application's, and nothing cuts the output short.
+      await new Promise((resolveTurn) => setImmediate(resolveTurn));
+    }
+    sink.finish();
+    return code;
+  } finally {
+    // The changes of an interactive session not applied by now are discarded with its sandbox.
+    await restartable?.close();
+    if (sandbox?.security !== undefined) {
+      await sandbox.security
+        .close()
+        .catch((error: unknown) => sink.notice('warning', errorMessage(error)));
+      // The evidence log's final hash, once the session is closed: an interactive one has restored
+      // the terminal by now, and shows nothing more.
+      const outcome = sandbox.security.evidenceOutcome();
+      if (outcome !== null) {
+        if (interactive) io.stderr(`nullrivet: ${outcome.text}\n`);
+        else sink.notice(outcome.level, outcome.text);
+      }
+    } else {
+      await sandbox?.backend.close();
+    }
+    const warn = (message: string) => sink.notice('warning', message);
+    for (const workspace of [restartable?.workspace, sandbox?.workspace]) {
+      if (workspace !== undefined && workspace !== null) removeDirectory(workspace.directory, warn);
     }
   }
+};
 
-  const history = new PromptHistory(resumed?.history ?? []);
-  if (interactive && io.terminal !== null) {
-    return runRepl({
-      agent,
-      version: packageJson.version,
-      cwd,
-      resolveModel: (id) => resolveWith(id, {}),
-      warnings,
-      sessionFile: session?.file ?? null,
-      resumedMessages: resumed === null ? null : resumed.conversation.messages.length,
-      history,
-      signal: io.signal,
-      stdin: io.terminal.stdin,
-      stdout: io.terminal.stdout,
-      env: io.env,
-    });
+// Removes the directory of a workspace session once its worker has stopped. The agent's writes
+// are in it, so a failure is reported; the exit handler tries again, and the next workspace
+// session after it.
+const removeDirectory = (
+  directory: StartedWorkspace['directory'],
+  warn: (message: string) => void,
+): void => {
+  if (!isLiveWorkspaceDirectory(directory)) return;
+  try {
+    removeWorkspaceDirectory(directory);
+  } catch (error) {
+    warn(`the sandbox's changes in ${directory.path} could not be removed: ${errorMessage(error)}`);
   }
-
-  for (const warning of warnings) sink.notice('warning', warning);
-  if (session !== null) {
-    // The prompt of a one-shot run joins the history, so it can be recalled when the session is
-    // continued interactively.
-    history.add(config.prompt);
-    new SessionLink(agent, cwd, (message) => sink.notice('warning', message), history).attach(
-      session.file,
-    );
-  }
-  const result = await agent.run(prompt, {
-    signal: io.signal,
-    onEvent: (e) => sink.event(e),
-    ...(input === undefined ? {} : { input }),
-  });
-  sink.finish();
-  return EXIT_CODES[result.reason];
 };

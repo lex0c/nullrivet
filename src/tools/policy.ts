@@ -7,8 +7,27 @@ export const EXECUTION_MODES: readonly ExecutionMode[] = ['auto', 'readonly'];
 export const isExecutionMode = (value: string): value is ExecutionMode =>
   (EXECUTION_MODES as readonly string[]).includes(value);
 
-// Used both to filter the schemas sent to the model and again by the executor before every call,
-// so a tool call that bypasses the model is still refused.
+// Where the tools run when not in this process. The execution mode and the profile are
+// independent, and a call must be allowed by both.
+export type SandboxProfile = 'inspect' | 'workspace' | 'security';
+
+export const SANDBOX_PROFILES: readonly SandboxProfile[] = ['inspect', 'workspace', 'security'];
+
+// The profiles as a sentence names them: inspect, workspace or security.
+export const SANDBOX_PROFILE_NAMES = `${SANDBOX_PROFILES.slice(0, -1).join(', ')} or ${SANDBOX_PROFILES.at(-1)}`;
+
+export const isSandboxProfile = (value: string): value is SandboxProfile =>
+  (SANDBOX_PROFILES as readonly string[]).includes(value);
+
+// The sandbox a session runs its tools in: the profile, and the project directory it exposes,
+// with symbolic links resolved.
+export interface SandboxScope {
+  profile: SandboxProfile;
+  root: string;
+}
+
+// Used both to filter the schemas sent to the model and again by the tool broker before every
+// call, so a tool call that bypasses the model is still refused.
 export const isToolAllowed = (mode: ExecutionMode, tool: Pick<Tool, 'effect'>): boolean =>
   mode === 'auto' || tool.effect === 'read';
 

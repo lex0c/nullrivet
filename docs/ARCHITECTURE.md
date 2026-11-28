@@ -15,17 +15,20 @@ file.
   translate it to each provider's API.
 - **Events, not callbacks into the UI.** The core publishes `AgentEvent`s. The plain output, the
   NDJSON output and the interactive session are consumers of the same events.
-- **Policy enforced in code.** The execution mode is checked by the executor before every tool
+- **Policy enforced in code.** The execution mode is checked by the tool broker before every tool
   call, not only by choosing which tools the model sees.
-- **Not a sandbox.** The working directory is a starting point, not a boundary. Isolation, when
-  needed, comes from the operating system.
+- **Not a sandbox by default.** The working directory is a starting point, not a boundary.
+  Isolation, when needed, comes from the operating system: `--sandbox inspect`,
+  `--sandbox workspace` and `--sandbox security` run the tools in Bubblewrap
+  ([SANDBOX.md](SANDBOX.md)).
 
 ## Module map
 
 ```
 src/
-  main.ts                  process entry: signals, stdin, exit code
+  main.ts                  process entry: the CLI, or the sandbox worker when started as one
   cli/
+    host-main.ts           the CLI process: signals, stdin, exit code
     args.ts                flags, environment variables, defaults
     run.ts                 resolve the model, create the agent, run one task or the session
     repl.ts                interactive session controller
@@ -34,6 +37,9 @@ src/
     session-file.ts        session files: loading, validation, atomic saves, attaching
     prompt-history.ts      prompts recalled with the arrow keys
     output.ts              plain and NDJSON event sinks for one-shot runs
+    exit-codes.ts          the process exit codes
+    workspace-changes.ts   a workspace task's changes at its end: read, shown, applied or discarded
+    workspace-session.ts   the interactive session's changes: preview, apply, discard, notes
     list-models.ts         the model catalog as a table, for --list-models
   agent/
     agent.ts               createAgent(): the public API of the core
@@ -42,7 +48,7 @@ src/
     conversation.ts        in-memory history and its invariants
     snapshot.ts            the conversation as data: snapshot format and its validation
     subagent.ts            the delegate tool and the registry of background subagents
-    tool-executor.ts       policy check, error containment, output sanitizing
+    tool-broker.ts         authorization, dispatch to a backend, error containment, sanitizing
     collect.ts             turns a provider stream into one collected step
     retry.ts               retries before the first streamed event
     abortable.ts           abort and stall handling for streams
@@ -70,6 +76,23 @@ src/
     jobs.ts                background jobs: registry, events, and their three tools
     output-files.ts        complete output of reduced results, saved in parts to temporary files
     args.ts, paths.ts, env.ts
+  sandbox/
+    start.ts               starts the session's sandbox, or says why it cannot
+    bwrap.ts               the profiles' launch: project root, mounts, overlay, environment
+    limits.ts              the resource limits: a systemd scope, checked, or RLIMIT_NPROC
+    security.ts            the security profile: start, window, refresh and end, one owner
+    engagement.ts          the engagement file: validation, resolution of its names, its scope
+    network/               the security profile's network: namespaces, ruleset, pasta, control
+    workspace.ts           the directories of sandboxes on the host: runtime directory, lock, sweep
+    session.ts             the backend of an interactive workspace session, restarted on apply
+    changeset/             the workspace's changes: reading the upper layer, classifying,
+                           checking, describing and applying them by descriptor
+    seccomp.ts             the seccomp program installed in the sandbox
+    worker.ts              the worker process: runs tools for the host over the protocol
+    worker-backend.ts      the host side: a tool backend that validates every worker message
+    job-projection.ts      the host's view of the jobs the worker runs, fed by its facts
+    worker-command.ts      how the worker is started, from source or from the binary
+    protocol.ts, lines.ts  the JSON lines protocol and its line framing
   instructions/
     agents-loader.ts       AGENTS.md discovery and rendering
   context/
@@ -242,7 +265,7 @@ conversation stays valid for the whole run. Limits and states are described in
 ## Tools and the execution policy
 
 A tool declares its effect: `read`, `write` or `exec`. In `readonly` mode only `read` tools are
-offered to the model, and the executor refuses any other call before running it, so a call the
+offered to the model, and the tool broker refuses any other call before running it, so a call the
 model was not offered, or a mode change during a turn, cannot cause a side effect.
 
 The conversation records the mode of its last request. When the next request is made in another
@@ -250,8 +273,14 @@ mode, an `<agent-note>` saying so is added to the last user message, after the p
 results. The system prompt already states the current mode, but answers given under the previous
 one stay in the history, and models tend to follow what they said before.
 
-The executor never lets a tool failure escape: unknown tools, invalid arguments and exceptions all
-become error results the model can read. Terminal escape sequences are removed from tool output.
+Every tool call, a subagent's included, is authorized by the tool broker and only then handed to
+a tool backend, which runs it and decides nothing about what is allowed. Without a sandbox
+profile, the backend runs the tool in the nullrivet process; with one, the backends in
+[SANDBOX.md](SANDBOX.md) run it in an isolated worker.
+
+The broker never lets a tool or backend failure escape: unknown tools, invalid arguments and
+exceptions all become error results the model can read. Terminal escape sequences are removed from
+tool output.
 
 Tool calls run one after another, in the order the model wrote them.
 
@@ -267,6 +296,11 @@ one on its own.
   and collects every `AGENTS.md`. The walk stops at the root of the git repository. Outside a
   repository, it stops below the home directory and the filesystem root, so files in shared
   parents are not picked up. The walk never limits which paths the tools may access.
+- **Links.** An `AGENTS.md` that is a symbolic link is loaded only when its final target is inside
+  the repository, or inside its own directory outside a repository, as with `AGENTS.md` linking
+  to `CLAUDE.md`; otherwise it is skipped with a warning. The files reach the provider without any
+  action of the model, so a cloned repository could otherwise make nullrivet send a file of the
+  user, such as a private key, with the first request.
 - **When they are loaded.** At start, the files that apply to the starting directory are loaded,
   and every request carries them at the start of the first user message. They are added when the
   request is built, not stored in the conversation, so compaction and clearing never drop them.
@@ -370,10 +404,10 @@ only reads: the main agent is the only one that changes files or runs commands.
 - **Report.** When a run ends, the registry announces a pending event, like a job that ended. The
   runtime note holds only facts the runtime observed: id, status, a reason it chose itself when
   the run stopped early (`cancelled`, `time_limit`, `step_limit`, `context_full`, `output_limit`,
-  `provider_error`, `internal_error`), steps, tool errors and tokens. The title, any message that
-  came with the stop (possibly from a provider) and the report follow as fenced data: a model's
-  text never gets the authority of a note. The user is shown the title and the same facts instead
-  of the note (`display` of a runtime notice).
+  `provider_error`, `sandbox_lost`, `internal_error`), steps, tool errors and tokens. The title,
+  any message that came with the stop (possibly from a provider) and the report follow as fenced
+  data: a model's text never gets the authority of a note. The user is shown the title and the
+  same facts instead of the note (`display` of a runtime notice).
 - **Batches.** The job and subagent registries expose their pending events without consuming
   them, and the agent marks as delivered only those it selects for a batch. A batch takes every
   job event and the reports in the order they ended, while their data fits a budget of a quarter
@@ -427,10 +461,12 @@ The CLI edge does the rest:
   detaches the file rather than saving an empty conversation over it.
 - **Exit.** The interactive session saves once more on the way out, since a turn interrupted then
   may not reach its own checkpoint.
-- **Continuing.** The file records the model, effort and mode it was last run with. The model and
-  effort are used when the invocation does not choose them; the mode only produces a warning,
-  because permissions come from the invocation alone. `AGENTS.md` files are not stored, since
-  they are added when each request is built, so a continued session reads them again from disk.
+- **Continuing.** The file records the model, effort, mode and sandbox profile it was last run
+  with. The model and effort are used when the invocation does not choose them; the mode and the
+  sandbox only produce a warning, when a session continues in `auto` after `readonly` or without
+  the sandbox it ran in, because permissions come from the invocation alone. `AGENTS.md` files
+  are not stored, since they are added when each request is built, so a continued session reads
+  them again from disk.
 - **Prompt history.** The file also holds the prompt history of the interactive session, with the
   prompt of each one-shot run added, so a continued session recalls them. A new entry alone is
   enough to save the file again.

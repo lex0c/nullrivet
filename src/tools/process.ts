@@ -2,7 +2,7 @@ import { type ChildProcess, spawn } from 'node:child_process';
 import type { Readable } from 'node:stream';
 import { BoundedCapture } from '../context/bounded-capture.ts';
 
-const KILL_GRACE_MS = 2_000;
+export const KILL_GRACE_MS = 2_000;
 // Timers fire at once when the delay does not fit in a signed 32-bit integer (about 24.8 days).
 export const MAX_TIMER_DELAY_MS = 2_147_483_647;
 // Memory bound per stream while the process runs. The head and the tail are kept because the
@@ -70,6 +70,15 @@ const EXIT_KILL_INTERVAL_MS = 10;
 
 const pause = (ms: number): void => {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+};
+
+// A process group started without runProcess, such as the sandbox, so that killAllProcessGroups
+// kills it too. Returns the function that stops tracking it once it has exited.
+export const trackProcessGroup = (pgid: number): (() => void) => {
+  liveGroups.add(pgid);
+  return () => {
+    liveGroups.delete(pgid);
+  };
 };
 
 export const killAllProcessGroups = (): void => {
