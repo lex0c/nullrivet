@@ -10,7 +10,7 @@ import {
   type HostEntries,
   hostEntries,
 } from '../../../src/sandbox/vm/manifest.ts';
-import { guestNetwork, qemuArgs } from '../../../src/sandbox/vm/qemu.ts';
+import { guestNetwork, guestOverlap, qemuArgs } from '../../../src/sandbox/vm/qemu.ts';
 
 const VIEW: GuestView = {
   project: '/home/ana/work/app',
@@ -277,6 +277,16 @@ describe("the guest's network", () => {
     expect(guestNetwork([network('10.0.0.0/8'), network('172.16.0.0/12')])).toMatchObject({
       network: '192.168.233.0/24',
     });
+  });
+
+  test("finds a scope's network inside the guest's own, as a refresh would bring", () => {
+    const guest = guestNetwork([]);
+    if ('error' in guest) throw new Error(guest.error);
+    expect(guestOverlap(guest, [network('198.51.100.0/24'), network('2001:db8::/32')])).toBeNull();
+    expect(guestOverlap(guest, [network('198.51.100.0/24'), network('10.0.3.50/32')])).toEqual(
+      network('10.0.3.50/32'),
+    );
+    expect(guestOverlap(guest, [network('fd00::/8')])).toEqual(network('fd00::/8'));
   });
 
   test('refuses a scope that holds every network the guest could have', () => {

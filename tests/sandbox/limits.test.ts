@@ -245,6 +245,10 @@ describe.if(cgroupTestsRun)('a scope of the service manager', () => {
       expect('prefix' in reserved ? reserved.prefix : reserved.problem).toContain(
         `MemoryMax=${0.75 * 1024 ** 3 - 256 * 1024 ** 2}`,
       );
+      // And the memory the scope holds is told, for what runs in it to fit.
+      expect('memoryBytes' in reserved ? reserved.memoryBytes : reserved.problem).toBe(
+        0.75 * 1024 ** 3 - 256 * 1024 ** 2,
+      );
     } finally {
       systemctl('revert', slice);
       systemctl('stop', slice);

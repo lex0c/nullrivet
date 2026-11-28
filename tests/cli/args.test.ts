@@ -86,6 +86,39 @@ describe('--engagement', () => {
   });
 });
 
+describe('--vm', () => {
+  test("runs the security profile in a virtual machine, with the host's kernel or the one named", () => {
+    const base = ['--sandbox', 'security', '--engagement', 'scope.json'];
+    expect(parseCli([...base, 'go'], {}, '/tmp')).toMatchObject({ vm: false, vmKernel: undefined });
+    expect(parseCli([...base, '--vm', 'go'], {}, '/tmp')).toMatchObject({
+      vm: true,
+      vmKernel: undefined,
+    });
+    expect(parseCli([...base, '--vm', '--vm-kernel', 'vmlinuz', 'go'], {}, '/tmp')).toMatchObject({
+      vm: true,
+      vmKernel: 'vmlinuz',
+    });
+  });
+
+  test('is refused by any other profile, and --vm-kernel without it', () => {
+    for (const argv of [
+      ['--vm', 'go'],
+      ['--sandbox', 'inspect', '--vm', 'go'],
+    ]) {
+      expect(() => parseCli(argv, {}, '/tmp')).toThrow(
+        '--vm needs --sandbox security, whose commands it runs in a virtual machine',
+      );
+    }
+    expect(() =>
+      parseCli(
+        ['--sandbox', 'security', '--engagement', 'scope.json', '--vm-kernel', 'k', 'go'],
+        {},
+        '/tmp',
+      ),
+    ).toThrow('--vm-kernel needs --vm, whose guest it boots');
+  });
+});
+
 describe('--apply', () => {
   test('is off unless given, and works with the workspace profile from the flag or the environment', () => {
     expect(parseCli(['--sandbox', 'workspace', 'go'], {}, '/tmp').apply).toBe(false);

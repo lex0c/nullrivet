@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { release, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   type NetworkTools,
@@ -9,7 +9,12 @@ import {
   releaseNamespaces,
   runInNamespaces,
 } from '../../src/sandbox/network/namespace.ts';
-import { cgroupTestsRun, networkTestsRun, overlayTestsRun } from '../helpers/sandbox.ts';
+import {
+  cgroupTestsRun,
+  networkTestsRun,
+  overlayTestsRun,
+  vmTestsRun,
+} from '../helpers/sandbox.ts';
 import {
   type ChatRequest,
   cliCommand,
@@ -192,6 +197,30 @@ describe.if(overlayTestsRun && networkTestsRun && cgroupTestsRun)('--sandbox sec
     40_000,
   );
 });
+
+describe.if(overlayTestsRun && networkTestsRun && cgroupTestsRun && vmTestsRun)(
+  '--sandbox security --vm',
+  () => {
+    test("runs the model's commands in a guest of the host's kernel, whose first process is its init", async () => {
+      const { home, project, file } = setUp({
+        scope: { allow: [{ cidr: '198.51.100.0/24', ports: [443] }] },
+      });
+      server.handle(
+        toolsThenText([{ name: 'bash', args: { command: 'uname -r; cat /proc/1/comm' } }]),
+      );
+      const cli = startCli(['--sandbox', 'security', '--engagement', file, '--vm', 'look'], {
+        env: cliEnv(server, { HOME: home, ...bus() }),
+        cwd: project,
+      });
+      const { code } = await cli.finished;
+      expect(code).toBe(0);
+      const results = toolMessages(server.requests.at(-1) as ChatRequest)
+        .map((message) => String(message.content))
+        .join('\n');
+      expect(results).toContain(`${release()}\ninit`);
+    }, 90_000);
+  },
+);
 
 describe('--engagement', () => {
   test('is a usage error without the security profile, and the profile one without it', async () => {

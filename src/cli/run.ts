@@ -175,6 +175,14 @@ export const runCli = async (io: CliIO): Promise<number> => {
             // line.
             path: resolve(io.cwd, config.engagement),
             notice: (level, text) => tellSecurity(level, text),
+            ...(config.vm
+              ? {
+                  vm:
+                    config.vmKernel === undefined
+                      ? {}
+                      : { kernel: resolve(io.cwd, config.vmKernel) },
+                }
+              : {}),
             signal: io.signal,
           },
     );

@@ -60,6 +60,8 @@ export interface StartedSandbox {
 export interface StartEngagement {
   path: string;
   notice: SecurityNotice;
+  // The commands run in a virtual machine, with the host's kernel or the one named.
+  vm?: { kernel?: string };
   // Gives up the start, as an interrupt does.
   signal?: AbortSignal;
 }
@@ -110,6 +112,7 @@ export const startSandbox = async (
       env,
       engagementPath: engagement.path,
       notice: engagement.notice,
+      ...(engagement.vm === undefined ? {} : { vm: engagement.vm }),
       ...(engagement.signal === undefined ? {} : { signal: engagement.signal }),
     });
     if ('error' in started) return started;

@@ -11,13 +11,14 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { connect, createServer, type Server } from 'node:net';
-import { networkInterfaces, tmpdir } from 'node:os';
+import { networkInterfaces, release, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { executeToolCall, type ToolExecutionContext } from '../../src/agent/tool-broker.ts';
 import { type LaunchOptions, sandboxHost, sandboxProject } from '../../src/sandbox/bwrap.ts';
 import { sha256 } from '../../src/sandbox/evidence.ts';
 import { verifyEvidence } from '../../src/sandbox/evidence-verify.ts';
 import {
+  enterArgs,
   type NetworkTools,
   networkTools,
   pinNamespaces,
@@ -40,6 +41,7 @@ import {
   networkTestsRun,
   overlayTestsRun,
   sandboxTestsRun,
+  vmTestsRun,
 } from '../helpers/sandbox.ts';
 
 const linux = process.platform === 'linux';
@@ -1120,3 +1122,172 @@ describe.if(linux && runs)('the evidence log of a security sandbox', () => {
     );
   }, 60_000);
 });
+
+describe.if(linux && runs && vmTestsRun)(
+  'a security sandbox whose commands run in a virtual machine',
+  () => {
+    const host = (): string => {
+      if (hostAddress === undefined) throw new Error('the host has no IPv4 address to test with');
+      return hostAddress;
+    };
+    const inVm = (engagement: unknown) => start(engagement, { vm: {} });
+
+    test("runs the commands in a guest of the host's kernel, as the user, without what it does not need", async () => {
+      const { run } = await inVm({ scope: { allow: [{ cidr: '198.51.100.0/24' }] } });
+      const seen = await run('bash', {
+        command:
+          'id -u; uname -r; grep -cE "vmx|svm" /proc/cpuinfo; ls /proc/self/fd | tr "\\n" " "; echo; stat -c %a /; grep -E "^Cap(Prm|Eff|Bnd)" /proc/self/status | tr -s "\\t " " "',
+      });
+      expect(seen).toContain(
+        [
+          String(process.getuid?.()),
+          release(),
+          '0',
+          // The command's own descriptors, the directory ls reads included: none of the protocol's.
+          '0 1 2 3 ',
+          '755',
+          'CapPrm: 0000000000000000',
+          'CapEff: 0000000000000000',
+          'CapBnd: 0000000000000000',
+        ].join('\n'),
+      );
+      expect(await run('read_file', { path: join(project, 'notes.txt') })).toContain(
+        'project notes',
+      );
+      expect(
+        await run('bash', { command: 'touch /etc/planted 2>&1; touch /usr/planted 2>&1' }),
+      ).toContain('Permission denied');
+    }, 60_000);
+
+    test("reaches the scope through the guest's network, and nothing of the namespace's loopback", async () => {
+      const ok = await listening();
+      const other = await listening();
+      const { run } = await inVm({ scope: { allow: [{ cidr: `${host()}/32`, ports: [ok] }] } });
+      const probe = (address: string, port: number) =>
+        run('bash', {
+          command: `timeout 5 bash -c 'exec 3<>/dev/tcp/${address}/${port} && echo x >&3 && cat <&3' 2>&1 || echo refused`,
+        });
+      expect(await probe(host(), ok)).toContain('ok');
+      expect(await probe(host(), other)).toContain('refused');
+      expect(await probe('192.0.2.1', 80)).toContain('refused');
+    }, 60_000);
+
+    test("reaches nothing of the namespace's loopback but the proxy's port", async () => {
+      const { session, run } = await inVm({ scope: { allow: [{ cidr: '198.51.100.0/24' }] } });
+      // A service on the namespace's loopback, which the guest's address of its host leads to.
+      const tools = networkTools() as NetworkTools;
+      const namespaces = pinNamespaces(session.pid);
+      const [file, ...args] = [
+        ...enterArgs(tools, namespaces),
+        'python3',
+        '-I',
+        '-u',
+        '-c',
+        'import socket\ns = socket.socket(); s.bind(("127.0.0.1", 47301)); s.listen(); print("listening")\nwhile True:\n c, _ = s.accept(); c.sendall(b"own"); c.close()',
+      ];
+      const service = spawn(file as string, args, { stdio: ['ignore', 'pipe', 'ignore'] });
+      try {
+        await new Promise((resolve) => service.stdout?.once('data', resolve));
+        expect(
+          await run('bash', {
+            command: `timeout 5 bash -c 'exec 3<>/dev/tcp/10.0.3.2/47301 && cat <&3' 2>&1 || echo refused`,
+          }),
+        ).toContain('refused');
+      } finally {
+        service.kill('SIGKILL');
+        releaseNamespaces(namespaces);
+      }
+    }, 60_000);
+
+    test("reaches a name of the proxy at the guest's address of its host", async () => {
+      const target = await recorder();
+      const answers = { 'svc.test': ['198.51.100.20'] };
+      const { factory, dialed } = inProcessProxy(target.port, answers);
+      const { run } = await start(
+        { scope: { allow: [{ host: 'svc.test', ports: [80], via: 'proxy' }] } },
+        {
+          vm: {},
+          resolve: async (name) => answers[name as keyof typeof answers] ?? [],
+          proxy: factory,
+        },
+      );
+      expect(await run('bash', { command: 'echo "$HTTP_PROXY"' })).toMatch(/@10\.0\.3\.2:3128/);
+      expect(await run('bash', { command: 'curl -s -m 5 http://svc.test/x' })).toContain('ok');
+      expect(dialed).toContain('198.51.100.20 80');
+    }, 60_000);
+
+    test("records the guest it ran in, and copies its outputs from the guest's /tmp", async () => {
+      const dir = join(scratch, `evidence-vm-${Date.now()}`);
+      const { session, run } = await inVm({
+        scope: { allow: [{ cidr: '198.51.100.0/24' }] },
+        evidence: { dir },
+      });
+      expect(await run('bash', { command: 'seq 1 200000' })).toContain('/tmp/nullrivet-');
+      await session.close();
+      const name = readdirSync(dir).find((entry) => entry.endsWith('.jsonl')) as string;
+      const entries = readFileSync(join(dir, name), 'utf8')
+        .split('\n')
+        .filter((line) => line !== '')
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(entries[0]?.vm).toMatchObject({
+        kernelSource: 'distribution',
+        kernel: { release: release() },
+        machine: 'q35',
+        network: { ipv4: '10.0.3.0/24' },
+      });
+      const finished = entries.find((entry) => entry.type === 'tool.finished') as {
+        outputs: Record<string, unknown>[];
+      };
+      expect(finished.outputs[0]).toMatchObject({ preservation: 'parts', matchesSaved: true });
+      expect(verifyEvidence(join(dir, name)).status).toBe('complete');
+    }, 60_000);
+
+    test('runs background jobs in the guest, with a terminal of its own for those that want one', async () => {
+      const { run } = await inVm({ scope: { allow: [{ cidr: '198.51.100.0/24' }] } });
+      expect(await run('bash_background', { command: 'echo from-job; sleep 30' })).toContain(
+        'Started background job',
+      );
+      await Bun.sleep(1_000);
+      expect(await run('bash_jobs', {})).toMatch(/running for \d+s: echo from-job; sleep 30/);
+      expect(
+        await run('bash', {
+          command:
+            'python3 -I -c "import pty, os; pid, fd = pty.fork(); print(os.ttyname(0)) if pid == 0 else print(\'pty\', os.read(fd, 100).decode().strip())"',
+        }),
+      ).toContain('pty /dev/pts/');
+    }, 60_000);
+
+    test('ends the guest with the session, and leaves no process of it', async () => {
+      const { session, run } = await inVm({ scope: { allow: [{ cidr: '198.51.100.0/24' }] } });
+      expect(await run('bash', { command: 'echo alive' })).toContain('alive');
+      // QEMU's processes, by their name and the kernel the sandbox binds them.
+      const qemu = () =>
+        readdirSync('/proc')
+          .filter((entry) => /^\d+$/.test(entry))
+          .filter((pid) => {
+            try {
+              return (
+                readFileSync(`/proc/${pid}/comm`, 'utf8').startsWith('qemu-system') &&
+                readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes('/.nullrivet-vm/kernel')
+              );
+            } catch {
+              return false;
+            }
+          })
+          .join(' ');
+      expect(qemu()).not.toBe('');
+      await session.close();
+      expect(qemu()).toBe('');
+    }, 60_000);
+
+    test('refuses a kernel that is not one, before anything starts', async () => {
+      const path = join(scratch, 'not-a-kernel');
+      writeFileSync(path, 'text');
+      await expect(
+        start({ scope: { allow: [{ cidr: '198.51.100.0/24' }] } }, { vm: { kernel: path } }),
+      ).rejects.toThrow(
+        `the virtual machine cannot start: ${path} is not an x86 kernel image (bzImage)`,
+      );
+    }, 60_000);
+  },
+);

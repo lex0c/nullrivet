@@ -15,8 +15,9 @@ import {
 } from './namespace.ts';
 import { Pasta, type PastaAddress, type PastaScope } from './pasta.ts';
 import {
-  CLOSED_RULESET,
+  closedRuleset,
   DYNAMIC_SETS,
+  loopbackRuleset,
   NOTHING,
   rulesetFor,
   SCOPE_TABLES,
@@ -57,6 +58,9 @@ export interface NetworkOptions {
   forward?: Forward;
   // Gives up the preparation: its helpers are killed, and what it made undone.
   signal?: AbortSignal;
+  // The namespace's only process of the sandbox is a virtual machine's, whose user networking
+  // reaches its loopback: nothing there but the proxy's port, and nothing at all once closed.
+  loopback?: 'proxy-only';
 }
 
 const GROUP_RANGE = '/proc/sys/net/ipv4/ping_group_range';
@@ -82,6 +86,8 @@ export class NetworkControl {
     // The table the scope in force is in.
     private active: ScopeTable,
     private readonly proxyPort: number | undefined,
+    // Tables installed once before any scope, which every installation's reference holds too.
+    private readonly base: readonly string[],
   ) {
     void pasta.ended.then((reason) => {
       if (this.closing === null) this.failed = reason;
@@ -97,10 +103,18 @@ export class NetworkControl {
     options: NetworkOptions = {},
   ): Promise<NetworkControl> {
     const { signal } = options;
+    const base = options.loopback === 'proxy-only' ? [loopbackRuleset(options.forward?.port)] : [];
     let pasta: Pasta;
     try {
       const [first] = SCOPE_TABLES;
-      await install(tools, namespaces, NOTHING, first, null, options.forward?.port, signal);
+      // Before the first scope, with the namespace's loopback its only interface: nothing of it is
+      // reached by the guest before this table holds.
+      await withScripts(base, async (paths) => {
+        for (const path of paths) {
+          await runInNamespaces(tools, namespaces, [tools.nft, '-f', path], '', signal);
+        }
+      });
+      await install(tools, namespaces, NOTHING, first, null, options.forward?.port, base, signal);
       // Every group of the namespace, which maps only the user's: its processes may open ICMP
       // echo sockets. The range is read in the namespace's ids.
       await runInNamespaces(
@@ -128,6 +142,7 @@ export class NetworkControl {
       pasta,
       SCOPE_TABLES[0],
       options.forward?.port,
+      base,
     );
     try {
       await control.replace(scope, signal);
@@ -162,6 +177,7 @@ export class NetworkControl {
           next,
           this.active,
           this.proxyPort,
+          this.base,
           signal,
         );
         this.active = next;
@@ -182,7 +198,7 @@ export class NetworkControl {
     // A close for a failure is one: the session tells it, as when pasta ends.
     if (reason !== undefined) this.failed ??= reason;
     if (this.closing === null) {
-      const closedTable = withScripts([CLOSED_RULESET], ([path]) =>
+      const closedTable = withScripts([closedRuleset(this.base.length === 0)], ([path]) =>
         runInNamespaces(this.tools, this.namespaces, [this.tools.nft, '-f', path as string]),
       ).catch((error: unknown) => {
         this.failed ??= `the table that closes the network could not be installed: ${message(error)}`;
@@ -335,6 +351,8 @@ const reference = (
 // of which puts it in force in place of `previous`; then checks that the kernel holds exactly what
 // was written, as a namespace that holds nothing else does once the same transactions ran in it:
 // every table, chain, set and rule, as nft lists them.
+// Installs `scope` into `table`, and checks the namespace holds what a new one holds with the
+// `base` tables, installed before any scope, and the same transactions.
 const install = async (
   tools: NetworkTools,
   namespaces: Namespaces,
@@ -342,9 +360,11 @@ const install = async (
   table: ScopeTable,
   previous: ScopeTable | null,
   proxyPort: number | undefined,
+  base: readonly string[],
   signal?: AbortSignal,
 ): Promise<void> => {
-  await withScripts(rulesetFor(scope, table, previous, proxyPort), async (paths) => {
+  await withScripts([...base, ...rulesetFor(scope, table, previous, proxyPort)], async (all) => {
+    const paths = all.slice(base.length);
     for (const path of paths) {
       await runInNamespaces(tools, namespaces, [tools.nft, '-f', path], '', signal);
     }
@@ -352,7 +372,7 @@ const install = async (
     // descriptors, which a failure releases.
     const [listed, made] = await Promise.allSettled([
       runInNamespaces(tools, namespaces, [tools.nft, '-j', 'list', 'ruleset'], '', signal),
-      reference(tools, paths, signal),
+      reference(tools, all, signal),
     ]);
     if (listed.status === 'rejected') throw listed.reason;
     if (made.status === 'rejected') throw made.reason;

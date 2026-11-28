@@ -1144,6 +1144,43 @@ describe.if(networkTestsRun && process.platform === 'linux')("the proxy's port",
     );
   }, 60_000);
 
+  test("holds a virtual machine's loopback to the proxy alone, and to nothing once closed", async () => {
+    const s = await servers();
+    cleanups.push(s.close);
+    const to = await services();
+    const { sandbox, control } = await prepared(t(), s, 'probe', hostScope(s), {
+      forward: { port: 3128, to },
+      loopback: 'proxy-only',
+    });
+    const namespaces = pinned(sandbox.pid);
+    // A service of the namespace's own loopback, which answers whoever reaches it.
+    const probe = (port: number, name: string) =>
+      [
+        'import socket, threading',
+        'own = socket.socket(); own.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)',
+        `own.bind(("127.0.0.1", ${port})); own.listen()`,
+        'def serve():',
+        '    while True:',
+        '        c, _ = own.accept(); c.sendall(b"own"); c.close()',
+        'threading.Thread(target=serve, daemon=True).start()',
+        'for port in (' + (port === 3128 ? '3128,' : `${port}, 3128`) + '):',
+        '    try:',
+        '        s = socket.create_connection(("127.0.0.1", port), timeout=2)',
+        `        print(${JSON.stringify(name)}, port, s.recv(64).decode().strip() or "nothing")`,
+        '    except OSError as e:',
+        `        print(${JSON.stringify(name)}, port, type(e).__name__)`,
+      ].join('\n');
+    const run = (script: string) =>
+      runInNamespaces(t(), namespaces, [t().sh, '-c', `python3 -I -c '${script}'`]);
+    expect(await run(probe(47300, 'open'))).toBe(
+      'open 47300 ConnectionRefusedError\nopen 3128 127.0.0.1\n',
+    );
+    await control.close();
+    // pasta is gone: what listens on the proxy's port now is the namespace's own, still reached by
+    // nothing.
+    expect(await run(probe(3128, 'closed'))).toBe('closed 3128 TimeoutError\n');
+  }, 60_000);
+
   test('refuses the proxy outside the window, in the kernel', async () => {
     const s = await servers();
     cleanups.push(s.close);

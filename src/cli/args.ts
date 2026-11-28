@@ -19,6 +19,9 @@ export interface CliConfig {
   sandbox: SandboxProfile | undefined;
   // The engagement file of the security profile, as given.
   engagement: string | undefined;
+  // The security profile's commands run in a virtual machine, with the host's kernel or this one.
+  vm: boolean;
+  vmKernel: string | undefined;
   apply: boolean;
   cwd: string;
   json: boolean;
@@ -57,6 +60,9 @@ Options:
                               or security, with the network of an engagement's scope
       --engagement <file>     With --sandbox security: the engagement file, which sets the
                               destinations the sandbox may reach, and when
+      --vm                    With --sandbox security: run the commands in a virtual machine
+                              with a kernel of its own (Linux x86-64, KVM and QEMU)
+      --vm-kernel <file>      With --vm: the guest's kernel, the host's own otherwise
       --apply                 With --sandbox workspace: apply the task's changes to the
                               project if it finishes; without it they are shown and discarded
   -C, --cwd <dir>             Starting directory (does not restrict file access)
@@ -153,6 +159,8 @@ export const parseCli = (
         permission: { type: 'string', short: 'p' },
         sandbox: { type: 'string' },
         engagement: { type: 'string' },
+        vm: { type: 'boolean' },
+        'vm-kernel': { type: 'string' },
         apply: { type: 'boolean' },
         cwd: { type: 'string', short: 'C' },
         json: { type: 'boolean' },
@@ -210,6 +218,17 @@ export const parseCli = (
   if (engagement !== undefined && sandbox !== 'security') {
     throw new UsageError('--engagement needs --sandbox security, whose network it scopes');
   }
+  // Like the scope, the operator's decision for each run.
+  const vm = values.vm === true;
+  const vmKernel = str('vm-kernel');
+  if (vm && sandbox !== 'security') {
+    throw new UsageError(
+      '--vm needs --sandbox security, whose commands it runs in a virtual machine',
+    );
+  }
+  if (vmKernel !== undefined && !vm) {
+    throw new UsageError('--vm-kernel needs --vm, whose guest it boots');
+  }
 
   return {
     model: str('model') ?? (env.NULLRIVET_MODEL || undefined),
@@ -222,6 +241,8 @@ export const parseCli = (
       'auto',
     sandbox,
     engagement,
+    vm,
+    vmKernel,
     apply,
     cwd: str('cwd') ?? defaultCwd,
     json: values.json === true,

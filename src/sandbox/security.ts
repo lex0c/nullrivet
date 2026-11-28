@@ -52,6 +52,8 @@ import {
 import type { Scope } from './network/ruleset.ts';
 import type { JobMessage } from './protocol.ts';
 import { hostSecrets } from './redaction.ts';
+import { type GuestLaunch, guestHost, guestLaunch } from './vm/launch.ts';
+import { type GuestNetwork, guestOverlap } from './vm/qemu.ts';
 import { type Launched, WorkerBackend } from './worker-backend.ts';
 import { sandboxedWorker } from './worker-command.ts';
 import {
@@ -103,6 +105,9 @@ export interface SecurityOptions {
   proxy?: ProxyFactory;
   // For tests: a smaller limit for the evidence log, which fails as a full disk would.
   evidenceMaxBytes?: number;
+  // The commands run in a virtual machine with a kernel of its own, QEMU in the worker's place:
+  // the host's kernel, or the one named.
+  vm?: { kernel?: string };
 }
 
 export interface RefreshReport {
@@ -111,6 +116,10 @@ export interface RefreshReport {
 }
 
 let units = 0;
+
+// How long a guest may take from QEMU's start to its worker's readiness: its boot takes about a
+// second and a half on a host with KVM.
+const GUEST_READY_TIMEOUT_MS = 30_000;
 
 // Checks that `pid` is the launcher that made the namespaces of the sandbox's process it reported:
 // its parent, in the same network namespace, in a user namespace of its own, the host's ones
@@ -152,11 +161,14 @@ const iso = (date: Date): string => date.toISOString();
 // would not fit in one variable of a command's environment.
 const MAX_NO_PROXY_CHARS = 16 * 1024;
 
+// `address` is where the commands reach the proxy's port: the namespace's loopback, or, from a
+// virtual machine, its host's address on the guest's network, which QEMU takes to that loopback.
 const proxyEnvironment = (
   token: string,
   resolved: ResolvedEngagement,
+  address: string,
 ): { variables: Record<string, string>; warnings: string[] } => {
-  const proxy = `http://${PROXY_USER}:${token}@127.0.0.1:${PROXY_PORT}`;
+  const proxy = `http://${PROXY_USER}:${token}@${address}:${PROXY_PORT}`;
   // Clients match a NO_PROXY name against every name that ends with it, Python's requests with no
   // dot between: a name reached directly that ends a name of the proxy would take that one away
   // from the proxy, its only way. It is left out, and reached directly by its addresses.
@@ -271,6 +283,8 @@ export class SecuritySession implements EngagementWindow {
     // The sandbox's first process, through whose root the copies read its /tmp.
     private readonly sandboxProcess: SandboxProcess | null,
     jobFacts: { handle: (fact: JobMessage) => void },
+    // The networks of the guest, when the commands run in a virtual machine.
+    private readonly guestNetwork: GuestNetwork | null,
   ) {
     // The commands running end with the window, or with the evidence log once it cannot be written.
     this.ended = AbortSignal.any([this.ending.signal, this.unrecorded.signal]);
@@ -324,6 +338,13 @@ export class SecuritySession implements EngagementWindow {
     const resolved = await resolveEngagement(engagement, options.resolve ?? lookupAll);
     if (!resolved.ok) return { error: resolved.error };
     const proxied = resolved.value.proxied.length > 0;
+    const guestFor =
+      options.vm === undefined
+        ? null
+        : guestHost(options.vm.kernel === undefined ? {} : { kernel: options.vm.kernel });
+    if (guestFor !== null && 'error' in guestFor) {
+      return { error: `the virtual machine cannot start: ${guestFor.error}` };
+    }
     // pasta's memory, and the proxy's, come out of the sandbox's, whatever limits it: the
     // session's budget stays three quarters.
     const limits = await prepareLimits(
@@ -407,6 +428,18 @@ export class SecuritySession implements EngagementWindow {
     } catch (error) {
       return undo(`the hosts file of the sandbox cannot be written: ${errorMessage(error)}`);
     }
+    let guest: GuestLaunch | null = null;
+    if (guestFor !== null) {
+      const { scope } = resolved.value;
+      const made = guestLaunch(guestFor, options.launch, {
+        directory: directory.path,
+        networks: [...scope.allow.map(({ network }) => network), ...scope.deny],
+        memoryBytes: limits.memoryBytes ?? 0,
+        hashOutputs: evidence !== null,
+      });
+      if ('error' in made) return undo(`the virtual machine cannot start: ${made.error}`);
+      guest = made;
+    }
     // With an evidence log, the sandbox's first process, by its id and its start: the outputs the
     // worker saves in the sandbox's /tmp are read through its root.
     const root: { process: SandboxProcess | null } = { process: null };
@@ -417,7 +450,10 @@ export class SecuritySession implements EngagementWindow {
     const scope = limits.scope;
     const clean = limits.clean;
     const token = proxied ? randomBytes(32).toString('hex') : null;
-    const environment = token === null ? null : proxyEnvironment(token, resolved.value);
+    const environment =
+      token === null
+        ? null
+        : proxyEnvironment(token, resolved.value, guest?.network.gateway ?? '127.0.0.1');
     // Told once per name and address: the proxy refuses a name that came to resolve to an address
     // the scope authorizes directly, where the sandbox reaches it without the proxy.
     const told = new Set<string>();
@@ -479,6 +515,7 @@ export class SecuritySession implements EngagementWindow {
               limits: PASTA_LIMITS,
             },
             ...forward,
+            ...(guest === null ? {} : { loopback: 'proxy-only' as const }),
             signal: abandon.signal,
           },
         );
@@ -512,6 +549,7 @@ export class SecuritySession implements EngagementWindow {
         scopeSha256: applied.sha256,
         names: resolved.value.names,
         proxied: resolved.value.proxied,
+        ...(guest === null ? {} : { vm: guest.record }),
         warnings,
       });
       if (!started) return undo(evidence.failed() ?? 'the evidence log cannot be written');
@@ -524,12 +562,17 @@ export class SecuritySession implements EngagementWindow {
             tools,
             hostsDirectory: etc,
             ...(evidence === null ? {} : { hashOutputs: true }),
+            ...(guest === null
+              ? {}
+              : { vm: { command: guest.command, binds: guest.binds, devices: guest.devices } }),
           }),
           limits as LimitedStart,
         ),
         tools: options.launch.tools,
         jobs: true,
         prepare,
+        // A guest boots before its worker is ready.
+        ...(guest === null ? {} : { readyTimeoutMs: GUEST_READY_TIMEOUT_MS }),
         ...(evidence === null ? {} : { onJobFact: (fact: JobMessage) => jobFacts.handle(fact) }),
         ...(environment === null ? {} : { environment: environment.variables }),
         ...(options.signal === undefined ? {} : { signal: options.signal }),
@@ -555,6 +598,7 @@ export class SecuritySession implements EngagementWindow {
       evidenceFailure,
       root.process,
       jobFacts,
+      guest?.network ?? null,
     );
   }
 
@@ -616,6 +660,22 @@ export class SecuritySession implements EngagementWindow {
     stop = stopped();
     if (stop !== null) return stop;
     if (!resolved.ok) return { error: `nothing changed: ${resolved.error}` };
+    // The guest's addresses cannot change while it runs: a scope that reached into them would
+    // hold destinations the guest cannot reach, on its own link. A name cannot lead there today,
+    // since a private address needs a cidr of the file, there from the start, which the guest's
+    // networks were chosen to avoid; this holds should a scope come to change otherwise.
+    if (this.guestNetwork !== null) {
+      const { scope } = resolved.value;
+      const overlap = guestOverlap(this.guestNetwork, [
+        ...scope.allow.map(({ network }) => network),
+        ...scope.deny,
+      ]);
+      if (overlap !== null) {
+        const reason = `the refreshed scope holds ${overlap.address}/${overlap.prefix}, inside the virtual machine's own network`;
+        void this.closeNetwork(reason);
+        return { error: `the network was closed: ${reason}` };
+      }
+    }
     const etc = join(this.directory.path, 'etc');
     try {
       writeFileSync(join(etc, 'hosts.new'), hostsFile(resolved.value), { mode: 0o644 });
@@ -667,8 +727,9 @@ export class SecuritySession implements EngagementWindow {
     if (stop !== null) return stop;
     // NO_PROXY follows what is reached directly now, for the commands started from here on.
     if (this.token !== null) {
-      const previous = proxyEnvironment(this.token, this.resolved).warnings;
-      const next = proxyEnvironment(this.token, resolved.value);
+      const address = this.guestNetwork?.gateway ?? '127.0.0.1';
+      const previous = proxyEnvironment(this.token, this.resolved, address).warnings;
+      const next = proxyEnvironment(this.token, resolved.value, address);
       this.backend.setEnvironment(next.variables);
       for (const warning of next.warnings) {
         if (!previous.includes(warning)) this.options.notice('warning', warning);

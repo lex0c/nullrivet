@@ -153,23 +153,46 @@ export const CLOSED_TABLE = 'nullrivet_closed';
 // The sets of the rate limit, whose elements the traffic adds.
 export const DYNAMIC_SETS: readonly string[] = ['new4', 'new6'];
 
+export const LOOPBACK_TABLE = 'nullrivet_loopback';
+
 // The table that closes the network for good, apart from the scope's and before it: a packet must
-// pass every base chain of its hook, so this one stops all but the loopback's, whatever the
-// scope's table holds then or later. No installation of a scope touches it.
-export const CLOSED_RULESET = [
-  `table inet ${CLOSED_TABLE} {`,
-  '  chain output {',
-  '    type filter hook output priority -10; policy drop;',
-  '    oif "lo" accept',
-  ...REFUSE_RULES.map((rule) => `    ${rule}`),
-  '  }',
-  '  chain input {',
-  '    type filter hook input priority -10; policy drop;',
-  '    iif "lo" accept',
-  '  }',
-  '}',
-  '',
-].join('\n');
+// pass every base chain of its hook, so this one stops everything, whatever the scope's table
+// holds then or later. No installation of a scope touches it. The loopback is kept for the
+// sandbox's own processes, unless they are none, as when a virtual machine is the namespace's
+// only process: then nothing is kept, a listener that outlives the close included.
+export const closedRuleset = (keepLoopback: boolean): string =>
+  [
+    `table inet ${CLOSED_TABLE} {`,
+    '  chain output {',
+    '    type filter hook output priority -10; policy drop;',
+    ...(keepLoopback ? ['    oif "lo" accept'] : []),
+    ...REFUSE_RULES.map((rule) => `    ${rule}`),
+    '  }',
+    '  chain input {',
+    '    type filter hook input priority -10; policy drop;',
+    ...(keepLoopback ? ['    iif "lo" accept'] : []),
+    '  }',
+    '}',
+    '',
+  ].join('\n');
+
+// For a namespace whose only process of the sandbox is a virtual machine: the guest's user
+// networking reaches the namespace's loopback through the machine's address of its host, and must
+// reach nothing there but the proxy's port. Installed once, before any scope, at a priority
+// before the scope's, which no installation of a scope replaces: a new connection on the loopback
+// passes only to that port, where the scope's table holds it to 127.0.0.1 and to the window.
+export const loopbackRuleset = (proxyPort?: number): string =>
+  [
+    `table inet ${LOOPBACK_TABLE} {`,
+    '  chain output {',
+    '    type filter hook output priority -20; policy accept;',
+    '    oif "lo" ct state established,related accept',
+    ...(proxyPort === undefined ? [] : [`    oif "lo" tcp dport ${proxyPort} ct state new accept`]),
+    '    oif "lo" reject',
+    '  }',
+    '}',
+    '',
+  ].join('\n');
 
 // Elements a transaction takes at most, well within the host's default socket buffer.
 const ELEMENTS_PER_TRANSACTION = 1000;

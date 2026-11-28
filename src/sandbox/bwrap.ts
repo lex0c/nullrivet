@@ -366,6 +366,13 @@ export interface SecurityNetwork {
   hostsDirectory: string;
   // With an evidence log: the worker hashes what each command writes, for the log.
   hashOutputs?: boolean;
+  // A virtual machine runs in the worker's place: its command, the files bound read-only for it,
+  // and the devices it is given. The worker's files stay bound, for the guest to reach.
+  vm?: {
+    command: readonly string[];
+    binds: readonly { source: string; target: string }[];
+    devices: readonly string[];
+  };
 }
 
 // The `security` profile: the project through an overlay whose writes stay in memory and are
@@ -449,6 +456,12 @@ const launch = (
     ...project,
     ...worker.mounts.flatMap(({ source, target }) => ['--ro-bind', source, target]),
     ...options.readOnlyDirs.flatMap((path) => ['--ro-bind', path, path]),
+    ...(network?.vm === undefined
+      ? []
+      : [
+          ...network.vm.binds.flatMap(({ source, target }) => ['--ro-bind', source, target]),
+          ...network.vm.devices.flatMap((device) => ['--dev-bind', device, device]),
+        ]),
     '--seccomp',
     String(seccompFd),
     ...(network === undefined
@@ -459,7 +472,7 @@ const launch = (
     '--remount-ro',
     '/',
   ];
-  const command = [options.host.bwrap, ...args, '--', ...worker.command];
+  const command = [options.host.bwrap, ...args, '--', ...(network?.vm?.command ?? worker.command)];
   return {
     command: network === undefined ? command : inNewNamespaces(network.tools, command),
     env,

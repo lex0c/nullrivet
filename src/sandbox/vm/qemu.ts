@@ -63,6 +63,13 @@ export const guestNetwork = (networks: readonly Network[]): GuestNetwork | { err
   };
 };
 
+// The network of `networks`, a scope's, that holds an address of the guest's own networks, or null.
+// A guest's addresses cannot change while it runs: a scope refreshed onto them is refused.
+export const guestOverlap = (guest: GuestNetwork, networks: readonly Network[]): Network | null => {
+  const own = [parseNetwork(guest.network), parseNetwork(guest.network6)] as Network[];
+  return networks.find((network) => own.some((mine) => overlaps(network, mine))) ?? null;
+};
+
 // The status QEMU ends with when the guest's init fails: its debug-exit device turns the 1 the init
 // writes into (1 << 1) | 1.
 export const INIT_FAILED_STATUS = 3;

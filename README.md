@@ -103,6 +103,8 @@ it until end of file, so programs that start nullrivet without piping anything s
 | `-p, --permission <mode>` | `auto` (default) or `readonly`. |
 | `--sandbox <profile>` | Run the tools in a sandbox. Linux with Bubblewrap installed in a system directory; the profile is `inspect` (Bubblewrap 0.8 or later), `workspace` or `security` (0.10 or later). See [Sandbox](#sandbox). |
 | `--engagement <file>` | With `--sandbox security`, which requires it: the engagement file, which sets what the sandbox may reach and when. |
+| `--vm` | With `--sandbox security`: run the commands in a virtual machine with a kernel of its own, inside the same sandbox. Linux x86-64 with KVM, QEMU, and a kernel the user can read. |
+| `--vm-kernel <file>` | With `--vm`: the guest's kernel, whose modules must be installed; the host's own otherwise. |
 | `--apply` | With `--sandbox workspace` and a task: apply the task's changes to the project if the task finishes. Without it, they are shown and discarded. The interactive session uses `/apply` instead. |
 | `-C, --cwd <dir>` | Starting directory for relative paths, commands and `AGENTS.md` lookup. It does not restrict file access. |
 | `--json` | Emit agent events as NDJSON on stdout. |
@@ -305,8 +307,15 @@ outputs and the network's events in a hash-chained log, and gives the operator i
 the end; `--verify-evidence` checks it. The evidence directory holds the findings as produced, so it
 is sensitive.
 
+With `--vm`, the commands run in a KVM guest booted from the host's own kernel, QEMU taking the
+worker's place inside the same sandbox: its files, network, scope and limits stay those of the
+profile, and the guest's kernel stands between the commands and the host's. It suits samples and
+tools of unknown origin. On distributions that keep the kernel readable by root alone, as Ubuntu
+does, make it readable or name another with `--vm-kernel`.
+
 ```sh
 nullrivet --sandbox security --engagement acme.json "scan the web server in scope"
+nullrivet --sandbox security --engagement acme.json --vm "analyze the sample in ./samples"
 ```
 
 Details, the engagement file and what remains planned: [docs/SANDBOX.md](docs/SANDBOX.md).

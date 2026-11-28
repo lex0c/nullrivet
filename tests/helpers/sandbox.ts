@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { atLeast, OVERLAY_BWRAP_VERSION, sandboxHost } from '../../src/sandbox/bwrap.ts';
 import { prepareLimits } from '../../src/sandbox/limits.ts';
 import { networkTools } from '../../src/sandbox/network/namespace.ts';
+import { guestHost } from '../../src/sandbox/vm/launch.ts';
 
 // The sandbox tests need Bubblewrap and unprivileged user namespaces. They are skipped where
 // those are missing, unless NULLRIVET_TEST_REQUIRE_SANDBOX is set, as in CI, where a sandbox that
@@ -45,3 +46,9 @@ export const cgroupTestsRun =
   sandboxTestsRun &&
   ((await prepareLimits(process.env)).how === 'cgroup' ||
     process.env.NULLRIVET_TEST_REQUIRE_CGROUP === '1');
+
+// The virtual machine tests need the network tests' hosts, and KVM, QEMU and a readable kernel with
+// its modules. They are skipped where those are missing, unless NULLRIVET_TEST_REQUIRE_VM is set,
+// as in the CI job that provides them, where a guest that cannot start must fail them instead.
+export const vmTestsRun =
+  (networkTestsRun && !('error' in guestHost({}))) || process.env.NULLRIVET_TEST_REQUIRE_VM === '1';

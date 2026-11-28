@@ -56,6 +56,8 @@ export interface LimitedStart {
   // With the cgroup way only: what starts a helper in a scope of its own, named `unit`, with
   // `limits`, made with what the manager accepted.
   scope?: (unit: string, limits: Limits) => string[];
+  // With the cgroup way only: the memory the sandbox's scope holds, as read back from its cgroup.
+  memoryBytes?: number;
   // With the cgroup way only: the env program that starts the sandbox with its own environment
   // alone. systemd-run runs it with the variables that reach the manager, and its own, which the
   // sandbox's first process would otherwise keep, readable in /proc/1/environ.
@@ -206,7 +208,7 @@ const hostHasSwap = (): boolean =>
   Number(/^SwapTotal:\s+(\d+)/m.exec(readFileSync('/proc/meminfo', 'utf8'))?.[1] ?? 0) > 0;
 
 type ScopeStart =
-  | { prefix: string[]; warnings: string[]; optional: readonly Optional[] }
+  | { prefix: string[]; warnings: string[]; optional: readonly Optional[]; memoryBytes: number }
   | { problem: string };
 
 // Starts a scope of `systemdRun` with `limits` and reads them back from its cgroup: the command
@@ -271,7 +273,7 @@ const checked = (
     swap === 'absent' && hostHasSwap()
       ? ["the sandbox's swap is not limited: the kernel does not account swap to cgroups"]
       : [];
-  return { prefix, warnings, optional, parents };
+  return { prefix, warnings, optional, parents, memoryBytes: limits.memoryBytes };
 };
 
 // The tasks, processes and threads, whose real user is `uid`, as RLIMIT_NPROC counts them.
@@ -328,6 +330,7 @@ export const prepareLimits = async (
     return {
       how: 'cgroup',
       prefix: () => prefix,
+      memoryBytes: scope.memoryBytes,
       env,
       warnings: scope.warnings,
       scope: (unit, helperLimits) => scopeArgs(run, helperLimits, optional, unit),

@@ -3,9 +3,10 @@
 Status: phases 1 to 5 are implemented: the ToolBroker; the worker with the `inspect` profile,
 background jobs included; the `workspace` profile with its ChangeSet; the `security` profile, with
 the network of an engagement's scope within its window and the resource limits of every profile;
-the proxy that authorizes names; and the evidence log. The virtual machine backend (phase 6) is
-not. The document records the design, the facts checked on a Linux host
-while building it, and the decisions taken on it.
+the proxy that authorizes names; and the evidence log. Of the virtual machine backend (phase 6),
+the security profile's guest on Linux x86-64 is implemented, its adversarial review pending; the
+laboratory with raw sockets and macOS are not. The document records the design, the facts checked
+on a Linux host while building it, and the decisions taken on it.
 
 ## Purpose
 
@@ -49,7 +50,7 @@ tries to cross the boundary fails to, not when the sandbox starts without errors
 | Leftover processes | A command leaves a process that ignores SIGTERM | The PID namespace ends with the sandbox |
 | Secret exposure through the environment | Provider keys reach a command | Worker environment built from nothing; the host process keeps the keys |
 | A worker driven to misbehave | A command the model chose makes the worker send forged or oversized messages, or leave a link to a host file where the host reads | The host validates every message and stops the sandbox on a violation; files the worker wrote are opened without following links |
-| Kernel escape | A sample exploits the kernel | Out of scope for Bubblewrap; virtual machine backend |
+| Kernel escape | A sample exploits the kernel | Out of scope for Bubblewrap; the virtual machine (`--vm`), whose guest has a kernel of its own |
 
 ## Relation to the project principles
 
@@ -1164,6 +1165,132 @@ verifier reports without an outcome.
 Individual packets are not recorded: the log shows what the sandbox could reach, what the proxy
 decided, and what the commands did.
 
+## Virtual machine
+
+With `--vm`, the security profile's commands run in a KVM guest with a kernel of its own. QEMU runs
+in the worker's place inside the profile's Bubblewrap sandbox: the files the sandbox shows, its
+cgroup, its seccomp program and its network namespace, with the ruleset, pasta and the proxy, stay
+as they are, and the guest's kernel stands between the commands and the host's. The profile's
+properties were checked again with the guest, as each part below says, rather than taken as
+inherited.
+
+What it adds, and what it does not:
+
+- A command that exploits the kernel holds the guest's, not the host's.
+- The emulation of the devices runs in QEMU, confined by the sandbox and the profile's seccomp
+  program, with QEMU's own filter (`-sandbox on`) on top: exploiting a device takes that process,
+  under those restrictions.
+- KVM stays a direct surface of the host's kernel: a flaw in it need not pass through the other
+  layers. The guest has no VMX or SVM, so it runs no machine of its own and does not reach KVM's
+  nested interface.
+- QEMU's 9p server works with QEMU's rights: a compromised guest kernel can send it any request,
+  and it reaches what the sandbox shows QEMU, no more. Its containment was tested with a
+  privileged process of the guest making ordinary calls; requests a compromised kernel would forge
+  were not.
+- A compromised guest kernel also controls what the worker reports: results, the hashes of
+  outputs, the events of jobs, the paths of parts. The host treats them as untrusted, as it does
+  the worker's. The evidence log keeps the host's records and the copies it takes intact; it does
+  not attest that the guest reported the truth.
+
+### The guest
+
+- **Kernel.** The host's own, found by the release the host runs, beside its modules
+  (`/lib/modules/<release>/vmlinuz`, on Arch and Fedora) or in `/boot` (Debian, Ubuntu); or the
+  one `--vm-kernel` names. It is read once, and those bytes go to a private file of the session's
+  directory, which the guest boots and the evidence names by its SHA-256. Ubuntu keeps its kernels
+  readable by root alone: the start says to make it readable, or to name another.
+- **Modules.** The kernel's own, of its release: virtio on PCI, 9p over virtio, the serial ports,
+  the network device, with what `modules.dep` says they depend on; those built in are skipped.
+  zstd and gzip modules are decompressed on the host; xz ones are left to the kernel, and refused
+  before the start unless its configuration, beside the modules or in `/boot`, shows it can.
+- **Initramfs.** A cpio archive, the same for the same contents, written in the session's
+  directory: the init, the modules, and a root of mode 0755 with the identity files, the root links
+  and the files of `/etc` the profile binds, copied. Nothing of the host's `/etc` is exported.
+- **Init.** A static x86-64 program, PID 1 for the guest's life: the Bun runtime aborts without
+  `/proc` (checked, compiled or not), and the guest has no static program of its own. It mounts
+  `/proc`, `/sys` and `/dev`, the latter as Bubblewrap's (pseudo-terminals, shared memory, the
+  links to a process's descriptors); loads the modules; mounts the exports without set-user-ID
+  files or devices; waits for the protocol's ports and the network device by their names;
+  configures the network by netlink, each acknowledgement checked; and starts the worker with the
+  user's ids, its capability bounding set dropped, no supplementary group, no new privileges, its
+  standard input and output on `/dev/null`, its errors on the console. It reaps what is orphaned to
+  it while the worker runs, and powers the guest off once the worker ends, which ends what is left;
+  the host ends QEMU at its own timeout should the guest not end. A failure is written to the
+  console and ends QEMU with the status 3, through its debug-exit device, so that the host tells a
+  failed start from a guest that ended; the init never leaves PID 1, which would make the kernel
+  panic. Its code is `src/sandbox/vm/init.s`, embedded assembled, which a test assembles again and
+  compares; the session's plan is a table the host writes at a fixed address of it, with absolute
+  pointers.
+
+Checked in the guest: the worker's capability sets all zero, its ids the user's, the command's
+descriptors none of the protocol's, `/` not writable, orphans reaped with no zombie left, a failed
+start ending QEMU with 3.
+
+### Files
+
+Each directory the profile binds is a 9p export, mounted at the same path: `/usr`, the worker's
+files and the hosts directory read-only, at QEMU's (`readonly=on`) and in the guest; `/tmp`, the
+home and the project, its overlay in memory, writable and discarded at exit, as the sandbox's are.
+`/`, `/dev`, `/proc` and `/sys` are never exported: the sandbox binds `/dev/kvm` for QEMU. An
+export reaches what the sandbox has mounted under it, as the worker does: a project inside the home
+is seen through both, and a read-only bind inside a writable export stays read-only, the host's
+mount refusing the write. The hosts file is read without a cache, so that a refresh shows in the
+guest at once. The evidence's copies read the guest's `/tmp`, which is the sandbox's tmpfs, through
+QEMU's root, as they read the worker's.
+
+Checked as root in the guest: a write after remounting `/usr` read-write fails, QEMU's export being
+read-only; a device node cannot be made, nor a hard link across exports; `chown` is refused; a FIFO
+and a symbolic link are made as such, which the copies refuse. Writing to `/dev/stderr` when it is a
+socket fails as in Bubblewrap: a socket cannot be opened again through `/proc/self/fd`.
+
+### Transport
+
+A launcher's pipes are socket pairs, which cannot be opened again through `/proc/self/fd`. QEMU takes
+the protocol's descriptors 3 and 4 as two socket character devices, each a virtio-serial port of the
+guest, one per direction, and opens nothing for them, so that the profile's refusal of new Unix
+sockets holds. Their device takes the first slot of the PCI bus: devices given no slot take the
+lowest free one, and the kernel numbers virtio devices in slot order. The host's side of the
+protocol does not change. Checked: lines of 8 MiB both ways with backpressure, the end of each
+direction, QEMU killed during a call and seen gone within 50 ms. The ports are root's alone in the
+guest, and the worker is not dumpable: a command, with the worker's ids, opens neither.
+
+### Network
+
+QEMU's user networking turns the guest's connections into QEMU's sockets in the sandbox's
+namespace, which the ruleset filters. The scope, the window, the rate, revocation and the window's
+end hold on them. Checked: TCP, UDP and ICMP echo in scope, a port, an address and IPv6 out of it
+refused; an open connection cut at a revocation and at the window's end; five of thirty new
+connections at a rate of five. The guest reaches the proxy at its address of its host, which QEMU
+takes to the namespace's loopback.
+
+- **Loopback.** With a guest, QEMU is the namespace's only process of the sandbox. A table installed
+  before the first scope, which no installation replaces, refuses everything on the loopback but
+  new connections to the proxy's port, which the scope's table holds to 127.0.0.1 and to the
+  window, and their replies; once the network is closed, nothing of the loopback passes. Checked: a
+  service listening on the namespace's loopback is not reached; after the close, neither is a
+  listener on the proxy's port.
+- **QEMU's DNS.** Its virtual resolver answers inside QEMU, which no rule can block. QEMU's view of
+  the sandbox has no `resolv.conf`, so it neither answers nor forwards (checked); given one, the
+  queries it forwards are QEMU's sockets, which the ruleset refuses (checked).
+- **Its networks.** Chosen at the start among private ones that hold no address of the scope, since
+  such an address would be on the guest's own link. A refresh that reached into them would close
+  the network; names cannot lead there today, a private address needing a cidr of the file, there
+  from the start.
+- **No raw packets reach the targets:** user networking relays connections, as pasta does.
+
+### Resources
+
+The guest's memory is the scope's limit less 512 MiB for QEMU, from 256 MiB to 4 GiB, with up to
+four processors; QEMU's memory, the guest's included, counts in the scope. The guest's processes
+are not tasks of the host: they are bounded by its memory and processors. Measured: the worker ready
+about 1.3 s after QEMU starts; QEMU's resident memory about 215 MiB with a guest of 512 MiB.
+
+### Requirements
+
+Linux x86-64: the machine is q35, and ARM64's `virt` is not done. `/dev/kvm` readable and writable
+by the user; `qemu-system-x86_64` from a system directory, owned by root, taken as Bubblewrap is;
+the kernel readable, with its modules. Each missing one stops the start, with what to do.
+
 ## Resources
 
 The sandbox's resources are limited, for every profile, so that a command that exhausts them, by
@@ -1277,6 +1404,8 @@ hard alike.
   `/run/current-system/sw/bin`, and only when the file and every directory above it are owned by
   root and writable by no one else (a sticky directory excepted), and it is run by its real
   path.
+- **The virtual machine** (`--vm`): Linux x86-64 with KVM and QEMU, as given under Virtual
+  machine.
 - **macOS:** no Bubblewrap. The profiles stop with that reason until the virtual machine backend
   (Lima, or Apple's container on macOS 26 and later). `sandbox-exec` is deprecated and not used.
 - **Docker** is not a backend in this plan: it needs a daemon and an image, and the same namespace
@@ -1340,7 +1469,12 @@ hard alike.
    network's entries; the broker's record of each call, its start written before it is
    dispatched, and the outputs' hashes in the worker; the shared output directory and the copies;
    `--verify-evidence`.
-6. **Virtual machine backend** for macOS and for raw-socket laboratories.
+6. **Virtual machine backend.** 6a, the security profile's guest on Linux x86-64, implemented in the
+   order three reviews of its plan set, after experiments whose results changed the design: the
+   archive, the kernel and its modules, the manifest of exports and QEMU's command line; the
+   init; the launch, the loopback's table and the session; the command line's `--vm`. Its
+   adversarial review is pending. 6b, a laboratory with raw sockets on an isolated virtual network,
+   and 6c, macOS, are not done.
 
 Each phase ends with tests that try to cross the boundary: read `~/.ssh` and the host's processes
 through `/proc`, through every file tool and through `bash`; write outside the project; apply a
