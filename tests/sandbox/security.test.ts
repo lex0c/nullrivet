@@ -322,11 +322,12 @@ describe.if(linux && runs)('a sandbox of the security profile', () => {
     // git runs fixed subcommands with the repository's programs disabled: it reads.
     expect(await run('git', { subcommand: 'status' })).not.toContain('engagement.window');
     expect(await run('read_file', { path: join(project, 'notes.txt') })).toContain('project notes');
-    expect(await run('bash_jobs', {})).not.toContain('running');
-    const deadline = Date.now() + 5_000;
+    // The end is told once the jobs are stopped, which a slow host can take a while for.
+    const deadline = Date.now() + 15_000;
     while (!notices.some((notice) => notice.includes('ended')) && Date.now() < deadline) {
       await Bun.sleep(50);
     }
+    expect(await run('bash_jobs', {})).not.toContain('running');
     expect(notices.join('\n')).toContain(`info: The engagement window ended at ${window.until}`);
     // What the operator and the model read of the scope says none of it is in force.
     expect(session.scope().at(-1)).toBe(
@@ -1055,6 +1056,34 @@ describe.if(linux && runs)('the evidence log of a security sandbox', () => {
       `it is inside ${project}, which the sandbox sees`,
     );
   }, 30_000);
+
+  test('cancels the command running when the log fails during it, and runs nothing more', async () => {
+    const ok = await listening();
+    let answer = ['198.51.100.1'];
+    const { session, run, notices } = await start(
+      {
+        scope: { allow: [{ host: 'svc.test', ports: [ok] }] },
+        evidence: { dir: evidenceDir() },
+      },
+      { resolve: async () => answer, evidenceMaxBytes: 16_000 },
+    );
+    const running = run('bash', { command: 'sleep 30; echo finished' });
+    await Bun.sleep(1_000);
+    // A refresh to many addresses: its entry, with the scope in force, passes the log's limit.
+    answer = [0, 1, 2].flatMap((net) =>
+      Array.from(
+        { length: 250 },
+        (_, host) => `${['198.51.100', '203.0.113', '192.0.2'][net]}.${host + 1}`,
+      ),
+    );
+    await session.refresh();
+    const began = Date.now();
+    expect(await running).not.toContain('finished');
+    expect(Date.now() - began).toBeLessThan(10_000);
+    expect(session.closed()).toBe('the evidence log cannot be written');
+    expect(await run('bash', { command: 'echo after' })).toStartWith('error [evidence.failed]');
+    expect(notices.join('\n')).toContain('The evidence log cannot be written');
+  }, 60_000);
 
   test('closes the network and refuses commands once the log cannot be written', async () => {
     const ok = await listening();

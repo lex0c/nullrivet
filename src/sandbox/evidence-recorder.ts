@@ -85,6 +85,11 @@ export class EvidenceRecorder {
     return this.store.log.failed();
   }
 
+  // The evidence directory failed beside the log, as a copy that could not be written there.
+  fail(reason: string): void {
+    this.store.log.markFailed(reason);
+  }
+
   // The session's start, written and synced before its worker may run anything.
   sessionStarted(fields: Record<string, unknown>): boolean {
     this.began = this.store.log.appendCritical({ type: 'session.started', ...fields });
@@ -273,6 +278,7 @@ export const callRecorder = (
   // Told when an output could not be preserved at all.
   failed: (why: string) => void,
 ): CallRecorder => ({
+  failed: () => evidence.failed(),
   nextCallId: () => evidence.nextCallId(),
   started: (callId, call, details) =>
     evidence.toolStarted(callId, {

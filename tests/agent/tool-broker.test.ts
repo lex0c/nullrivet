@@ -337,10 +337,14 @@ describe('the window of an engagement', () => {
 
 describe('the record of each call, when the engagement keeps an evidence log', () => {
   // A recorder that keeps what it is told, and whose writing of a start can fail or take time.
-  const recorder = (start: (callId: string) => boolean = () => true) => {
+  const recorder = (
+    start: (callId: string) => boolean = () => true,
+    failure: () => string | null = () => null,
+  ) => {
     const entries: string[] = [];
     let ids = 0;
     const record: CallRecorder = {
+      failed: failure,
       nextCallId: () => {
         ids += 1;
         return `c${ids}`;
@@ -419,6 +423,27 @@ describe('the record of each call, when the engagement keeps an evidence log', (
       'started c1 bash by main',
       'refused c1 bash after its start: error [engagement.window]: bash was not executed: the engagement window ended at 18:00',
     ]);
+  });
+
+  test('refuses every call, reading ones included, once the log cannot be written', async () => {
+    const { entries, record } = recorder(
+      () => true,
+      () => 'no space left on device',
+    );
+    const { backend, executed } = counting();
+    const ctx = context([bash, ok('read_file', 'read')], {
+      backend,
+      engagement: { closed: () => null, ended: new AbortController().signal, recorder: record },
+    });
+    for (const name of ['bash', 'read_file']) {
+      const result = await executeToolCall({ id: 'p', name, input: {} }, ctx);
+      expect(result.content).toStartWith(
+        `error [evidence.failed]: ${name} was not executed: the evidence log cannot be written: no space left on device`,
+      );
+    }
+    expect(executed()).toBe(0);
+    expect(calls).not.toContain('read_file');
+    expect(entries).toHaveLength(2);
   });
 
   test('records the refusals of the broker, each with an id of its own', async () => {

@@ -247,6 +247,8 @@ export class SecuritySession implements EngagementWindow {
   // Why the evidence log cannot be written, once it cannot: the session goes on unrecorded no more.
   private evidenceFailure: string | null = null;
   private evidenceEnd: { level: 'info' | 'warning'; text: string } | null = null;
+  // Aborted once the evidence log cannot be written: the commands running are cancelled.
+  private readonly unrecorded = new AbortController();
   private readonly ticker: ReturnType<typeof setInterval>;
 
   private constructor(
@@ -270,7 +272,8 @@ export class SecuritySession implements EngagementWindow {
     private readonly sandboxProcess: SandboxProcess | null,
     jobFacts: { handle: (fact: JobMessage) => void },
   ) {
-    this.ended = this.ending.signal;
+    // The commands running end with the window, or with the evidence log once it cannot be written.
+    this.ended = AbortSignal.any([this.ending.signal, this.unrecorded.signal]);
     evidenceFailure.handle = (reason) => this.evidenceFailed(reason);
     if (evidence !== null && sandboxProcess !== null) {
       const secrets = [
@@ -572,6 +575,7 @@ export class SecuritySession implements EngagementWindow {
 
   // Why commands cannot run now; null while the window is open.
   closed(): string | null {
+    if (this.evidenceFailure !== null) return 'the evidence log cannot be written';
     const window = this.engagement.window;
     if (this.ending.signal.aborted && window !== undefined) {
       return `the engagement window ended at ${iso(window.until)}`;
@@ -752,10 +756,12 @@ export class SecuritySession implements EngagementWindow {
   }
 
   // The evidence log cannot be written: the session stops by ways that do not depend on it, the
-  // network closed, commands refused and the jobs stopped, and the operator is told.
+  // network closed, the commands running cancelled, every call refused and the jobs stopped, and
+  // the operator is told.
   private evidenceFailed(reason: string): void {
     if (this.evidenceFailure !== null) return;
     this.evidenceFailure = reason;
+    this.unrecorded.abort();
     void this.closeNetwork('the evidence log cannot be written');
     void this.backend
       .stopJobs()
@@ -788,13 +794,16 @@ export class SecuritySession implements EngagementWindow {
       return { stream: output.stream, preservation: 'omitted', omitted: why, matchesSaved: null };
     }
     try {
-      const { record, problem } = await preserveOutput(
+      const { record, problem, fatal } = await preserveOutput(
         output,
         owner,
         { kind, rootFd },
         { store: evidence.store, partBytes: outputFiles.partBytes, budget: this.copiesBudget },
       );
       if (problem !== null) this.options.notice('warning', `evidence: ${problem}`);
+      // The evidence directory could not take a copy: the evidence log fails, and with it the
+      // session, as for a write of the log itself.
+      if (fatal !== null) evidence.fail(`an output could not be preserved: ${fatal}`);
       return record;
     } finally {
       closeSync(rootFd);

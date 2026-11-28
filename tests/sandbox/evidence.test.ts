@@ -20,7 +20,7 @@ import {
   sha256,
   ZERO_HASH,
 } from '../../src/sandbox/evidence.ts';
-import { companionOf, verifyEvidence } from '../../src/sandbox/evidence-verify.ts';
+import { companionOf, MAX_ENTRY_BYTES, verifyEvidence } from '../../src/sandbox/evidence-verify.ts';
 import {
   hostSecrets,
   redactExact,
@@ -234,8 +234,13 @@ describe('the verification of an evidence log', () => {
           {
             stream: 'stdout',
             preservation: 'parts',
+            receivedBytes: 10,
+            savedBytes: 10,
+            savedSha256: sha256('the output'),
             copies: [output],
+            copiedBytes: 10,
             copiedSha256: sha256('the output'),
+            complete: true,
             matchesSaved: true,
           },
         ],
@@ -323,8 +328,8 @@ describe('the verification of an evidence log', () => {
         [
           { type: 'tool.started', callId: 'c1' },
           { type: 'job.started', jobId: 'j1', callId: 'c1' },
-          { type: 'job.finished', jobId: 'j1', log: {} },
-          { type: 'job.finished', jobId: 'j1', log: {} },
+          { type: 'job.finished', jobId: 'j1', log: { preservation: 'omitted', omitted: 'none' } },
+          { type: 'job.finished', jobId: 'j1', log: { preservation: 'omitted', omitted: 'none' } },
         ],
         'entry 5 ends job j1, which was not started, or ended already',
       ],
@@ -343,6 +348,57 @@ describe('the verification of an evidence log', () => {
         reasons: [reason],
       });
     }
+  });
+
+  test("works an output's record out again, and refuses one its own fields belie", () => {
+    const saved = { name: 'c1-stdout.1.txt', bytes: 5, sha256: sha256('saved') };
+    const claims = (fields: Record<string, unknown>) => {
+      const built = session([
+        { type: 'tool.started', callId: 'c1' },
+        {
+          type: 'tool.finished',
+          callId: 'c1',
+          outputs: [
+            {
+              preservation: 'parts',
+              receivedBytes: 5,
+              savedBytes: 5,
+              savedSha256: sha256('saved'),
+              copies: [saved],
+              copiedBytes: 5,
+              copiedSha256: sha256('saved'),
+              complete: true,
+              matchesSaved: true,
+              ...fields,
+            },
+          ],
+        },
+        { type: 'session.ended' },
+      ]);
+      copy(built.companion, 'c1-stdout.1.txt', 'saved');
+      return verifyEvidence(built.path);
+    };
+    expect(claims({}).status).toBe('complete');
+    expect(claims({ savedSha256: sha256('other') }).reasons).toEqual([
+      "entry 3: an output's record says of its copy what its hashes do not",
+    ]);
+    expect(claims({ receivedBytes: 9 }).reasons).toEqual([
+      "entry 3: an output's record says of its saving what its counts do not",
+    ]);
+    expect(claims({ copiedBytes: 4 }).reasons).toEqual([
+      'entry 3: its copies together are not what was copied',
+    ]);
+    expect(claims({ preservation: 'inline' }).reasons).toEqual([
+      "entry 3: an output's record holds copies of an output it says the result holds whole",
+    ]);
+  });
+
+  test('takes an entry longer than its limit as corrupted, without holding it', () => {
+    const { path } = session([]);
+    writeFileSync(path, `${readFileSync(path, 'utf8')}${'x'.repeat(MAX_ENTRY_BYTES + 1)}`);
+    expect(verifyEvidence(path).reasons).toEqual([
+      `entry 2 is longer than ${MAX_ENTRY_BYTES} bytes`,
+    ]);
   });
 
   test('reads a copy only beside the log, by name, and never through a link', () => {
@@ -375,24 +431,49 @@ describe('the verification of an evidence log', () => {
   });
 
   test('finds outputs not wholly preserved, and an engagement copy that is not the one read', () => {
+    const part = (name: string, content: string) => ({
+      name,
+      bytes: Buffer.byteLength(content),
+      sha256: sha256(content),
+    });
     const partial = session([
       { type: 'tool.started', callId: 'c1' },
       {
         type: 'tool.finished',
         callId: 'c1',
         outputs: [
-          { preservation: 'parts', matchesSaved: false },
-          { preservation: 'omitted', omitted: 'the copies reached their limit of 2 GiB' },
+          // Copied, but not what the worker saved.
           {
             preservation: 'parts',
-            complete: false,
+            receivedBytes: 5,
+            savedBytes: 5,
+            savedSha256: sha256('saved'),
+            copies: [part('c1-stdout.1.txt', 'other')],
+            copiedBytes: 5,
+            copiedSha256: sha256('other'),
+            complete: true,
+            matchesSaved: false,
+          },
+          { preservation: 'omitted', omitted: 'the copies reached their limit of 2 GiB' },
+          // Saved up to the limit of an output, and copied as saved.
+          {
+            preservation: 'parts',
+            receivedBytes: 10,
+            savedBytes: 4,
+            savedSha256: sha256('part'),
             stopReason: 'the 64MB limit per output was reached',
+            copies: [part('c1-stderr.1.txt', 'part')],
+            copiedBytes: 4,
+            copiedSha256: sha256('part'),
+            complete: false,
             matchesSaved: true,
           },
         ],
       },
       { type: 'session.ended' },
     ]);
+    copy(partial.companion, 'c1-stdout.1.txt', 'other');
+    copy(partial.companion, 'c1-stderr.1.txt', 'part');
     expect(verifyEvidence(partial.path)).toMatchObject({
       status: 'incomplete',
       reasons: [

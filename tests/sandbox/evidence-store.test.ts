@@ -1,21 +1,28 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import {
   chmodSync,
+  closeSync,
+  constants,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
   statSync,
   symlinkSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sha256 } from '../../src/sandbox/evidence.ts';
+import { preserveOutput, type ReportedOutput } from '../../src/sandbox/evidence-copy.ts';
 import { EvidenceRecorder } from '../../src/sandbox/evidence-recorder.ts';
 import { type EvidenceStore, openEvidenceStore } from '../../src/sandbox/evidence-store.ts';
 
+// Descriptor-relative paths go through /proc/self/fd, which Linux has.
+const linux = process.platform === 'linux';
 const dirs: string[] = [];
 const stores: EvidenceStore[] = [];
 afterEach(() => {
@@ -40,7 +47,7 @@ const open = (dir: string, forbidden: string[] = []) => {
   return store;
 };
 
-describe('the evidence directory', () => {
+describe.if(linux)('the evidence directory', () => {
   test('is made private, with the engagement file kept and the log beside it', () => {
     const base = scratch();
     const store = open(join(base, 'evidence'));
@@ -88,7 +95,7 @@ describe('the evidence directory', () => {
   });
 });
 
-describe('the end of a session that never started', () => {
+describe.if(linux)('the end of a session that never started', () => {
   test('writes nothing: an end alone would read as a corrupted log', async () => {
     const store = open(join(scratch(), 'evidence'));
     if ('error' in store) throw new Error(store.error);
@@ -99,7 +106,7 @@ describe('the end of a session that never started', () => {
   });
 });
 
-describe("the record of the proxy's decisions", () => {
+describe.if(linux)("the record of the proxy's decisions", () => {
   test('keeps twenty refusals a second one by one, and counts the rest, written at the end too', async () => {
     const base = scratch();
     const store = open(join(base, 'evidence'));
@@ -121,5 +128,63 @@ describe("the record of the proxy's decisions", () => {
     expect(types.find((entry) => entry.type === 'proxy.refused.omitted')?.count).toBe(5);
     expect(types.filter((entry) => entry.type === 'proxy.authorized')).toHaveLength(1);
     expect(types.at(-1)?.type).toBe('session.ended');
+  });
+});
+
+describe.if(linux)('the copies of outputs', () => {
+  // A root as the sandbox's would be, with a part in its /tmp as the output code names it.
+  const sandboxRoot = (parts: Record<string, string>) => {
+    const root = scratch();
+    mkdirSync(join(root, 'tmp', 'nullrivet-AbCdEf'), { recursive: true });
+    for (const [name, content] of Object.entries(parts)) {
+      writeFileSync(join(root, 'tmp', 'nullrivet-AbCdEf', name), content);
+    }
+    return { root, fd: openSync(root, constants.O_RDONLY | constants.O_DIRECTORY) };
+  };
+  const reported = (name: string, content: string): ReportedOutput => ({
+    stream: 'stdout',
+    receivedBytes: content.length,
+    receivedSha256: sha256(content),
+    savedBytes: content.length,
+    savedSha256: sha256(content),
+    parts: [`/tmp/nullrivet-AbCdEf/${name}`],
+  });
+
+  test('share the copies limit at once: two that would pass it together do not both pass', async () => {
+    const six = 'x'.repeat(6 * 1024);
+    const { fd } = sandboxRoot({ '1-bash-stdout.001.txt': six, '2-bash-stdout.001.txt': six });
+    const store = open(join(scratch(), 'evidence'));
+    if ('error' in store) throw new Error(store.error);
+    const context = { store, partBytes: 10 * 1024 * 1024, budget: { left: 8 * 1024 } };
+    const place = { kind: 'calls' as const, rootFd: fd };
+    const [first, second] = await Promise.all([
+      preserveOutput(reported('1-bash-stdout.001.txt', six), 'c1', place, context),
+      preserveOutput(reported('2-bash-stdout.001.txt', six), 'c2', place, context),
+    ]);
+    const kinds = [first.record.preservation, second.record.preservation].sort();
+    expect(kinds).toEqual(['omitted', 'parts']);
+    expect(context.budget.left).toBe(2 * 1024);
+    expect([first.fatal, second.fatal]).toEqual([null, null]);
+    closeSync(fd);
+  });
+
+  test('fail the evidence when the evidence directory cannot take a copy', async () => {
+    const { fd } = sandboxRoot({ '1-bash-stdout.001.txt': 'output' });
+    const store = open(join(scratch(), 'evidence'));
+    if ('error' in store) throw new Error(store.error);
+    // The copy's file can be made but not written, as on a full disk.
+    const unwritable = { ...store, createFile: () => openSync('/dev/null', constants.O_RDONLY) };
+    const { record, problem, fatal } = await preserveOutput(
+      reported('1-bash-stdout.001.txt', 'output'),
+      'c1',
+      { kind: 'calls', rootFd: fd },
+      { store: unwritable, partBytes: 1024, budget: { left: 1024 } },
+    );
+    expect(record).toMatchObject({ preservation: 'omitted', matchesSaved: null });
+    expect(problem).toBeNull();
+    expect(fatal).toStartWith(
+      'the copy of /tmp/nullrivet-AbCdEf/1-bash-stdout.001.txt cannot be written',
+    );
+    closeSync(fd);
   });
 });

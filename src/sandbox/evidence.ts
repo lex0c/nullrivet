@@ -107,6 +107,11 @@ export class EvidenceLog {
     while (this.pending.size > 0) await Promise.all(this.pending);
   }
 
+  // Fails the log for what failed beside it, as a copy that could not be written: once.
+  markFailed(reason: string): void {
+    if (this.failure === null && !this.closed) this.fail(reason);
+  }
+
   // Writes nothing more. The descriptor stays the caller's.
   close(): void {
     this.closed = true;

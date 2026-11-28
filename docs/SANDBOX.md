@@ -1111,13 +1111,16 @@ process (`/proc/<pid>/root`, that process checked by its start to be the sandbox
   (`matchesSaved`), a truncated output included; null only when nothing was copied.
 
 A command can rewrite or replace a part before it is copied: the copy is then refused, or not what
-the worker saved, which the record says and the operator is told, never taken as preserved. Tested:
-a job that replaced each part with a link left the output recorded as not preserved. The copies of
-a session take 2 GiB at most; past them an output is recorded as not preserved. At the end of the
-session, while the sandbox still runs, the jobs are stopped, so that their end and their log are
-recorded, and the copies under way are waited for, ten seconds at most; those that did not end are
-recorded. The final hash is shown once the session is closed, on the standard error of an
-interactive one, whose terminal is restored by then.
+the worker saved, which the record says and the operator is told, never taken as preserved. A part
+the copies' limit leaves out is recorded as not preserved; one the evidence directory cannot take, a
+write or a sync failing there, fails the evidence log. The limit is reserved before a copy starts,
+so that copies under way at once do not pass it together. Tested: a job that replaced each part with
+a link left the output recorded as not preserved. The copies of a session take 2 GiB at most; past
+them an output is recorded as not preserved. At the end of the session, while the sandbox still
+runs, the jobs are stopped, so that their end and their log are recorded, and the copies under way
+are waited for, ten seconds at most; those that did not end are recorded. The final hash is shown
+once the session is closed, on the standard error of an interactive one, whose terminal is restored
+by then.
 
 **Credentials.** In the arguments, the values of the secrets the host holds go by exact match, of
 eight characters or more: the providers' keys, the proxy's credential, and the password of the
@@ -1129,23 +1132,28 @@ the host's secrets go by exact match only, and the copies are kept as produced, 
 findings: the evidence directory is to be handled as sensitive.
 
 **When it cannot be written.** A write is retried until the whole line is written; the sequence and
-the hash advance only after. On a failure, of a write, a sync, or the log's limit of 1 GiB, the log
-writes nothing more and throws nothing, and the session, told once, stops by ways that do not depend
-on it: the network closes, every call is refused (`evidence.failed`), since its start cannot be
-written, the jobs stop, and the operator is told, with the hash of the last line written. A session
-with an evidence log does not go on unrecorded.
+the hash advance only after. On a failure, of a write, a sync, or the log's limit of 1 GiB, or of
+the evidence directory taking a copy, a write or a sync of it, the log writes nothing more and
+throws nothing, and the session, told once, stops by ways that do not depend on it: the network
+closes, the commands running are cancelled, every call is refused (`evidence.failed`), checked
+before anything else, the jobs stop, the window's state gives the failure as why commands cannot
+run, and the operator is told, with the hash of the last line written. A session with an evidence
+log does not go on unrecorded.
 
-**Checking it.** `nullrivet --verify-evidence <file> [--expected-hash <sha256>]` works out the chain
-and the sequence again, checks the transitions (an outcome without a start, an id used twice, a job
-ended twice, an entry after the end, a job of an unknown call), the copy of the engagement file, and
-each copy named, looked for only in the directory beside the log, by a name of the form the host
-gives, never through a link. It exits 0 when the session is complete; 1 when it is corrupted, or its
-final hash is not the one expected, naming the first entry that is; and 4 when it is consistent but
-incomplete, with a line cut short, no end, operations without an outcome, or outputs not saved or
-preserved whole, 4 when it is consistent but incomplete, apart from the CLI's other codes, so that a
-script tells it from a mistyped option. Without `--expected-hash`, it says that only the consistency
-was checked. Tested: with the host killed during a command, the log keeps the call, which the
-verifier reports without an outcome.
+**Checking it.** `nullrivet --verify-evidence <file> [--expected-hash <sha256>]` reads the log a
+line at a time, an entry past 64 MiB taken as corrupted rather than held, works out the chain and
+the sequence again, checks the transitions (an outcome without a start, an id used twice, a job
+ended twice, an entry after the end, a job of an unknown call), the copy of the engagement file,
+each output's record worked out again from what it says it copied (whether the copy is what the
+worker saved, whether all that came was saved, which form of preservation it has), and each copy
+named, looked for only in the directory beside the log, by a name of the form the host gives, never
+through a link. It exits 0 when the session is complete; 1 when it is corrupted, or its final hash
+is not the one expected, naming the first entry that is; and 4 when it is consistent but incomplete,
+with a line cut short, no end, operations without an outcome, or outputs not saved or preserved
+whole, 4 when it is consistent but incomplete, apart from the CLI's other codes, so that a script
+tells it from a mistyped option. Without `--expected-hash`, it says that only the consistency was
+checked. Tested: with the host killed during a command, the log keeps the call, which the verifier
+reports without an outcome.
 
 Individual packets are not recorded: the log shows what the sandbox could reach, what the proxy
 decided, and what the commands did.

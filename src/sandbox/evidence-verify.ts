@@ -1,4 +1,4 @@
-import { closeSync, constants, fstatSync, openSync, readFileSync, readSync } from 'node:fs';
+import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
 import { join } from 'node:path';
 import { errorMessage } from '../errors.ts';
 import { sha256, ZERO_HASH } from './evidence.ts';
@@ -110,6 +110,86 @@ const outputsOf = (entry: Entry): Record<string, unknown>[] => {
     : [];
 };
 
+// The longest entry read: past it the log is taken as corrupted, not held in memory.
+export const MAX_ENTRY_BYTES = 64 * 1024 * 1024;
+const TOO_LONG = Buffer.alloc(0);
+
+// The lines of a file, each with its line feed, read a chunk at a time: the last without one when
+// the file ends inside it, and TOO_LONG for a line past the limit, after which nothing is read.
+const readLines = (path: string): Iterable<Buffer> & { close(): void } => {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+  if (!fstatSync(fd).isFile()) {
+    closeSync(fd);
+    throw new Corrupted(`${path} is not a regular file`);
+  }
+  let open = true;
+  const close = (): void => {
+    if (open) closeSync(fd);
+    open = false;
+  };
+  function* lines(): Generator<Buffer> {
+    const chunk = Buffer.alloc(1024 * 1024);
+    let pending: Buffer[] = [];
+    let pendingBytes = 0;
+    for (let read = readSync(fd, chunk); read > 0; read = readSync(fd, chunk)) {
+      let rest = chunk.subarray(0, read);
+      for (let end = rest.indexOf(0x0a); end !== -1; end = rest.indexOf(0x0a)) {
+        yield Buffer.concat([...pending, rest.subarray(0, end + 1)]);
+        pending = [];
+        pendingBytes = 0;
+        rest = rest.subarray(end + 1);
+      }
+      if (rest.length > 0) {
+        pending.push(Buffer.from(rest));
+        pendingBytes += rest.length;
+      }
+      if (pendingBytes > MAX_ENTRY_BYTES) {
+        yield TOO_LONG;
+        return;
+      }
+    }
+    if (pendingBytes > 0) yield Buffer.concat(pending);
+  }
+  return { [Symbol.iterator]: () => lines()[Symbol.iterator](), close };
+};
+
+// Why an output's record does not hold together, or null: its fields are worked out again from
+// what it says it copied, not taken from it.
+const incoherence = (
+  output: Record<string, unknown>,
+  copied: { bytes: number; sha256: string } | null,
+): string | null => {
+  const { preservation, receivedBytes, savedBytes, savedSha256, stopReason } = output;
+  switch (preservation) {
+    case 'inline':
+      if (copied !== null) return 'holds copies of an output it says the result holds whole';
+      if (output.complete !== true) return 'says an output the result holds whole is not complete';
+      return null;
+    case 'omitted':
+      if (copied !== null) return 'holds copies of an output it says was not preserved';
+      if (typeof output.omitted !== 'string') return 'does not say why an output was not preserved';
+      if (output.matchesSaved !== null && output.matchesSaved !== undefined) {
+        return 'compares a copy it says was not made';
+      }
+      return null;
+    case 'parts': {
+      if (copied === null) return 'says an output was copied without its copies';
+      const matches =
+        typeof savedSha256 === 'string'
+          ? copied.bytes === savedBytes && copied.sha256 === savedSha256
+          : null;
+      if (output.matchesSaved !== matches) return 'says of its copy what its hashes do not';
+      if (typeof receivedBytes === 'number' && typeof savedBytes === 'number') {
+        const complete = receivedBytes === savedBytes && stopReason === undefined;
+        if (output.complete !== complete) return 'says of its saving what its counts do not';
+      }
+      return null;
+    }
+    default:
+      return 'has no form of preservation the host writes';
+  }
+};
+
 export const verifyEvidence = (logPath: string, expectedHash?: string): Verdict => {
   const dir = companionOf(logPath);
   const reasons: string[] = [];
@@ -122,25 +202,23 @@ export const verifyEvidence = (logPath: string, expectedHash?: string): Verdict 
     reasons,
     anchored: expectedHash !== undefined,
   });
+  let lines: ReturnType<typeof readLines> | null = null;
   try {
     if (!logPath.endsWith('.jsonl')) corrupt(`${logPath} is not an evidence log (.jsonl)`);
-    const text = readFileSync(logPath);
+    lines = readLines(logPath);
     const started = new Set<string>();
     const ended = new Set<string>();
     const jobsStarted = new Set<string>();
     const jobsEnded = new Set<string>();
     let sessionEnded = false;
     let partial = false;
-    let at = 0;
-    while (at < text.length) {
-      const end = text.indexOf(0x0a, at);
-      if (end === -1) {
+    for (const line of lines) {
+      const seq = entries + 1;
+      if (line === TOO_LONG) corrupt(`entry ${seq} is longer than ${MAX_ENTRY_BYTES} bytes`);
+      if (line[line.length - 1] !== 0x0a) {
         partial = true;
         break;
       }
-      const line = text.subarray(at, end + 1);
-      at = end + 1;
-      const seq = entries + 1;
       let entry: Entry;
       try {
         entry = JSON.parse(line.toString('utf8')) as Entry;
@@ -218,29 +296,35 @@ export const verifyEvidence = (logPath: string, expectedHash?: string): Verdict 
       }
       for (const output of outputsOf(entry)) {
         const copies = output.copies;
+        let copied: { bytes: number; sha256: string } | null = null;
         if (copies !== undefined) {
           if (!Array.isArray(copies) || !copies.every(isCopy)) {
             corrupt(`entry ${seq} records its copies in a form the host does not write`);
           }
           const whole = createSha();
+          let bytes = 0;
           for (const copy of copies as Copy[]) {
             const found = readCopy(dir, copy.name, whole);
             if (typeof found === 'string') corrupt(`entry ${seq}: ${found}`);
             else if (found.sha256 !== copy.sha256 || found.bytes !== copy.bytes) {
               corrupt(`entry ${seq}: the copy ${copy.name} is not what was copied`);
             }
+            bytes += copy.bytes;
           }
-          if (output.copiedSha256 !== undefined && whole.digest('hex') !== output.copiedSha256) {
+          copied = { bytes, sha256: whole.digest('hex') };
+          if (output.copiedSha256 !== copied.sha256 || output.copiedBytes !== copied.bytes) {
             corrupt(`entry ${seq}: its copies together are not what was copied`);
           }
         }
+        const incoherent = incoherence(output, copied);
+        if (incoherent !== null) corrupt(`entry ${seq}: an output's record ${incoherent}`);
         if (output.matchesSaved === false) {
           reasons.push(
             `entry ${seq}: a copy differs from what the worker saved, which a command could have rewritten before it was copied`,
           );
         }
-        if (output.preservation === 'omitted' && typeof output.omitted === 'string') {
-          reasons.push(`entry ${seq}: an output was not preserved: ${output.omitted}`);
+        if (output.preservation === 'omitted') {
+          reasons.push(`entry ${seq}: an output was not preserved: ${String(output.omitted)}`);
         } else if (output.complete === false) {
           const why =
             typeof output.stopReason === 'string' ? output.stopReason : 'its capture was cut short';
@@ -250,6 +334,7 @@ export const verifyEvidence = (logPath: string, expectedHash?: string): Verdict 
       entries = seq;
       finalHash = sha256(line);
     }
+
     if (expectedHash !== undefined && expectedHash !== finalHash) {
       corrupt(`the final hash is ${finalHash}, not the one expected, ${expectedHash}`);
     }
@@ -271,6 +356,8 @@ export const verifyEvidence = (logPath: string, expectedHash?: string): Verdict 
       };
     }
     return { ...verdict('corrupted'), reasons: [error.message] };
+  } finally {
+    lines?.close();
   }
 };
 

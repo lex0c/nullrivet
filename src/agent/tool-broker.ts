@@ -79,6 +79,8 @@ export interface EngagementWindow {
 // What an engagement's evidence log records of each call the broker handles. A call is dispatched
 // only once its start is written and synced; every refusal is recorded too, and every outcome.
 export interface CallRecorder {
+  // Why the log cannot be written, once it cannot: every call is then refused.
+  failed(): string | null;
   // An id unique in the session, which every entry of the call holds.
   nextCallId(): string;
   // Writes and syncs the start of a call about to be dispatched; false when it could not be, and
@@ -135,6 +137,16 @@ export const executeToolCall = async (
     }
     return result;
   };
+  // A session whose evidence log cannot be written runs nothing more, whatever the tool.
+  const unrecorded = recorder?.failed() ?? null;
+  if (unrecorded !== null) {
+    return refuse(
+      toolError(
+        'evidence.failed',
+        `${call.name} was not executed: the evidence log cannot be written: ${unrecorded}`,
+      ),
+    );
+  }
   const tool = context.tools.get(call.name);
   if (tool === undefined) {
     const available = [...context.tools.keys()].join(', ');

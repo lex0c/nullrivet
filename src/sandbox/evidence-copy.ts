@@ -58,7 +58,19 @@ export interface CopyContext {
   budget: { left: number };
 }
 
-class Refused extends Error {}
+// Why a part was not copied: the copies' limit, which the record tells; the source, which the
+// sandbox can alter or replace, told as not preserved; or the evidence directory itself, a write or
+// a sync that failed there, which fails the evidence log.
+type Cause = 'limit' | 'source' | 'evidence';
+
+class Refused extends Error {
+  constructor(
+    message: string,
+    readonly kind: Cause = 'source',
+  ) {
+    super(message);
+  }
+}
 
 const same = (a: Stats, b: Stats): boolean =>
   a.dev === b.dev && a.ino === b.ino && a.size === b.size;
@@ -79,14 +91,22 @@ const copyPart = async (
     throw new Refused(`${part} cannot be opened: ${errorMessage(error)}`);
   }
   let target: number | null = null;
+  let reserved = 0;
   try {
     const before = fstatSync(source);
     if (!before.isFile()) throw new Refused(`${part} is not a regular file`);
     if (before.size > context.partBytes) throw new Refused(`${part} is larger than a part`);
+    // Reserved before anything is awaited: copies under way at once must not share what is left.
     if (before.size > context.budget.left) {
-      throw new Refused(`the copies reached their limit of ${COPIES_LIMIT_BYTES} bytes`);
+      throw new Refused(`the copies reached their limit of ${COPIES_LIMIT_BYTES} bytes`, 'limit');
     }
-    target = context.store.createFile(copyName);
+    context.budget.left -= before.size;
+    reserved = before.size;
+    try {
+      target = context.store.createFile(copyName);
+    } catch (error) {
+      throw new Refused(`the copy of ${part} cannot be made: ${errorMessage(error)}`, 'evidence');
+    }
     const hash = createHash('sha256');
     const buffer = Buffer.alloc(CHUNK_BYTES);
     let bytes = 0;
@@ -98,8 +118,18 @@ const copyPart = async (
       if (got === 0) break;
       const chunk = buffer.subarray(0, got);
       for (let offset = 0; offset < got; ) {
-        const { bytesWritten } = await writeAsync(target, chunk, offset, got - offset);
-        if (bytesWritten <= 0) throw new Refused(`the copy of ${part} could not be written`);
+        let bytesWritten: number;
+        try {
+          ({ bytesWritten } = await writeAsync(target, chunk, offset, got - offset));
+        } catch (error) {
+          throw new Refused(
+            `the copy of ${part} cannot be written: ${errorMessage(error)}`,
+            'evidence',
+          );
+        }
+        if (bytesWritten <= 0) {
+          throw new Refused(`the copy of ${part} cannot be written: no bytes were`, 'evidence');
+        }
         offset += bytesWritten;
       }
       hash.update(chunk);
@@ -107,10 +137,17 @@ const copyPart = async (
       bytes += got;
     }
     if (!same(before, fstatSync(source))) throw new Refused(`${part} changed while it was copied`);
-    await fsyncAsync(target);
-    context.budget.left -= bytes;
+    try {
+      await fsyncAsync(target);
+    } catch (error) {
+      throw new Refused(`the copy of ${part} cannot be synced: ${errorMessage(error)}`, 'evidence');
+    }
+    // What the reservation held beyond what was copied goes back.
+    context.budget.left += reserved - bytes;
+    reserved = 0;
     return { bytes, sha256: hash.digest('hex') };
   } catch (error) {
+    context.budget.left += reserved;
     if (target !== null) {
       closeSync(target);
       target = null;
@@ -134,7 +171,13 @@ export const preserveOutput = async (
   owner: string,
   place: CopyPlace,
   context: CopyContext,
-): Promise<{ record: Record<string, unknown>; problem: string | null }> => {
+): Promise<{
+  record: Record<string, unknown>;
+  // A copy the sandbox's side kept from being made or made as saved, for the operator.
+  problem: string | null;
+  // The evidence directory's own failure, which fails the evidence log.
+  fatal: string | null;
+}> => {
   const base = {
     stream: output.stream,
     receivedBytes: output.receivedBytes,
@@ -150,7 +193,7 @@ export const preserveOutput = async (
   if (output.parts.length === 0) {
     // A call's output the result holds whole; or, saving having stopped, nothing to copy.
     return output.stopReason === undefined && output.stream !== 'log'
-      ? { record: { ...base, preservation: 'inline', complete: true }, problem: null }
+      ? { record: { ...base, preservation: 'inline', complete: true }, problem: null, fatal: null }
       : {
           record: {
             ...base,
@@ -160,6 +203,7 @@ export const preserveOutput = async (
             matchesSaved: null,
           },
           problem: null,
+          fatal: null,
         };
   }
   const whole = createHash('sha256');
@@ -169,12 +213,21 @@ export const preserveOutput = async (
       const name = `${owner}-${output.stream}.${index + 1}.txt`;
       copies.push({ name, ...(await copyPart(place, part, name, context, whole)) });
     }
-    context.store.syncCompanion();
+    try {
+      context.store.syncCompanion();
+    } catch (error) {
+      throw new Refused(
+        `the evidence directory cannot be synced: ${errorMessage(error)}`,
+        'evidence',
+      );
+    }
   } catch (error) {
     const why = errorMessage(error);
+    const cause: Cause = error instanceof Refused ? error.kind : 'evidence';
     return {
       record: { ...base, preservation: 'omitted', omitted: why, complete, matchesSaved: null },
-      problem: why.includes('limit') ? null : `an output could not be copied: ${why}`,
+      problem: cause === 'source' ? `an output could not be copied: ${why}` : null,
+      fatal: cause === 'evidence' ? why : null,
     };
   }
   const copiedBytes = copies.reduce((sum, copy) => sum + copy.bytes, 0);
@@ -197,5 +250,6 @@ export const preserveOutput = async (
       matchesSaved === false
         ? `a copy of ${owner}'s ${output.stream} is not what the worker saved: a command may have rewritten it before it was copied`
         : null,
+    fatal: null,
   };
 };
