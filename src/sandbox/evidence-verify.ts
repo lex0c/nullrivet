@@ -25,6 +25,9 @@ export interface Verdict {
   anchored: boolean;
 }
 
+// A part of an output is 10 MiB at most, the engagement file 4 MiB.
+const MAX_COPY_BYTES = 16 * 1024 * 1024;
+
 export const COPY_NAME =
   /^(?:c\d+|job-[A-Za-z0-9_-]{1,64})-(?:stdout|stderr|output|log)\.\d+\.txt$/;
 export const ENGAGEMENT_COPY = 'engagement.json';
@@ -67,9 +70,11 @@ const readCopy = (
     const buffer = Buffer.alloc(1024 * 1024);
     let bytes = 0;
     for (let read = readSync(fd, buffer); read > 0; read = readSync(fd, buffer)) {
+      bytes += read;
+      // No copy the host makes is longer: a part, or the engagement file.
+      if (bytes > MAX_COPY_BYTES) return `${name} is longer than a copy can be`;
       hash.update(buffer.subarray(0, read));
       into?.update(buffer.subarray(0, read));
-      bytes += read;
     }
     return { sha256: hash.digest('hex'), bytes };
   } finally {
@@ -94,20 +99,21 @@ const isCopy = (value: unknown): value is Copy => {
   );
 };
 
-// The outputs an entry records: a call's, or a job's log.
+// The outputs an entry records: a call's, or a job's log. Anything but an object where one is due
+// is a record the host does not write.
 const outputsOf = (entry: Entry): Record<string, unknown>[] => {
-  const outputs =
-    entry.type === 'tool.finished'
-      ? entry.outputs
-      : entry.type === 'job.finished'
-        ? [entry.log]
-        : [];
-  return Array.isArray(outputs)
-    ? outputs.filter(
-        (output): output is Record<string, unknown> =>
-          typeof output === 'object' && output !== null,
-      )
-    : [];
+  const isObject = (value: unknown): value is Record<string, unknown> =>
+    typeof value === 'object' && value !== null && !Array.isArray(value);
+  if (entry.type === 'job.finished') {
+    if (!isObject(entry.log))
+      corrupt(`entry ${entry.seq} records a job's log in a form the host does not write`);
+    return [entry.log as Record<string, unknown>];
+  }
+  if (entry.type !== 'tool.finished' || entry.outputs === undefined) return [];
+  if (!Array.isArray(entry.outputs) || !entry.outputs.every(isObject)) {
+    corrupt(`entry ${entry.seq} records its outputs in a form the host does not write`);
+  }
+  return entry.outputs as Record<string, unknown>[];
 };
 
 // The longest entry read: past it the log is taken as corrupted, not held in memory.
@@ -134,6 +140,11 @@ const readLines = (path: string): Iterable<Buffer> & { close(): void } => {
     for (let read = readSync(fd, chunk); read > 0; read = readSync(fd, chunk)) {
       let rest = chunk.subarray(0, read);
       for (let end = rest.indexOf(0x0a); end !== -1; end = rest.indexOf(0x0a)) {
+        // Checked before the line is put together: its end can come in the next chunk.
+        if (pendingBytes + end + 1 > MAX_ENTRY_BYTES) {
+          yield TOO_LONG;
+          return;
+        }
         yield Buffer.concat([...pending, rest.subarray(0, end + 1)]);
         pending = [];
         pendingBytes = 0;
@@ -160,6 +171,14 @@ const incoherence = (
   copied: { bytes: number; sha256: string } | null,
 ): string | null => {
   const { preservation, receivedBytes, savedBytes, savedSha256, stopReason } = output;
+  const isHash = (value: unknown): boolean => typeof value === 'string' && HASH.test(value);
+  const isCount = (value: unknown): boolean =>
+    Number.isSafeInteger(value) && (value as number) >= 0;
+  if (preservation === 'inline' || preservation === 'parts') {
+    if (!isCount(receivedBytes) || !isHash(output.receivedSha256)) {
+      return 'lacks what the capture received';
+    }
+  }
   switch (preservation) {
     case 'inline':
       if (copied !== null) return 'holds copies of an output it says the result holds whole';
@@ -174,15 +193,11 @@ const incoherence = (
       return null;
     case 'parts': {
       if (copied === null) return 'says an output was copied without its copies';
-      const matches =
-        typeof savedSha256 === 'string'
-          ? copied.bytes === savedBytes && copied.sha256 === savedSha256
-          : null;
+      if (!isCount(savedBytes) || !isHash(savedSha256)) return 'lacks what the worker saved';
+      const matches = copied.bytes === savedBytes && copied.sha256 === savedSha256;
       if (output.matchesSaved !== matches) return 'says of its copy what its hashes do not';
-      if (typeof receivedBytes === 'number' && typeof savedBytes === 'number') {
-        const complete = receivedBytes === savedBytes && stopReason === undefined;
-        if (output.complete !== complete) return 'says of its saving what its counts do not';
-      }
+      const complete = receivedBytes === savedBytes && stopReason === undefined;
+      if (output.complete !== complete) return 'says of its saving what its counts do not';
       return null;
     }
     default:

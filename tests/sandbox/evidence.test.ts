@@ -127,6 +127,26 @@ describe('the evidence log', () => {
     }
   });
 
+  test('waits too for a preservation that starts while it waits for another', async () => {
+    const fd = openSync(join(scratch(), 'session.jsonl'), 'wx', 0o600);
+    const log = new EvidenceLog({ fd, onFailure: () => undefined });
+    let later = false;
+    void log.track(new Promise((resolve) => setTimeout(resolve, 100)));
+    setTimeout(() => {
+      void log.track(
+        new Promise<void>((resolve) =>
+          setTimeout(() => {
+            later = true;
+            resolve();
+          }, 200),
+        ),
+      );
+    }, 50);
+    expect(await log.drain(2_000)).toBe(0);
+    expect(later).toBe(true);
+    closeSync(fd);
+  });
+
   test('waits for the preservations under way, as long as it is given', async () => {
     const fd = openSync(join(scratch(), 'session.jsonl'), 'wx', 0o600);
     const log = new EvidenceLog({ fd, onFailure: () => undefined });
@@ -235,6 +255,7 @@ describe('the verification of an evidence log', () => {
             stream: 'stdout',
             preservation: 'parts',
             receivedBytes: 10,
+            receivedSha256: sha256('the output'),
             savedBytes: 10,
             savedSha256: sha256('the output'),
             copies: [output],
@@ -362,6 +383,7 @@ describe('the verification of an evidence log', () => {
             {
               preservation: 'parts',
               receivedBytes: 5,
+              receivedSha256: sha256('saved'),
               savedBytes: 5,
               savedSha256: sha256('saved'),
               copies: [saved],
@@ -391,11 +413,62 @@ describe('the verification of an evidence log', () => {
     expect(claims({ preservation: 'inline' }).reasons).toEqual([
       "entry 3: an output's record holds copies of an output it says the result holds whole",
     ]);
+    expect(claims({ savedSha256: undefined }).reasons).toEqual([
+      "entry 3: an output's record lacks what the worker saved",
+    ]);
+  });
+
+  test('takes outputs in a form the host does not write as corrupted, not as nothing to check', () => {
+    for (const [entry, reason] of [
+      [
+        { type: 'tool.finished', callId: 'c1', outputs: [42] },
+        'entry 3 records its outputs in a form the host does not write',
+      ],
+      [
+        { type: 'tool.finished', callId: 'c1', outputs: {} },
+        'entry 3 records its outputs in a form the host does not write',
+      ],
+    ] as [EvidenceEntry, string][]) {
+      const { path } = session([{ type: 'tool.started', callId: 'c1' }, entry]);
+      expect(verifyEvidence(path).reasons).toEqual([reason]);
+    }
+    const job = session([
+      { type: 'tool.started', callId: 'c1' },
+      { type: 'job.started', jobId: 'j1', callId: 'c1' },
+      { type: 'job.finished', jobId: 'j1', log: null },
+    ]);
+    expect(verifyEvidence(job.path).reasons).toEqual([
+      "entry 4 records a job's log in a form the host does not write",
+    ]);
+  });
+
+  test('reads no copy longer than a copy can be', () => {
+    const big = 'x'.repeat(16 * 1024 * 1024 + 1);
+    const built = session([
+      { type: 'tool.started', callId: 'c1' },
+      {
+        type: 'tool.finished',
+        callId: 'c1',
+        outputs: [
+          { copies: [{ name: 'c1-stdout.1.txt', bytes: big.length, sha256: sha256(big) }] },
+        ],
+      },
+    ]);
+    writeFileSync(join(built.companion, 'c1-stdout.1.txt'), big);
+    expect(verifyEvidence(built.path).reasons).toEqual([
+      'entry 3: c1-stdout.1.txt is longer than a copy can be',
+    ]);
   });
 
   test('takes an entry longer than its limit as corrupted, without holding it', () => {
     const { path } = session([]);
-    writeFileSync(path, `${readFileSync(path, 'utf8')}${'x'.repeat(MAX_ENTRY_BYTES + 1)}`);
+    const head = readFileSync(path, 'utf8');
+    writeFileSync(path, `${head}${'x'.repeat(MAX_ENTRY_BYTES + 1)}`);
+    expect(verifyEvidence(path).reasons).toEqual([
+      `entry 2 is longer than ${MAX_ENTRY_BYTES} bytes`,
+    ]);
+    // Under the limit at the end of a chunk, its line feed in the next one: still longer than it.
+    writeFileSync(path, `${head}${'x'.repeat(MAX_ENTRY_BYTES + 9)}\n`);
     expect(verifyEvidence(path).reasons).toEqual([
       `entry 2 is longer than ${MAX_ENTRY_BYTES} bytes`,
     ]);
@@ -446,6 +519,7 @@ describe('the verification of an evidence log', () => {
           {
             preservation: 'parts',
             receivedBytes: 5,
+            receivedSha256: sha256('saved'),
             savedBytes: 5,
             savedSha256: sha256('saved'),
             copies: [part('c1-stdout.1.txt', 'other')],
@@ -459,6 +533,7 @@ describe('the verification of an evidence log', () => {
           {
             preservation: 'parts',
             receivedBytes: 10,
+            receivedSha256: sha256('received'),
             savedBytes: 4,
             savedSha256: sha256('part'),
             stopReason: 'the 64MB limit per output was reached',

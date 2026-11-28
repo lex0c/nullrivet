@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import {
+  appendFileSync,
   chmodSync,
   closeSync,
   constants,
@@ -106,6 +107,33 @@ describe.if(linux)('the end of a session that never started', () => {
   });
 });
 
+describe.if(linux)('the end of a session', () => {
+  test('waits for a copy that started after an earlier wait, before its end', async () => {
+    const store = open(join(scratch(), 'evidence'));
+    if ('error' in store) throw new Error(store.error);
+    stores.splice(stores.indexOf(store), 1);
+    const recorder = new EvidenceRecorder(store);
+    recorder.sessionStarted({});
+    recorder.toolStarted('c1', {});
+    await recorder.drain();
+    // A result that comes in after the first wait starts a copy, whose outcome goes in first.
+    void recorder.track(
+      new Promise<void>((resolve) =>
+        setTimeout(() => {
+          recorder.toolFinished('c1', {});
+          resolve();
+        }, 100),
+      ),
+    );
+    await recorder.close();
+    const types = readFileSync(store.path, 'utf8')
+      .split('\n')
+      .filter((line) => line !== '')
+      .map((line) => (JSON.parse(line) as { type: string }).type);
+    expect(types).toEqual(['session.started', 'tool.started', 'tool.finished', 'session.ended']);
+  });
+});
+
 describe.if(linux)("the record of the proxy's decisions", () => {
   test('keeps twenty refusals a second one by one, and counts the rest, written at the end too', async () => {
     const base = scratch();
@@ -165,6 +193,33 @@ describe.if(linux)('the copies of outputs', () => {
     expect(kinds).toEqual(['omitted', 'parts']);
     expect(context.budget.left).toBe(2 * 1024);
     expect([first.fatal, second.fatal]).toEqual([null, null]);
+    closeSync(fd);
+  });
+
+  test('refuse a part that grows while it is copied, and keep only what was reserved', async () => {
+    const { root, fd } = sandboxRoot({ '1-bash-stdout.001.txt': 'x'.repeat(1024) });
+    const store = open(join(scratch(), 'evidence'));
+    if ('error' in store) throw new Error(store.error);
+    const part = join(root, 'tmp', 'nullrivet-AbCdEf', '1-bash-stdout.001.txt');
+    // The part grows past its size as soon as its copy is made: the sandbox's own doing.
+    const growing = {
+      ...store,
+      createFile: (name: string) => {
+        appendFileSync(part, 'y'.repeat(8 * 1024 * 1024));
+        return store.createFile(name);
+      },
+    };
+    const budget = { left: 4 * 1024 };
+    const { record, fatal } = await preserveOutput(
+      reported('1-bash-stdout.001.txt', 'x'.repeat(1024)),
+      'c1',
+      { kind: 'calls', rootFd: fd },
+      { store: growing, partBytes: 10 * 1024 * 1024, budget },
+    );
+    expect(record).toMatchObject({ preservation: 'omitted' });
+    expect(String(record.omitted)).toContain('grew while it was copied');
+    expect(fatal).toBeNull();
+    expect(budget.left).toBe(4 * 1024);
     closeSync(fd);
   });
 

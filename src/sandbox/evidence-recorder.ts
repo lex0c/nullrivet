@@ -67,7 +67,6 @@ export class EvidenceRecorder {
   // Whether the session's start was written: an end alone would make a log that never started
   // read as corrupted.
   private began = false;
-  private drained: Promise<number> | null = null;
 
   constructor(
     readonly store: EvidenceStore,
@@ -189,20 +188,10 @@ export class EvidenceRecorder {
     return this.store.log.track(work);
   }
 
-  // Waits, once, for the copies under way, as long as the end of a session gives them, and records
-  // those that did not end.
+  // Waits for the copies under way, those that start meanwhile included, as long as the end of a
+  // session gives them; says how many did not end. Each call waits for what is pending then.
   drain(): Promise<number> {
-    this.drained ??= this.store.log.drain(DRAIN_MS).then((unfinished) => {
-      if (unfinished > 0) {
-        this.store.log.append({
-          type: 'preservation.incomplete',
-          count: unfinished,
-          reason: `copies still under way ${DRAIN_MS / 1000} s after the session ended`,
-        });
-      }
-      return unfinished;
-    });
-    return this.drained;
+    return this.store.log.drain(DRAIN_MS);
   }
 
   // Resolves once no copy is under way.
@@ -217,7 +206,15 @@ export class EvidenceRecorder {
   close(fields: Record<string, unknown> = {}): Promise<EvidenceSummary> {
     this.closed ??= (async () => {
       clearInterval(this.flusher);
-      await this.drain();
+      // Again: a result that came in since the last wait can have started a copy.
+      const unfinished = await this.drain();
+      if (unfinished > 0) {
+        this.store.log.append({
+          type: 'preservation.incomplete',
+          count: unfinished,
+          reason: `copies still under way ${DRAIN_MS / 1000} s after the session ended`,
+        });
+      }
       this.flushRefusals();
       if (this.began) {
         this.store.log.appendCritical({

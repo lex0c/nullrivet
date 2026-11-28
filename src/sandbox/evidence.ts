@@ -88,17 +88,20 @@ export class EvidenceLog {
     return work;
   }
 
-  // Waits up to `ms` for the preservations under way; says how many did not end in that time.
+  // Waits up to `ms` for the preservations under way, those that start meanwhile included; says
+  // how many did not end in that time.
   async drain(ms: number): Promise<number> {
-    if (this.pending.size === 0) return 0;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([
-      Promise.all(this.pending),
-      new Promise((resolve) => {
-        timer = setTimeout(resolve, ms);
-      }),
-    ]);
-    clearTimeout(timer);
+    const deadline = Date.now() + ms;
+    while (this.pending.size > 0 && Date.now() < deadline) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        Promise.all(this.pending),
+        new Promise((resolve) => {
+          timer = setTimeout(resolve, deadline - Date.now());
+        }),
+      ]);
+      clearTimeout(timer);
+    }
     return this.pending.size;
   }
 

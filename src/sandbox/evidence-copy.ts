@@ -110,10 +110,11 @@ const copyPart = async (
     const hash = createHash('sha256');
     const buffer = Buffer.alloc(CHUNK_BYTES);
     let bytes = 0;
-    // One byte more than a part may hold: a part that grew past it is refused, not cut.
+    // One byte more than was reserved: a part that grew while it was copied is refused, not cut,
+    // and the copies never take more than their limit holds.
     for (;;) {
-      const room = Math.min(CHUNK_BYTES, context.partBytes + 1 - bytes);
-      if (room <= 0) throw new Refused(`${part} grew larger than a part`);
+      const room = Math.min(CHUNK_BYTES, before.size + 1 - bytes);
+      if (room <= 0) throw new Refused(`${part} grew while it was copied`);
       const { bytesRead: got } = await readAsync(source, buffer, 0, room, null);
       if (got === 0) break;
       const chunk = buffer.subarray(0, got);
@@ -136,7 +137,9 @@ const copyPart = async (
       whole.update(chunk);
       bytes += got;
     }
-    if (!same(before, fstatSync(source))) throw new Refused(`${part} changed while it was copied`);
+    if (bytes !== before.size || !same(before, fstatSync(source))) {
+      throw new Refused(`${part} changed while it was copied`);
+    }
     try {
       await fsyncAsync(target);
     } catch (error) {

@@ -1104,8 +1104,9 @@ process (`/proc/<pid>/root`, that process checked by its start to be the sandbox
   link at all, without blocking, as a regular file no larger than a part, read no further than that
   plus a byte, in chunks without blocking the session. Checked: a link at the end of the path, or in
   a directory of it, and `..`, were refused;
-- it must still be the same file, of the same size, once copied, and the copy and the directory
-  are synced before the entry that names the copy is written;
+- it is read no further than the size it had when the copy began, a byte past it refusing the copy,
+  and it must still be the same file, of that size, once copied, and the copy and the directory are
+  synced before the entry that names the copy is written;
 - the record gives `receivedBytes`, `savedBytes`, `copiedBytes` and their SHA-256, whether all
   that came was saved (`complete`), and whether the copy is what the worker saved
   (`matchesSaved`), a truncated output included; null only when nothing was copied.
@@ -1114,13 +1115,14 @@ A command can rewrite or replace a part before it is copied: the copy is then re
 the worker saved, which the record says and the operator is told, never taken as preserved. A part
 the copies' limit leaves out is recorded as not preserved; one the evidence directory cannot take, a
 write or a sync failing there, fails the evidence log. The limit is reserved before a copy starts,
-so that copies under way at once do not pass it together. Tested: a job that replaced each part with
-a link left the output recorded as not preserved. The copies of a session take 2 GiB at most; past
-them an output is recorded as not preserved. At the end of the session, while the sandbox still
-runs, the jobs are stopped, so that their end and their log are recorded, and the copies under way
-are waited for, ten seconds at most; those that did not end are recorded. The final hash is shown
-once the session is closed, on the standard error of an interactive one, whose terminal is restored
-by then.
+so that copies under way at once do not pass it together, and a part that grows while it is copied
+is refused, not counted past it. Tested: a job that replaced each part with a link left the output
+recorded as not preserved. The copies of a session take 2 GiB at most; past them an output is
+recorded as not preserved. At the end of the session, while the sandbox still runs, the jobs are
+stopped, so that their end and their log are recorded, and the copies under way are waited for,
+those that start meanwhile included, ten seconds at most, and again right before the end is written;
+those that did not end are recorded. The final hash is shown once the session is closed, on the
+standard error of an interactive one, whose terminal is restored by then.
 
 **Credentials.** In the arguments, the values of the secrets the host holds go by exact match, of
 eight characters or more: the providers' keys, the proxy's credential, and the password of the
@@ -1141,19 +1143,20 @@ run, and the operator is told, with the hash of the last line written. A session
 log does not go on unrecorded.
 
 **Checking it.** `nullrivet --verify-evidence <file> [--expected-hash <sha256>]` reads the log a
-line at a time, an entry past 64 MiB taken as corrupted rather than held, works out the chain and
-the sequence again, checks the transitions (an outcome without a start, an id used twice, a job
-ended twice, an entry after the end, a job of an unknown call), the copy of the engagement file,
-each output's record worked out again from what it says it copied (whether the copy is what the
-worker saved, whether all that came was saved, which form of preservation it has), and each copy
-named, looked for only in the directory beside the log, by a name of the form the host gives, never
-through a link. It exits 0 when the session is complete; 1 when it is corrupted, or its final hash
-is not the one expected, naming the first entry that is; and 4 when it is consistent but incomplete,
-with a line cut short, no end, operations without an outcome, or outputs not saved or preserved
-whole, 4 when it is consistent but incomplete, apart from the CLI's other codes, so that a script
-tells it from a mistyped option. Without `--expected-hash`, it says that only the consistency was
-checked. Tested: with the host killed during a command, the log keeps the call, which the verifier
-reports without an outcome.
+line at a time, an entry past 64 MiB taken as corrupted rather than held, its line feed in the next
+chunk or not, works out the chain and the sequence again, checks the transitions (an outcome without
+a start, an id used twice, a job ended twice, an entry after the end, a job of an unknown call), the
+copy of the engagement file, each output's record checked to be of the form the host writes, every
+field it must hold present, and worked out again from what it says it copied (whether the copy is
+what the worker saved, whether all that came was saved, which form of preservation it has), and each
+copy named, read no further than a copy can be long, looked for only in the directory beside the
+log, by a name of the form the host gives, never through a link. It exits 0 when the session is
+complete; 1 when it is corrupted, or its final hash is not the one expected, naming the first entry
+that is; and 4 when it is consistent but incomplete, with a line cut short, no end, operations
+without an outcome, or outputs not saved or preserved whole, 4 when it is consistent but incomplete,
+apart from the CLI's other codes, so that a script tells it from a mistyped option. Without
+`--expected-hash`, it says that only the consistency was checked. Tested: with the host killed
+during a command, the log keeps the call, which the verifier reports without an outcome.
 
 Individual packets are not recorded: the log shows what the sandbox could reach, what the proxy
 decided, and what the commands did.
